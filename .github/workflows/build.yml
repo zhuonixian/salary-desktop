@@ -6,6 +6,9 @@ on:
       - 'v*'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -39,7 +42,6 @@ jobs:
           releaseDraft: true
           prerelease: false
 
-  # 可选：同时构建 Linux 版
   build-linux:
     runs-on: ubuntu-latest
     steps:
