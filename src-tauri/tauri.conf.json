@@ -1,6 +1,6 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "工资核算助手",
+  "productName": "salary-desktop",
   "version": "0.1.0",
   "identifier": "com.salary.desktop",
   "build": {
