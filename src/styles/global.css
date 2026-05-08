@@ -1,0 +1,230 @@
+/* ==================== 全局样式 ==================== */
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+}
+
+/* ==================== 布局 ==================== */
+
+.app-layout {
+  min-height: 100vh;
+}
+
+.app-sider {
+  overflow: auto;
+  height: 100vh;
+  position: fixed;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 10;
+}
+
+.app-sider .logo {
+  height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 2px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.app-sider .logo.collapsed {
+  font-size: 14px;
+  letter-spacing: 0;
+}
+
+.app-content-wrapper {
+  margin-left: 220px;
+  transition: margin-left 0.2s;
+}
+
+.app-content-wrapper.collapsed {
+  margin-left: 80px;
+}
+
+.app-header {
+  background: #fff;
+  padding: 0 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+  position: sticky;
+  top: 0;
+  z-index: 9;
+  height: 64px;
+}
+
+.app-header-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.app-header-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.app-main {
+  margin: 24px;
+  min-height: calc(100vh - 64px - 48px);
+}
+
+.trigger-btn {
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 8px;
+}
+
+/* ==================== 页面通用 ==================== */
+
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.page-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.page-title {
+  font-size: 20px;
+  font-weight: 600;
+  color: #1f1f1f;
+}
+
+/* ==================== 统计卡片 ==================== */
+
+.stat-card {
+  border-radius: 8px;
+}
+
+.stat-card .ant-statistic-title {
+  font-size: 14px;
+  color: #8c8c8c;
+}
+
+.stat-card .ant-statistic-content {
+  font-size: 24px;
+  font-weight: 600;
+}
+
+/* ==================== 表格 ==================== */
+
+.ant-table-wrapper {
+  border-radius: 8px;
+}
+
+/* ==================== 导出卡片 ==================== */
+
+.export-card {
+  border-radius: 8px;
+  transition: box-shadow 0.3s;
+  height: 100%;
+}
+
+.export-card:hover {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+}
+
+.export-card-icon {
+  font-size: 36px;
+  color: #1677ff;
+  margin-bottom: 12px;
+}
+
+.export-card-title {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.export-card-desc {
+  font-size: 13px;
+  color: #8c8c8c;
+  margin-bottom: 16px;
+  line-height: 1.5;
+}
+
+/* ==================== OCR 上传 ==================== */
+
+.ocr-upload-area {
+  border: 2px dashed #d9d9d9;
+  border-radius: 8px;
+  padding: 40px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.3s;
+  background: #fafafa;
+}
+
+.ocr-upload-area:hover {
+  border-color: #1677ff;
+}
+
+.ocr-upload-icon {
+  font-size: 48px;
+  color: #1677ff;
+  margin-bottom: 12px;
+}
+
+.ocr-preview-img {
+  max-width: 100%;
+  max-height: 300px;
+  border-radius: 8px;
+  border: 1px solid #f0f0f0;
+}
+
+/* ==================== 异常标记 ==================== */
+
+.row-abnormal {
+  background-color: #fff2f0;
+}
+
+.row-abnormal:hover > td {
+  background-color: #ffedeb !important;
+}
+
+/* ==================== 工具类 ==================== */
+
+.text-right {
+  text-align: right;
+}
+
+.mb-16 {
+  margin-bottom: 16px;
+}
+
+.mb-24 {
+  margin-bottom: 24px;
+}
+
+.mt-16 {
+  margin-top: 16px;
+}
+
+.gap-16 {
+  gap: 16px;
+}

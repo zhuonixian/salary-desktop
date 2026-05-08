@@ -1,0 +1,871 @@
+use std::path::PathBuf;
+use std::sync::Mutex;
+
+use chrono::Utc;
+use rusqlite::{params, Connection};
+
+use crate::errors::{AppError, AppResult};
+use crate::models::*;
+
+#[allow(dead_code)]
+pub type DbState = Mutex<Connection>;
+
+pub fn init_db(app_data_dir: &str) -> AppResult<Connection> {
+    let mut db_path = PathBuf::from(app_data_dir);
+    db_path.push("salary.db");
+
+    let conn = Connection::open(&db_path)?;
+
+    conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+    conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+
+    create_tables(&conn)?;
+    insert_default_data(&conn)?;
+
+    Ok(conn)
+}
+
+fn create_tables(conn: &Connection) -> AppResult<()> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS employees (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            employee_no TEXT UNIQUE NOT NULL,
+            name TEXT NOT NULL,
+            department TEXT,
+            position TEXT,
+            id_card TEXT,
+            phone TEXT,
+            bank_account TEXT,
+            bank_name TEXT,
+            hire_date TEXT,
+            status TEXT DEFAULT 'active',
+            base_salary REAL DEFAULT 0,
+            position_salary REAL DEFAULT 0,
+            performance_salary REAL DEFAULT 0,
+            social_security_base REAL DEFAULT 0,
+            housing_fund_base REAL DEFAULT 0,
+            special_deduction REAL DEFAULT 0,
+            remark TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS attendance_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            salary_month TEXT NOT NULL,
+            employee_no TEXT NOT NULL,
+            name TEXT,
+            expected_days REAL DEFAULT 0,
+            actual_days REAL DEFAULT 0,
+            late_count INTEGER DEFAULT 0,
+            early_leave_count INTEGER DEFAULT 0,
+            personal_leave_days REAL DEFAULT 0,
+            sick_leave_days REAL DEFAULT 0,
+            absent_days REAL DEFAULT 0,
+            overtime_hours REAL DEFAULT 0,
+            source_type TEXT,
+            ocr_batch_id INTEGER,
+            remark TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS salary_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rule_key TEXT UNIQUE NOT NULL,
+            rule_name TEXT NOT NULL,
+            rule_value REAL DEFAULT 0,
+            rule_type TEXT,
+            enabled INTEGER DEFAULT 1,
+            remark TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS tax_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            min_amount REAL NOT NULL,
+            max_amount REAL,
+            tax_rate REAL NOT NULL,
+            quick_deduction REAL NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS salary_monthly_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            salary_month TEXT NOT NULL,
+            employee_no TEXT NOT NULL,
+            name TEXT,
+            department TEXT,
+            base_salary REAL DEFAULT 0,
+            position_salary REAL DEFAULT 0,
+            performance_salary REAL DEFAULT 0,
+            overtime_salary REAL DEFAULT 0,
+            meal_allowance REAL DEFAULT 0,
+            transport_allowance REAL DEFAULT 0,
+            other_allowance REAL DEFAULT 0,
+            gross_salary REAL DEFAULT 0,
+            social_security_personal REAL DEFAULT 0,
+            housing_fund_personal REAL DEFAULT 0,
+            attendance_deduction REAL DEFAULT 0,
+            tax_amount REAL DEFAULT 0,
+            other_deduction REAL DEFAULT 0,
+            net_salary REAL DEFAULT 0,
+            status TEXT DEFAULT 'draft',
+            locked INTEGER DEFAULT 0,
+            remark TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS ocr_batches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_name TEXT,
+            salary_month TEXT,
+            image_path TEXT,
+            raw_text TEXT,
+            parsed_json TEXT,
+            status TEXT DEFAULT 'pending',
+            created_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS operation_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            operation_type TEXT NOT NULL,
+            description TEXT,
+            operator TEXT,
+            detail TEXT,
+            created_at TEXT
+        );
+        ",
+    )?;
+
+    Ok(())
+}
+
+fn insert_default_data(conn: &Connection) -> AppResult<()> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM salary_rules",
+        [],
+        |row| row.get(0),
+    )?;
+
+    if count == 0 {
+        let default_rules = vec![
+            ("late_penalty", "迟到扣款（每次）", 20.0, "attendance"),
+            ("early_leave_penalty", "早退扣款（每次）", 20.0, "attendance"),
+            ("personal_leave_rate", "事假扣款倍率", 1.0, "attendance"),
+            ("sick_leave_rate", "病假扣款倍率", 0.5, "attendance"),
+            ("absent_rate", "旷工扣款倍率", 2.0, "attendance"),
+            ("overtime_rate", "加班工资倍率", 1.5, "attendance"),
+            ("social_security_rate", "社保个人比例", 0.105, "insurance"),
+            ("housing_fund_rate", "公积金个人比例", 0.12, "insurance"),
+            ("tax_threshold", "个税起征点", 5000.0, "tax"),
+            ("meal_allowance", "餐补（每月）", 0.0, "allowance"),
+            ("transport_allowance", "交通补助（每月）", 0.0, "allowance"),
+        ];
+
+        for (key, name, value, rule_type) in &default_rules {
+            conn.execute(
+                "INSERT INTO salary_rules (rule_key, rule_name, rule_value, rule_type) VALUES (?1, ?2, ?3, ?4)",
+                params![key, name, value, rule_type],
+            )?;
+        }
+    }
+
+    let tax_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM tax_rules",
+        [],
+        |row| row.get(0),
+    )?;
+
+    if tax_count == 0 {
+        let default_tax = vec![
+            (0.0, 3000.0, 0.03, 0.0),
+            (3000.0, 12000.0, 0.10, 210.0),
+            (12000.0, 25000.0, 0.20, 1410.0),
+            (25000.0, 35000.0, 0.25, 2660.0),
+            (35000.0, 55000.0, 0.30, 4410.0),
+            (55000.0, 80000.0, 0.35, 7160.0),
+            (80000.0, 999999999.0, 0.45, 15160.0),
+        ];
+
+        for (min, max, rate, deduction) in &default_tax {
+            conn.execute(
+                "INSERT INTO tax_rules (min_amount, max_amount, tax_rate, quick_deduction) VALUES (?1, ?2, ?3, ?4)",
+                params![min, max, rate, deduction],
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+// ==================== Employee CRUD ====================
+
+pub fn get_employees(conn: &Connection) -> AppResult<Vec<Employee>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, employee_no, name, department, position, id_card, phone, bank_account, bank_name, hire_date, status, base_salary, position_salary, performance_salary, social_security_base, housing_fund_base, special_deduction, remark, created_at, updated_at FROM employees ORDER BY id"
+    )?;
+
+    let employees = stmt.query_map([], |row| {
+        Ok(Employee {
+            id: row.get(0)?,
+            employee_no: row.get(1)?,
+            name: row.get(2)?,
+            department: row.get(3)?,
+            position: row.get(4)?,
+            id_card: row.get(5)?,
+            phone: row.get(6)?,
+            bank_account: row.get(7)?,
+            bank_name: row.get(8)?,
+            hire_date: row.get(9)?,
+            status: row.get(10)?,
+            base_salary: row.get(11)?,
+            position_salary: row.get(12)?,
+            performance_salary: row.get(13)?,
+            social_security_base: row.get(14)?,
+            housing_fund_base: row.get(15)?,
+            special_deduction: row.get(16)?,
+            remark: row.get(17)?,
+            created_at: row.get(18)?,
+            updated_at: row.get(19)?,
+        })
+    })?;
+
+    employees.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
+pub fn get_employee(conn: &Connection, id: i64) -> AppResult<Employee> {
+    conn.query_row(
+        "SELECT id, employee_no, name, department, position, id_card, phone, bank_account, bank_name, hire_date, status, base_salary, position_salary, performance_salary, social_security_base, housing_fund_base, special_deduction, remark, created_at, updated_at FROM employees WHERE id = ?1",
+        params![id],
+        |row| {
+            Ok(Employee {
+                id: row.get(0)?,
+                employee_no: row.get(1)?,
+                name: row.get(2)?,
+                department: row.get(3)?,
+                position: row.get(4)?,
+                id_card: row.get(5)?,
+                phone: row.get(6)?,
+                bank_account: row.get(7)?,
+                bank_name: row.get(8)?,
+                hire_date: row.get(9)?,
+                status: row.get(10)?,
+                base_salary: row.get(11)?,
+                position_salary: row.get(12)?,
+                performance_salary: row.get(13)?,
+                social_security_base: row.get(14)?,
+                housing_fund_base: row.get(15)?,
+                special_deduction: row.get(16)?,
+                remark: row.get(17)?,
+                created_at: row.get(18)?,
+                updated_at: row.get(19)?,
+            })
+        },
+    ).map_err(|e| AppError::NotFound(format!("员工ID={id}未找到: {e}")))
+}
+
+pub fn create_employee(conn: &Connection, data: &EmployeeInput) -> AppResult<Employee> {
+    let now = Utc::now().to_rfc3339();
+    let status = data.status.clone().unwrap_or_else(|| "active".to_string());
+    let base_salary = data.base_salary.unwrap_or(0.0);
+    let position_salary = data.position_salary.unwrap_or(0.0);
+    let performance_salary = data.performance_salary.unwrap_or(0.0);
+    let social_security_base = data.social_security_base.unwrap_or(0.0);
+    let housing_fund_base = data.housing_fund_base.unwrap_or(0.0);
+    let special_deduction = data.special_deduction.unwrap_or(0.0);
+
+    conn.execute(
+        "INSERT INTO employees (employee_no, name, department, position, id_card, phone, bank_account, bank_name, hire_date, status, base_salary, position_salary, performance_salary, social_security_base, housing_fund_base, special_deduction, remark, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+        params![
+            data.employee_no, data.name, data.department, data.position,
+            data.id_card, data.phone, data.bank_account, data.bank_name,
+            data.hire_date, status, base_salary, position_salary,
+            performance_salary, social_security_base, housing_fund_base,
+            special_deduction, data.remark, now, now
+        ],
+    )?;
+
+    let id = conn.last_insert_rowid();
+    get_employee(conn, id)
+}
+
+pub fn update_employee(conn: &Connection, id: i64, data: &EmployeeInput) -> AppResult<bool> {
+    let now = Utc::now().to_rfc3339();
+    // First get existing employee to merge updates
+    let existing = get_employee(conn, id)?;
+
+    let status = data.status.clone().unwrap_or(existing.status);
+    let base_salary = data.base_salary.unwrap_or(existing.base_salary);
+    let position_salary = data.position_salary.unwrap_or(existing.position_salary);
+    let performance_salary = data.performance_salary.unwrap_or(existing.performance_salary);
+    let social_security_base = data.social_security_base.unwrap_or(existing.social_security_base);
+    let housing_fund_base = data.housing_fund_base.unwrap_or(existing.housing_fund_base);
+    let special_deduction = data.special_deduction.unwrap_or(existing.special_deduction);
+
+    let updated = conn.execute(
+        "UPDATE employees SET employee_no=?1, name=?2, department=?3, position=?4, id_card=?5, phone=?6, bank_account=?7, bank_name=?8, hire_date=?9, status=?10, base_salary=?11, position_salary=?12, performance_salary=?13, social_security_base=?14, housing_fund_base=?15, special_deduction=?16, remark=?17, updated_at=?18 WHERE id=?19",
+        params![
+            data.employee_no, data.name, data.department, data.position,
+            data.id_card, data.phone, data.bank_account, data.bank_name,
+            data.hire_date, status, base_salary, position_salary,
+            performance_salary, social_security_base, housing_fund_base,
+            special_deduction, data.remark, now, id
+        ],
+    )?;
+
+    Ok(updated > 0)
+}
+
+pub fn delete_employee(conn: &Connection, id: i64) -> AppResult<bool> {
+    let deleted = conn.execute("DELETE FROM employees WHERE id=?1", params![id])?;
+    Ok(deleted > 0)
+}
+
+pub fn search_employees(conn: &Connection, keyword: &str) -> AppResult<Vec<Employee>> {
+    let pattern = format!("%{keyword}%");
+    let mut stmt = conn.prepare(
+        "SELECT id, employee_no, name, department, position, id_card, phone, bank_account, bank_name, hire_date, status, base_salary, position_salary, performance_salary, social_security_base, housing_fund_base, special_deduction, remark, created_at, updated_at FROM employees WHERE name LIKE ?1 OR employee_no LIKE ?1 OR department LIKE ?1 OR phone LIKE ?1 ORDER BY id"
+    )?;
+
+    let employees = stmt.query_map(params![pattern], |row| {
+        Ok(Employee {
+            id: row.get(0)?,
+            employee_no: row.get(1)?,
+            name: row.get(2)?,
+            department: row.get(3)?,
+            position: row.get(4)?,
+            id_card: row.get(5)?,
+            phone: row.get(6)?,
+            bank_account: row.get(7)?,
+            bank_name: row.get(8)?,
+            hire_date: row.get(9)?,
+            status: row.get(10)?,
+            base_salary: row.get(11)?,
+            position_salary: row.get(12)?,
+            performance_salary: row.get(13)?,
+            social_security_base: row.get(14)?,
+            housing_fund_base: row.get(15)?,
+            special_deduction: row.get(16)?,
+            remark: row.get(17)?,
+            created_at: row.get(18)?,
+            updated_at: row.get(19)?,
+        })
+    })?;
+
+    employees.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
+// ==================== Attendance CRUD ====================
+
+pub fn get_attendance_records(conn: &Connection, month: &str) -> AppResult<Vec<AttendanceRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, salary_month, employee_no, name, expected_days, actual_days, late_count, early_leave_count, personal_leave_days, sick_leave_days, absent_days, overtime_hours, source_type, ocr_batch_id, remark, created_at, updated_at FROM attendance_records WHERE salary_month = ?1 ORDER BY id"
+    )?;
+
+    let records = stmt.query_map(params![month], |row| {
+        Ok(AttendanceRecord {
+            id: row.get(0)?,
+            salary_month: row.get(1)?,
+            employee_no: row.get(2)?,
+            name: row.get(3)?,
+            expected_days: row.get(4)?,
+            actual_days: row.get(5)?,
+            late_count: row.get(6)?,
+            early_leave_count: row.get(7)?,
+            personal_leave_days: row.get(8)?,
+            sick_leave_days: row.get(9)?,
+            absent_days: row.get(10)?,
+            overtime_hours: row.get(11)?,
+            source_type: row.get(12)?,
+            ocr_batch_id: row.get(13)?,
+            remark: row.get(14)?,
+            created_at: row.get(15)?,
+            updated_at: row.get(16)?,
+        })
+    })?;
+
+    records.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
+pub fn upsert_attendance_record(conn: &Connection, data: &AttendanceRecordInput) -> AppResult<bool> {
+    let now = Utc::now().to_rfc3339();
+    let expected_days = data.expected_days.unwrap_or(0.0);
+    let actual_days = data.actual_days.unwrap_or(0.0);
+    let late_count = data.late_count.unwrap_or(0);
+    let early_leave_count = data.early_leave_count.unwrap_or(0);
+    let personal_leave_days = data.personal_leave_days.unwrap_or(0.0);
+    let sick_leave_days = data.sick_leave_days.unwrap_or(0.0);
+    let absent_days = data.absent_days.unwrap_or(0.0);
+    let overtime_hours = data.overtime_hours.unwrap_or(0.0);
+
+    if let Some(id) = data.id {
+        conn.execute(
+            "UPDATE attendance_records SET salary_month=?1, employee_no=?2, name=?3, expected_days=?4, actual_days=?5, late_count=?6, early_leave_count=?7, personal_leave_days=?8, sick_leave_days=?9, absent_days=?10, overtime_hours=?11, source_type=?12, ocr_batch_id=?13, remark=?14, updated_at=?15 WHERE id=?16",
+            params![
+                data.salary_month, data.employee_no, data.name, expected_days,
+                actual_days, late_count, early_leave_count, personal_leave_days,
+                sick_leave_days, absent_days, overtime_hours, data.source_type,
+                data.ocr_batch_id, data.remark, now, id
+            ],
+        )?;
+    } else {
+        conn.execute(
+            "INSERT INTO attendance_records (salary_month, employee_no, name, expected_days, actual_days, late_count, early_leave_count, personal_leave_days, sick_leave_days, absent_days, overtime_hours, source_type, ocr_batch_id, remark, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            params![
+                data.salary_month, data.employee_no, data.name, expected_days,
+                actual_days, late_count, early_leave_count, personal_leave_days,
+                sick_leave_days, absent_days, overtime_hours, data.source_type,
+                data.ocr_batch_id, data.remark, now, now
+            ],
+        )?;
+    }
+
+    Ok(true)
+}
+
+pub fn update_attendance_record(conn: &Connection, id: i64, data: &AttendanceRecordInput) -> AppResult<bool> {
+    let now = Utc::now().to_rfc3339();
+    let expected_days = data.expected_days.unwrap_or(0.0);
+    let actual_days = data.actual_days.unwrap_or(0.0);
+    let late_count = data.late_count.unwrap_or(0);
+    let early_leave_count = data.early_leave_count.unwrap_or(0);
+    let personal_leave_days = data.personal_leave_days.unwrap_or(0.0);
+    let sick_leave_days = data.sick_leave_days.unwrap_or(0.0);
+    let absent_days = data.absent_days.unwrap_or(0.0);
+    let overtime_hours = data.overtime_hours.unwrap_or(0.0);
+
+    let updated = conn.execute(
+        "UPDATE attendance_records SET salary_month=?1, employee_no=?2, name=?3, expected_days=?4, actual_days=?5, late_count=?6, early_leave_count=?7, personal_leave_days=?8, sick_leave_days=?9, absent_days=?10, overtime_hours=?11, source_type=?12, ocr_batch_id=?13, remark=?14, updated_at=?15 WHERE id=?16",
+        params![
+            data.salary_month, data.employee_no, data.name, expected_days,
+            actual_days, late_count, early_leave_count, personal_leave_days,
+            sick_leave_days, absent_days, overtime_hours, data.source_type,
+            data.ocr_batch_id, data.remark, now, id
+        ],
+    )?;
+
+    Ok(updated > 0)
+}
+
+// ==================== Salary Rules CRUD ====================
+
+pub fn get_salary_rules(conn: &Connection) -> AppResult<Vec<SalaryRule>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, rule_key, rule_name, rule_value, rule_type, enabled, remark FROM salary_rules ORDER BY id"
+    )?;
+
+    let rules = stmt.query_map([], |row| {
+        Ok(SalaryRule {
+            id: row.get(0)?,
+            rule_key: row.get(1)?,
+            rule_name: row.get(2)?,
+            rule_value: row.get(3)?,
+            rule_type: row.get(4)?,
+            enabled: row.get(5)?,
+            remark: row.get(6)?,
+        })
+    })?;
+
+    rules.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
+pub fn update_salary_rule(conn: &Connection, id: i64, value: f64) -> AppResult<bool> {
+    let updated = conn.execute(
+        "UPDATE salary_rules SET rule_value = ?1 WHERE id = ?2",
+        params![value, id],
+    )?;
+    Ok(updated > 0)
+}
+
+pub fn get_rule_value(conn: &Connection, key: &str) -> AppResult<f64> {
+    let value: f64 = conn.query_row(
+        "SELECT rule_value FROM salary_rules WHERE rule_key = ?1 AND enabled = 1",
+        params![key],
+        |row| row.get(0),
+    )?;
+    Ok(value)
+}
+
+// ==================== Tax Rules CRUD ====================
+
+pub fn get_tax_rules(conn: &Connection) -> AppResult<Vec<TaxRule>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, min_amount, max_amount, tax_rate, quick_deduction FROM tax_rules ORDER BY min_amount"
+    )?;
+
+    let rules = stmt.query_map([], |row| {
+        Ok(TaxRule {
+            id: row.get(0)?,
+            min_amount: row.get(1)?,
+            max_amount: row.get(2)?,
+            tax_rate: row.get(3)?,
+            quick_deduction: row.get(4)?,
+        })
+    })?;
+
+    rules.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
+pub fn update_tax_rule(conn: &Connection, id: i64, data: &TaxRuleInput) -> AppResult<bool> {
+    let existing: TaxRule = conn.query_row(
+        "SELECT id, min_amount, max_amount, tax_rate, quick_deduction FROM tax_rules WHERE id = ?1",
+        params![id],
+        |row| {
+            Ok(TaxRule {
+                id: row.get(0)?,
+                min_amount: row.get(1)?,
+                max_amount: row.get(2)?,
+                tax_rate: row.get(3)?,
+                quick_deduction: row.get(4)?,
+            })
+        },
+    ).map_err(|e| AppError::NotFound(format!("税率规则ID={id}未找到: {e}")))?;
+
+    let min_amount = data.min_amount.unwrap_or(existing.min_amount);
+    let max_amount = data.max_amount.or(existing.max_amount);
+    let tax_rate = data.tax_rate.unwrap_or(existing.tax_rate);
+    let quick_deduction = data.quick_deduction.unwrap_or(existing.quick_deduction);
+
+    let updated = conn.execute(
+        "UPDATE tax_rules SET min_amount=?1, max_amount=?2, tax_rate=?3, quick_deduction=?4 WHERE id=?5",
+        params![min_amount, max_amount, tax_rate, quick_deduction, id],
+    )?;
+
+    Ok(updated > 0)
+}
+
+pub fn calculate_tax(conn: &Connection, taxable_income: f64) -> AppResult<f64> {
+    if taxable_income <= 0.0 {
+        return Ok(0.0);
+    }
+
+    let rules = get_tax_rules(conn)?;
+    for rule in &rules {
+        let max = rule.max_amount.unwrap_or(f64::MAX);
+        if taxable_income > rule.min_amount && taxable_income <= max {
+            let tax = taxable_income * rule.tax_rate - rule.quick_deduction;
+            return Ok(tax.max(0.0));
+        }
+    }
+
+    Ok(0.0)
+}
+
+// ==================== Salary Results CRUD ====================
+
+pub fn save_salary_result(conn: &Connection, result: &SalaryResult) -> AppResult<()> {
+    let now = Utc::now().to_rfc3339();
+
+    // Try update existing, insert if not found
+    let existing = conn.query_row(
+        "SELECT id FROM salary_monthly_results WHERE salary_month = ?1 AND employee_no = ?2",
+        params![result.salary_month, result.employee_no],
+        |row| row.get::<_, i64>(0),
+    );
+
+    match existing {
+        Ok(existing_id) => {
+            conn.execute(
+                "UPDATE salary_monthly_results SET name=?1, department=?2, base_salary=?3, position_salary=?4, performance_salary=?5, overtime_salary=?6, meal_allowance=?7, transport_allowance=?8, other_allowance=?9, gross_salary=?10, social_security_personal=?11, housing_fund_personal=?12, attendance_deduction=?13, tax_amount=?14, other_deduction=?15, net_salary=?16, status=?17, remark=?18, updated_at=?19 WHERE id=?20",
+                params![
+                    result.name, result.department, result.base_salary, result.position_salary,
+                    result.performance_salary, result.overtime_salary, result.meal_allowance,
+                    result.transport_allowance, result.other_allowance, result.gross_salary,
+                    result.social_security_personal, result.housing_fund_personal,
+                    result.attendance_deduction, result.tax_amount, result.other_deduction,
+                    result.net_salary, result.status, result.remark, now, existing_id
+                ],
+            )?;
+        }
+        Err(_) => {
+            conn.execute(
+                "INSERT INTO salary_monthly_results (salary_month, employee_no, name, department, base_salary, position_salary, performance_salary, overtime_salary, meal_allowance, transport_allowance, other_allowance, gross_salary, social_security_personal, housing_fund_personal, attendance_deduction, tax_amount, other_deduction, net_salary, status, locked, remark, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, 0, ?20, ?21, ?22)",
+                params![
+                    result.salary_month, result.employee_no, result.name, result.department,
+                    result.base_salary, result.position_salary, result.performance_salary,
+                    result.overtime_salary, result.meal_allowance, result.transport_allowance,
+                    result.other_allowance, result.gross_salary, result.social_security_personal,
+                    result.housing_fund_personal, result.attendance_deduction, result.tax_amount,
+                    result.other_deduction, result.net_salary, result.status, result.remark, now, now
+                ],
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+pub fn get_salary_results(conn: &Connection, month: &str) -> AppResult<Vec<SalaryResult>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, salary_month, employee_no, name, department, base_salary, position_salary, performance_salary, overtime_salary, meal_allowance, transport_allowance, other_allowance, gross_salary, social_security_personal, housing_fund_personal, attendance_deduction, tax_amount, other_deduction, net_salary, status, locked, remark, created_at, updated_at FROM salary_monthly_results WHERE salary_month = ?1 ORDER BY id"
+    )?;
+
+    let results = stmt.query_map(params![month], |row| {
+        Ok(SalaryResult {
+            id: row.get(0)?,
+            salary_month: row.get(1)?,
+            employee_no: row.get(2)?,
+            name: row.get(3)?,
+            department: row.get(4)?,
+            base_salary: row.get(5)?,
+            position_salary: row.get(6)?,
+            performance_salary: row.get(7)?,
+            overtime_salary: row.get(8)?,
+            meal_allowance: row.get(9)?,
+            transport_allowance: row.get(10)?,
+            other_allowance: row.get(11)?,
+            gross_salary: row.get(12)?,
+            social_security_personal: row.get(13)?,
+            housing_fund_personal: row.get(14)?,
+            attendance_deduction: row.get(15)?,
+            tax_amount: row.get(16)?,
+            other_deduction: row.get(17)?,
+            net_salary: row.get(18)?,
+            status: row.get(19)?,
+            locked: row.get(20)?,
+            remark: row.get(21)?,
+            created_at: row.get(22)?,
+            updated_at: row.get(23)?,
+        })
+    })?;
+
+    results.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
+pub fn get_salary_result_by_employee(conn: &Connection, month: &str, employee_no: &str) -> AppResult<SalaryResult> {
+    conn.query_row(
+        "SELECT id, salary_month, employee_no, name, department, base_salary, position_salary, performance_salary, overtime_salary, meal_allowance, transport_allowance, other_allowance, gross_salary, social_security_personal, housing_fund_personal, attendance_deduction, tax_amount, other_deduction, net_salary, status, locked, remark, created_at, updated_at FROM salary_monthly_results WHERE salary_month = ?1 AND employee_no = ?2",
+        params![month, employee_no],
+        |row| {
+            Ok(SalaryResult {
+                id: row.get(0)?,
+                salary_month: row.get(1)?,
+                employee_no: row.get(2)?,
+                name: row.get(3)?,
+                department: row.get(4)?,
+                base_salary: row.get(5)?,
+                position_salary: row.get(6)?,
+                performance_salary: row.get(7)?,
+                overtime_salary: row.get(8)?,
+                meal_allowance: row.get(9)?,
+                transport_allowance: row.get(10)?,
+                other_allowance: row.get(11)?,
+                gross_salary: row.get(12)?,
+                social_security_personal: row.get(13)?,
+                housing_fund_personal: row.get(14)?,
+                attendance_deduction: row.get(15)?,
+                tax_amount: row.get(16)?,
+                other_deduction: row.get(17)?,
+                net_salary: row.get(18)?,
+                status: row.get(19)?,
+                locked: row.get(20)?,
+                remark: row.get(21)?,
+                created_at: row.get(22)?,
+                updated_at: row.get(23)?,
+            })
+        },
+    ).map_err(|e| AppError::NotFound(format!("工资结果未找到: {e}")))
+}
+
+pub fn update_salary_result(conn: &Connection, id: i64, data: &SalaryResultUpdate) -> AppResult<bool> {
+    let now = Utc::now().to_rfc3339();
+    let mut updates = Vec::new();
+    let mut param_idx = 1;
+    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+    if let Some(v) = data.overtime_salary {
+        updates.push(format!("overtime_salary = ?{param_idx}"));
+        param_values.push(Box::new(v));
+        param_idx += 1;
+    }
+    if let Some(v) = data.meal_allowance {
+        updates.push(format!("meal_allowance = ?{param_idx}"));
+        param_values.push(Box::new(v));
+        param_idx += 1;
+    }
+    if let Some(v) = data.transport_allowance {
+        updates.push(format!("transport_allowance = ?{param_idx}"));
+        param_values.push(Box::new(v));
+        param_idx += 1;
+    }
+    if let Some(v) = data.other_allowance {
+        updates.push(format!("other_allowance = ?{param_idx}"));
+        param_values.push(Box::new(v));
+        param_idx += 1;
+    }
+    if let Some(v) = data.other_deduction {
+        updates.push(format!("other_deduction = ?{param_idx}"));
+        param_values.push(Box::new(v));
+        param_idx += 1;
+    }
+    if let Some(v) = &data.remark {
+        updates.push(format!("remark = ?{param_idx}"));
+        param_values.push(Box::new(v.clone()));
+        param_idx += 1;
+    }
+
+    if updates.is_empty() {
+        return Ok(true);
+    }
+
+    // Recalculate gross and net
+    updates.push(format!("gross_salary = base_salary + position_salary + performance_salary + overtime_salary + meal_allowance + transport_allowance + other_allowance"));
+    updates.push(format!("net_salary = gross_salary - social_security_personal - housing_fund_personal - attendance_deduction - tax_amount - other_deduction"));
+    updates.push(format!("updated_at = ?{param_idx}"));
+    param_values.push(Box::new(now));
+    param_idx += 1;
+
+    updates.push(format!("id = id"));
+    param_values.push(Box::new(id));
+
+    let sql = format!(
+        "UPDATE salary_monthly_results SET {} WHERE id = ?{}",
+        updates.join(", "),
+        param_idx
+    );
+
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+    let updated = conn.execute(&sql, params_refs.as_slice())?;
+
+    Ok(updated > 0)
+}
+
+pub fn lock_salary_results(conn: &Connection, month: &str) -> AppResult<bool> {
+    let updated = conn.execute(
+        "UPDATE salary_monthly_results SET locked = 1, status = 'locked', updated_at = ?1 WHERE salary_month = ?2 AND locked = 0",
+        params![Utc::now().to_rfc3339(), month],
+    )?;
+    Ok(updated > 0)
+}
+
+// ==================== OCR ====================
+
+pub fn save_ocr_batch(conn: &Connection, batch: &OcrBatch) -> AppResult<i64> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO ocr_batches (batch_name, salary_month, image_path, raw_text, parsed_json, status, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![batch.batch_name, batch.salary_month, batch.image_path, batch.raw_text, batch.parsed_json, batch.status, now],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn update_ocr_batch_status(conn: &Connection, id: i64, status: &str) -> AppResult<bool> {
+    let updated = conn.execute(
+        "UPDATE ocr_batches SET status = ?1 WHERE id = ?2",
+        params![status, id],
+    )?;
+    Ok(updated > 0)
+}
+
+pub fn get_ocr_batches(conn: &Connection, month: &str) -> AppResult<Vec<OcrBatch>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, batch_name, salary_month, image_path, raw_text, parsed_json, status, created_at FROM ocr_batches WHERE salary_month = ?1 ORDER BY id DESC"
+    )?;
+
+    let batches = stmt.query_map(params![month], |row| {
+        Ok(OcrBatch {
+            id: row.get(0)?,
+            batch_name: row.get(1)?,
+            salary_month: row.get(2)?,
+            image_path: row.get(3)?,
+            raw_text: row.get(4)?,
+            parsed_json: row.get(5)?,
+            status: row.get(6)?,
+            created_at: row.get(7)?,
+        })
+    })?;
+
+    batches.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
+// ==================== Operation Logs ====================
+
+pub fn log_operation(conn: &Connection, op_type: &str, description: &str, operator: &str, detail: Option<&str>) -> AppResult<()> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO operation_logs (operation_type, description, operator, detail, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![op_type, description, operator, detail, now],
+    )?;
+    Ok(())
+}
+
+// ==================== Dashboard ====================
+
+pub fn get_dashboard_summary(conn: &Connection, month: &str) -> AppResult<DashboardSummary> {
+    let employee_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM employees",
+        [],
+        |row| row.get(0),
+    )?;
+
+    let active_employee_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM employees WHERE status = 'active'",
+        [],
+        |row| row.get(0),
+    )?;
+
+    let calculated_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM salary_monthly_results WHERE salary_month = ?1",
+        params![month],
+        |row| row.get(0),
+    )?;
+
+    let locked_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM salary_monthly_results WHERE salary_month = ?1 AND locked = 1",
+        params![month],
+        |row| row.get(0),
+    )?;
+
+    let total_gross_salary: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(gross_salary), 0) FROM salary_monthly_results WHERE salary_month = ?1",
+        params![month],
+        |row| row.get(0),
+    ).unwrap_or(0.0);
+
+    let total_net_salary: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(net_salary), 0) FROM salary_monthly_results WHERE salary_month = ?1",
+        params![month],
+        |row| row.get(0),
+    ).unwrap_or(0.0);
+
+    let total_social_security: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(social_security_personal), 0) FROM salary_monthly_results WHERE salary_month = ?1",
+        params![month],
+        |row| row.get(0),
+    ).unwrap_or(0.0);
+
+    let total_housing_fund: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(housing_fund_personal), 0) FROM salary_monthly_results WHERE salary_month = ?1",
+        params![month],
+        |row| row.get(0),
+    ).unwrap_or(0.0);
+
+    let total_tax: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(tax_amount), 0) FROM salary_monthly_results WHERE salary_month = ?1",
+        params![month],
+        |row| row.get(0),
+    ).unwrap_or(0.0);
+
+    let attendance_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM attendance_records WHERE salary_month = ?1",
+        params![month],
+        |row| row.get(0),
+    )?;
+
+    Ok(DashboardSummary {
+        employee_count: employee_count as i32,
+        active_employee_count: active_employee_count as i32,
+        calculated_count: calculated_count as i32,
+        locked_count: locked_count as i32,
+        total_gross_salary,
+        total_net_salary,
+        total_social_security,
+        total_housing_fund,
+        total_tax,
+        attendance_count: attendance_count as i32,
+    })
+}
