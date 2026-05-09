@@ -256,6 +256,85 @@ fn write_header_row(
     Ok(())
 }
 
+// ==================== Import Templates ====================
+
+pub fn export_employee_template(path: &str) -> AppResult<()> {
+    let mut workbook = Workbook::new();
+    let worksheet = workbook.add_worksheet();
+    worksheet.set_name("员工导入模板")?;
+
+    let headers = vec![
+        "工号", "姓名", "部门", "职位", "身份证号", "手机号", "银行账号", "开户行",
+        "入职日期", "基本工资", "岗位工资", "绩效工资", "社保基数", "公积金基数",
+        "专项附加扣除", "备注",
+    ];
+    write_header_row(worksheet, &headers, 0)?;
+
+    let cell_fmt = make_cell_format();
+    let money_fmt = make_money_format();
+    worksheet.write_string_with_format(1, 0, "E001", &cell_fmt)?;
+    worksheet.write_string_with_format(1, 1, "张三", &cell_fmt)?;
+    worksheet.write_string_with_format(1, 2, "生产部", &cell_fmt)?;
+    worksheet.write_string_with_format(1, 3, "操作员", &cell_fmt)?;
+    worksheet.write_string_with_format(1, 4, "", &cell_fmt)?;
+    worksheet.write_string_with_format(1, 5, "13800000000", &cell_fmt)?;
+    worksheet.write_string_with_format(1, 6, "", &cell_fmt)?;
+    worksheet.write_string_with_format(1, 7, "", &cell_fmt)?;
+    worksheet.write_string_with_format(1, 8, "2026-01-01", &cell_fmt)?;
+    worksheet.write_number_with_format(1, 9, 5000.0, &money_fmt)?;
+    worksheet.write_number_with_format(1, 10, 1000.0, &money_fmt)?;
+    worksheet.write_number_with_format(1, 11, 800.0, &money_fmt)?;
+    worksheet.write_number_with_format(1, 12, 5000.0, &money_fmt)?;
+    worksheet.write_number_with_format(1, 13, 5000.0, &money_fmt)?;
+    worksheet.write_number_with_format(1, 14, 0.0, &money_fmt)?;
+    worksheet.write_string_with_format(1, 15, "示例行，可删除", &cell_fmt)?;
+
+    let widths = [12, 10, 12, 12, 20, 14, 22, 18, 12, 12, 12, 12, 12, 12, 14, 20];
+    for (col, w) in widths.iter().enumerate() {
+        worksheet.set_column_width(col as u16, *w)?;
+    }
+
+    workbook.save(path)?;
+    Ok(())
+}
+
+pub fn export_attendance_template(path: &str) -> AppResult<()> {
+    let mut workbook = Workbook::new();
+    let worksheet = workbook.add_worksheet();
+    worksheet.set_name("考勤导入模板")?;
+
+    let headers = vec![
+        "工号", "姓名", "应出勤天数", "实出勤天数", "迟到次数", "早退次数",
+        "事假天数", "病假天数", "旷工天数", "加班小时", "备注",
+    ];
+    write_header_row(worksheet, &headers, 0)?;
+
+    let cell_fmt = make_cell_format();
+    let num_fmt = Format::new()
+        .set_border(rust_xlsxwriter::FormatBorder::Thin)
+        .set_align(rust_xlsxwriter::FormatAlign::Center)
+        .set_num_format("0.0");
+    worksheet.write_string_with_format(1, 0, "E001", &cell_fmt)?;
+    worksheet.write_string_with_format(1, 1, "张三", &cell_fmt)?;
+    worksheet.write_number_with_format(1, 2, 22.0, &num_fmt)?;
+    worksheet.write_number_with_format(1, 3, 22.0, &num_fmt)?;
+    worksheet.write_number_with_format(1, 4, 0.0, &cell_fmt)?;
+    worksheet.write_number_with_format(1, 5, 0.0, &cell_fmt)?;
+    worksheet.write_number_with_format(1, 6, 0.0, &num_fmt)?;
+    worksheet.write_number_with_format(1, 7, 0.0, &num_fmt)?;
+    worksheet.write_number_with_format(1, 8, 0.0, &num_fmt)?;
+    worksheet.write_number_with_format(1, 9, 0.0, &num_fmt)?;
+    worksheet.write_string_with_format(1, 10, "示例行，可删除", &cell_fmt)?;
+
+    let widths = [12, 10, 12, 12, 10, 10, 10, 10, 10, 10, 20];
+    for (col, w) in widths.iter().enumerate() {
+        worksheet.set_column_width(col as u16, *w)?;
+    }
+
+    workbook.save(path)?;
+    Ok(())
+}
+
 // ==================== Salary Detail Export ====================
 
 pub fn export_salary_excel(results: &[SalaryResult], path: &str) -> AppResult<()> {

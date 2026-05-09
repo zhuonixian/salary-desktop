@@ -742,6 +742,14 @@ pub fn lock_salary_results(conn: &Connection, month: &str) -> AppResult<bool> {
     Ok(updated > 0)
 }
 
+pub fn review_salary_results(conn: &Connection, month: &str) -> AppResult<bool> {
+    let updated = conn.execute(
+        "UPDATE salary_monthly_results SET status = 'reviewed', updated_at = ?1 WHERE salary_month = ?2 AND locked = 0",
+        params![Utc::now().to_rfc3339(), month],
+    )?;
+    Ok(updated > 0)
+}
+
 // ==================== OCR ====================
 
 pub fn save_ocr_batch(conn: &Connection, batch: &OcrBatch) -> AppResult<i64> {

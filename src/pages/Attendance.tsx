@@ -2,11 +2,14 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   Table, Button, DatePicker, Modal, Form, InputNumber, Space, message, Tag,
 } from 'antd';
-import { ImportOutlined, EditOutlined } from '@ant-design/icons';
-import { open } from '@tauri-apps/plugin-dialog';
+import { ImportOutlined, EditOutlined, DownloadOutlined } from '@ant-design/icons';
+import { open, save } from '@tauri-apps/plugin-dialog';
 import dayjs from 'dayjs';
 import type { Dayjs } from 'dayjs';
-import { getAttendanceRecords, updateAttendanceRecord, importAttendanceExcel } from '@/api';
+import {
+  getAttendanceRecords, updateAttendanceRecord,
+  importAttendanceExcel, exportAttendanceImportTemplate,
+} from '@/api';
 import type { AttendanceRecord, AttendanceRecordInput } from '@/types';
 
 const Attendance: React.FC = () => {
@@ -87,6 +90,21 @@ const Attendance: React.FC = () => {
     }
   };
 
+  const handleDownloadTemplate = async () => {
+    try {
+      const path = await save({
+        filters: [{ name: 'Excel', extensions: ['xlsx'] }],
+        defaultPath: '考勤导入模板.xlsx',
+      });
+      if (!path) return;
+      await exportAttendanceImportTemplate(path);
+      message.success('考勤导入模板已生成');
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      message.error('模板生成失败: ' + msg);
+    }
+  };
+
   const columns = [
     { title: '工号', dataIndex: 'employee_no', key: 'employee_no', width: 100 },
     { title: '姓名', dataIndex: 'employee_name', key: 'employee_name', width: 90 },
@@ -142,6 +160,9 @@ const Attendance: React.FC = () => {
             allowClear={false}
             style={{ width: 180 }}
           />
+          <Button icon={<DownloadOutlined />} onClick={handleDownloadTemplate}>
+            下载模板
+          </Button>
           <Button icon={<ImportOutlined />} onClick={handleImport}>
             导入Excel
           </Button>

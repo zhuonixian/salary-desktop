@@ -8,6 +8,8 @@
 
 html, body, #root {
   height: 100%;
+  width: 100%;
+  overflow: hidden;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
 }
 
@@ -15,6 +17,7 @@ html, body, #root {
 
 .app-layout {
   min-height: 100vh;
+  width: 100%;
 }
 
 .app-sider {
@@ -48,11 +51,14 @@ html, body, #root {
 
 .app-content-wrapper {
   margin-left: 220px;
-  transition: margin-left 0.2s;
+  width: calc(100% - 220px);
+  min-width: 0;
+  transition: margin-left 0.2s, width 0.2s;
 }
 
 .app-content-wrapper.collapsed {
   margin-left: 80px;
+  width: calc(100% - 80px);
 }
 
 .app-header {
@@ -66,6 +72,7 @@ html, body, #root {
   top: 0;
   z-index: 9;
   height: 64px;
+  min-width: 0;
 }
 
 .app-header-left {
@@ -81,8 +88,10 @@ html, body, #root {
 }
 
 .app-main {
-  margin: 24px;
-  min-height: calc(100vh - 64px - 48px);
+  margin: clamp(12px, 2vw, 24px);
+  min-height: calc(100vh - 64px - clamp(24px, 4vw, 48px));
+  overflow: auto;
+  min-width: 0;
 }
 
 .trigger-btn {
@@ -107,6 +116,7 @@ html, body, #root {
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
+  min-width: 0;
 }
 
 .page-title {
@@ -135,6 +145,13 @@ html, body, #root {
 
 .ant-table-wrapper {
   border-radius: 8px;
+  min-width: 0;
+}
+
+.ant-card,
+.ant-row,
+.ant-col {
+  min-width: 0;
 }
 
 /* ==================== 导出卡片 ==================== */
@@ -166,6 +183,26 @@ html, body, #root {
   color: #8c8c8c;
   margin-bottom: 16px;
   line-height: 1.5;
+  min-height: 58px;
+}
+
+@media (max-width: 900px) {
+  .app-content-wrapper {
+    margin-left: 80px;
+    width: calc(100% - 80px);
+  }
+
+  .app-header {
+    padding: 0 16px;
+  }
+
+  .page-header {
+    align-items: flex-start;
+  }
+
+  .page-header-actions {
+    width: 100%;
+  }
 }
 
 /* ==================== OCR 上传 ==================== */

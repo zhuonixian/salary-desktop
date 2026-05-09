@@ -10,6 +10,7 @@ import type { Dayjs } from 'dayjs';
 import {
   getSalaryResults, calculateSalary, recalculateSingle,
   updateSalaryResult, lockSalary, reviewSalary,
+  getEmployees, getAttendanceRecords, getSalaryRule, getTaxRules,
 } from '@/api';
 import type { SalaryResult, SalaryResultUpdate, SalaryStatus } from '@/types';
 
@@ -54,9 +55,42 @@ const SalaryCalculate: React.FC = () => {
   const handleCalculate = async () => {
     setCalculating(true);
     try {
+      if (isLocked) {
+        message.warning('本月工资已锁定，不能重新计算');
+        return;
+      }
+
+      const [employees, attendanceRecords, salaryRule, taxRules] = await Promise.all([
+        getEmployees(),
+        getAttendanceRecords(monthStr),
+        getSalaryRule(),
+        getTaxRules(),
+      ]);
+
+      if (employees.length === 0) {
+        message.warning('请先在员工管理中新增或导入员工');
+        return;
+      }
+      if (!employees.some((employee) => employee.status === '在职')) {
+        message.warning('当前没有在职员工，无法计算工资');
+        return;
+      }
+      if (attendanceRecords.length === 0) {
+        message.warning('请先导入或确认本月考勤数据');
+        return;
+      }
+      if (!salaryRule || taxRules.length === 0) {
+        message.warning('请先完成工资规则和个税规则配置');
+        return;
+      }
+
       const data = await calculateSalary(monthStr);
       setResults(data);
-      message.success('计算完成');
+      if (data.length === 0) {
+        message.warning('没有生成工资结果，请检查员工和考勤数据是否匹配');
+      } else {
+        message.success('计算完成');
+      }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       message.error('计算失败: ' + msg);
@@ -91,7 +125,7 @@ const SalaryCalculate: React.FC = () => {
     try {
       const values = await adjustForm.validateFields();
       const updated = await updateSalaryResult(adjustingRecord.id, values as SalaryResultUpdate);
-      setResults((prev) => prev.map((r) => (r.id === updated.id ? updated : r)));
+      setResults((prev) => prev.map((r) => (r.id === updated.id ? { ...r, ...values } : r)));
       message.success('调整成功');
       setAdjustModalOpen(false);
     } catch (e: unknown) {

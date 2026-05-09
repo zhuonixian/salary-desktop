@@ -114,6 +114,12 @@ pub fn import_employees_excel(path: String, state: tauri::State<'_, Mutex<Connec
     })
 }
 
+#[tauri::command]
+pub fn export_employee_import_template(path: String) -> Result<bool, AppError> {
+    excel::export_employee_template(&path)?;
+    Ok(true)
+}
+
 // ==================== Attendance Commands ====================
 
 #[tauri::command]
@@ -175,6 +181,12 @@ pub fn import_attendance_excel(path: String, month: String, state: tauri::State<
         skipped,
         errors,
     })
+}
+
+#[tauri::command]
+pub fn export_attendance_import_template(path: String) -> Result<bool, AppError> {
+    excel::export_attendance_template(&path)?;
+    Ok(true)
 }
 
 #[tauri::command]
@@ -252,6 +264,16 @@ pub fn lock_salary_results(month: String, state: tauri::State<'_, Mutex<Connecti
     let result = db::lock_salary_results(&conn, &month)?;
     if result {
         db::log_operation(&conn, "lock_salary", &format!("锁定{month}工资"), "system", None)?;
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn review_salary_results(month: String, state: tauri::State<'_, Mutex<Connection>>) -> Result<bool, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let result = db::review_salary_results(&conn, &month)?;
+    if result {
+        db::log_operation(&conn, "review_salary", &format!("复核{month}工资"), "system", None)?;
     }
     Ok(result)
 }

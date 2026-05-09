@@ -1,12 +1,15 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
-  Table, Button, Input, InputNumber, Modal, Form, Tag, Space, message, Popconfirm, Upload, Select,
+  Table, Button, Input, InputNumber, Modal, Form, Tag, Space, message, Popconfirm, Select,
 } from 'antd';
 import {
-  PlusOutlined, SearchOutlined, ImportOutlined, EditOutlined, DeleteOutlined,
+  PlusOutlined, SearchOutlined, ImportOutlined, EditOutlined, DeleteOutlined, DownloadOutlined,
 } from '@ant-design/icons';
-import { open } from '@tauri-apps/plugin-dialog';
-import { getEmployees, createEmployee, updateEmployee, deleteEmployee, importEmployeesExcel } from '@/api';
+import { open, save } from '@tauri-apps/plugin-dialog';
+import {
+  getEmployees, createEmployee, updateEmployee, deleteEmployee,
+  importEmployeesExcel, exportEmployeeImportTemplate,
+} from '@/api';
 import type { Employee, EmployeeInput, EmployeeStatus } from '@/types';
 
 const statusColorMap: Record<EmployeeStatus, string> = {
@@ -89,6 +92,21 @@ const Employees: React.FC = () => {
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       message.error('导入失败: ' + msg);
+    }
+  };
+
+  const handleDownloadTemplate = async () => {
+    try {
+      const path = await save({
+        filters: [{ name: 'Excel', extensions: ['xlsx'] }],
+        defaultPath: '员工导入模板.xlsx',
+      });
+      if (!path) return;
+      await exportEmployeeImportTemplate(path);
+      message.success('员工导入模板已生成');
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      message.error('模板生成失败: ' + msg);
     }
   };
 
@@ -187,6 +205,9 @@ const Employees: React.FC = () => {
           />
           <Button type="primary" icon={<PlusOutlined />} onClick={handleAdd}>
             新增员工
+          </Button>
+          <Button icon={<DownloadOutlined />} onClick={handleDownloadTemplate}>
+            下载模板
           </Button>
           <Button icon={<ImportOutlined />} onClick={handleImport}>
             导入Excel

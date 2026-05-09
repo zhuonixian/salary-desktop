@@ -3,7 +3,7 @@ import { Row, Col, Card, DatePicker, Button, message } from 'antd';
 import {
   FileExcelOutlined, BankOutlined, FileTextOutlined, CalendarOutlined,
 } from '@ant-design/icons';
-import { save } from '@tauri-apps/plugin-dialog';
+import { open, save } from '@tauri-apps/plugin-dialog';
 import dayjs from 'dayjs';
 import type { Dayjs } from 'dayjs';
 import {
@@ -20,6 +20,7 @@ interface ExportItem {
   icon: React.ReactNode;
   exportFn: (month: string, savePath: string) => Promise<void>;
   fileName: string;
+  target: 'file' | 'directory';
 }
 
 const exportItems: ExportItem[] = [
@@ -30,6 +31,7 @@ const exportItems: ExportItem[] = [
     icon: <FileExcelOutlined />,
     exportFn: exportSalaryDetail,
     fileName: '工资明细表',
+    target: 'file',
   },
   {
     key: 'bank_payment',
@@ -38,6 +40,7 @@ const exportItems: ExportItem[] = [
     icon: <BankOutlined />,
     exportFn: exportBankPaymentFile,
     fileName: '银行代发表',
+    target: 'file',
   },
   {
     key: 'salary_slips',
@@ -46,6 +49,7 @@ const exportItems: ExportItem[] = [
     icon: <FileTextOutlined />,
     exportFn: exportSalarySlips,
     fileName: '工资条',
+    target: 'directory',
   },
   {
     key: 'attendance_summary',
@@ -54,6 +58,7 @@ const exportItems: ExportItem[] = [
     icon: <CalendarOutlined />,
     exportFn: exportAttendanceSummaryFile,
     fileName: '考勤汇总表',
+    target: 'file',
   },
 ];
 
@@ -66,15 +71,17 @@ const ExportCenter: React.FC = () => {
   const handleExport = async (item: ExportItem) => {
     setExporting(item.key);
     try {
-      const savePath = await save({
-        filters: [{ name: 'Excel', extensions: ['xlsx'] }],
-        defaultPath: `${item.fileName}_${monthStr}.xlsx`,
-      });
-      if (!savePath) {
+      const targetPath = item.target === 'directory'
+        ? await open({ directory: true, multiple: false })
+        : await save({
+          filters: [{ name: 'Excel', extensions: ['xlsx'] }],
+          defaultPath: `${item.fileName}_${monthStr}.xlsx`,
+        });
+      if (!targetPath) {
         setExporting(null);
         return;
       }
-      await item.exportFn(monthStr, savePath);
+      await item.exportFn(monthStr, targetPath as string);
       message.success(`${item.title} 导出成功`);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -110,7 +117,7 @@ const ExportCenter: React.FC = () => {
                 loading={exporting === item.key}
                 block
               >
-                导出 Excel
+                {item.target === 'directory' ? '选择目录导出' : '导出 Excel'}
               </Button>
             </Card>
           </Col>

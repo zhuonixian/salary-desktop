@@ -13,6 +13,7 @@ import type {
   OcrResult,
   ImportResult,
   DashboardSummary,
+  EmployeeStatus,
 } from '@/types';
 
 type BackendDashboardSummary = {
@@ -26,6 +27,10 @@ type BackendDashboardSummary = {
   total_housing_fund?: number;
   total_tax?: number;
   attendance_count?: number;
+};
+
+type BackendEmployee = Omit<Employee, 'status'> & {
+  status?: string | null;
 };
 
 type BackendSalaryRule = {
@@ -53,7 +58,188 @@ type BackendOcrBatch = {
   created_at?: string | null;
 };
 
+type BackendAttendanceRecord = {
+  id: number;
+  salary_month?: string | null;
+  employee_no?: string | null;
+  name?: string | null;
+  expected_days?: number | null;
+  actual_days?: number | null;
+  late_count?: number | null;
+  early_leave_count?: number | null;
+  personal_leave_days?: number | null;
+  sick_leave_days?: number | null;
+  absent_days?: number | null;
+  overtime_hours?: number | null;
+  remark?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+type BackendSalaryResult = {
+  id: number;
+  salary_month?: string | null;
+  employee_no?: string | null;
+  name?: string | null;
+  department?: string | null;
+  base_salary?: number | null;
+  position_salary?: number | null;
+  performance_salary?: number | null;
+  overtime_salary?: number | null;
+  meal_allowance?: number | null;
+  transport_allowance?: number | null;
+  other_allowance?: number | null;
+  gross_salary?: number | null;
+  social_security_personal?: number | null;
+  housing_fund_personal?: number | null;
+  attendance_deduction?: number | null;
+  tax_amount?: number | null;
+  other_deduction?: number | null;
+  net_salary?: number | null;
+  status?: string | null;
+  locked?: boolean | null;
+  remark?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
 const numberOrZero = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) ? value : 0);
+
+const normalizeEmployeeStatus = (status?: string | null): EmployeeStatus => {
+  if (status === 'inactive' || status === '离职') return '离职';
+  if (status === 'probation' || status === '试用') return '试用';
+  return '在职';
+};
+
+const toBackendEmployeeStatus = (status?: EmployeeStatus): string | undefined => {
+  if (status === '离职') return 'inactive';
+  if (status === '试用') return 'probation';
+  if (status === '在职') return 'active';
+  return undefined;
+};
+
+const normalizeEmployee = (employee: BackendEmployee): Employee => ({
+  ...employee,
+  department: employee.department ?? '',
+  position: employee.position ?? '',
+  id_card: employee.id_card ?? '',
+  phone: employee.phone ?? '',
+  bank_account: employee.bank_account ?? '',
+  bank_name: employee.bank_name ?? '',
+  hire_date: employee.hire_date ?? '',
+  status: normalizeEmployeeStatus(employee.status),
+  base_salary: numberOrZero(employee.base_salary),
+  position_salary: numberOrZero(employee.position_salary),
+  performance_salary: numberOrZero(employee.performance_salary),
+  social_insurance_base: numberOrZero(employee.social_insurance_base),
+  housing_fund_base: numberOrZero(employee.housing_fund_base),
+  special_deduction: numberOrZero(employee.special_deduction),
+  remark: employee.remark ?? '',
+  created_at: employee.created_at ?? '',
+  updated_at: employee.updated_at ?? '',
+});
+
+const toBackendEmployeeInput = (data: Partial<EmployeeInput>) => ({
+  ...data,
+  status: toBackendEmployeeStatus(data.status),
+});
+
+const normalizeImportResult = (raw: ImportResult & { skipped?: number }): ImportResult => ({
+  success: Boolean(raw.success),
+  total: numberOrZero(raw.total),
+  imported: numberOrZero(raw.imported),
+  failed: numberOrZero(raw.failed ?? raw.skipped),
+  errors: Array.isArray(raw.errors) ? raw.errors : [],
+});
+
+const normalizeAttendanceRecord = (record: BackendAttendanceRecord): AttendanceRecord => {
+  const personalLeaveDays = numberOrZero(record.personal_leave_days);
+  const sickLeaveDays = numberOrZero(record.sick_leave_days);
+
+  return {
+    id: record.id,
+    month: record.salary_month ?? '',
+    employee_id: record.id,
+    employee_no: record.employee_no ?? '',
+    employee_name: record.name ?? '',
+    required_days: numberOrZero(record.expected_days),
+    actual_days: numberOrZero(record.actual_days),
+    late_count: numberOrZero(record.late_count),
+    early_leave_count: numberOrZero(record.early_leave_count),
+    leave_days: personalLeaveDays + sickLeaveDays,
+    sick_leave_days: sickLeaveDays,
+    personal_leave_days: personalLeaveDays,
+    absent_days: numberOrZero(record.absent_days),
+    overtime_hours: numberOrZero(record.overtime_hours),
+    created_at: record.created_at ?? '',
+    updated_at: record.updated_at ?? '',
+  };
+};
+
+const normalizeSalaryStatus = (result: BackendSalaryResult): SalaryResult['status'] => {
+  if (result.locked || result.status === 'locked' || result.status === '已锁定') return '已锁定';
+  if (result.status === 'reviewed' || result.status === '已复核') return '已复核';
+  return '草稿';
+};
+
+const normalizeSalaryResult = (result: BackendSalaryResult): SalaryResult => {
+  const socialInsurance = numberOrZero(result.social_security_personal);
+  const housingFund = numberOrZero(result.housing_fund_personal);
+  const attendanceDeduction = numberOrZero(result.attendance_deduction);
+  const incomeTax = numberOrZero(result.tax_amount);
+  const otherDeduction = numberOrZero(result.other_deduction);
+
+  return {
+    id: result.id,
+    month: result.salary_month ?? '',
+    employee_id: result.id,
+    employee_no: result.employee_no ?? '',
+    employee_name: result.name ?? '',
+    department: result.department ?? '',
+    base_salary: numberOrZero(result.base_salary),
+    position_salary: numberOrZero(result.position_salary),
+    performance_salary: numberOrZero(result.performance_salary),
+    overtime_pay: numberOrZero(result.overtime_salary),
+    meal_allowance: numberOrZero(result.meal_allowance),
+    transport_allowance: numberOrZero(result.transport_allowance),
+    other_allowance: numberOrZero(result.other_allowance),
+    gross_salary: numberOrZero(result.gross_salary),
+    social_insurance: socialInsurance,
+    housing_fund: housingFund,
+    attendance_deduction: attendanceDeduction,
+    income_tax: incomeTax,
+    other_deduction: otherDeduction,
+    total_deduction: socialInsurance + housingFund + attendanceDeduction + incomeTax + otherDeduction,
+    net_salary: numberOrZero(result.net_salary),
+    status: normalizeSalaryStatus(result),
+    remark: result.remark ?? '',
+    created_at: result.created_at ?? '',
+    updated_at: result.updated_at ?? '',
+  };
+};
+
+const toBackendAttendanceInput = (data: Partial<AttendanceRecordInput>, fallback?: AttendanceRecord) => {
+  const extended = data as Partial<AttendanceRecordInput> & {
+    employee_no?: string;
+    employee_name?: string;
+    remark?: string;
+  };
+
+  return {
+    salary_month: data.month ?? fallback?.month ?? '',
+    employee_no: extended.employee_no ?? fallback?.employee_no ?? '',
+    name: extended.employee_name ?? fallback?.employee_name ?? '',
+    expected_days: data.required_days ?? fallback?.required_days ?? 0,
+    actual_days: data.actual_days ?? fallback?.actual_days ?? 0,
+    late_count: data.late_count ?? fallback?.late_count ?? 0,
+    early_leave_count: data.early_leave_count ?? fallback?.early_leave_count ?? 0,
+    personal_leave_days: data.personal_leave_days ?? fallback?.personal_leave_days ?? 0,
+    sick_leave_days: data.sick_leave_days ?? fallback?.sick_leave_days ?? 0,
+    absent_days: data.absent_days ?? fallback?.absent_days ?? 0,
+    overtime_hours: data.overtime_hours ?? fallback?.overtime_hours ?? 0,
+    remark: extended.remark ?? '',
+  };
+};
 
 export function normalizeDashboardSummary(raw: BackendDashboardSummary, month: string): DashboardSummary {
   const totalEmployees = numberOrZero(raw.employee_count);
@@ -83,19 +269,23 @@ export async function getDashboardSummary(month: string): Promise<DashboardSumma
 // ==================== 员工管理 ====================
 
 export async function getEmployees(): Promise<Employee[]> {
-  return invoke('get_employees');
+  const employees = await invoke<BackendEmployee[]>('get_employees');
+  return employees.map(normalizeEmployee);
 }
 
 export async function getEmployee(id: number): Promise<Employee> {
-  return invoke('get_employee', { id });
+  const employee = await invoke<BackendEmployee>('get_employee', { id });
+  return normalizeEmployee(employee);
 }
 
 export async function createEmployee(data: EmployeeInput): Promise<Employee> {
-  return invoke('create_employee', { data });
+  const employee = await invoke<BackendEmployee>('create_employee', { data: toBackendEmployeeInput(data) });
+  return normalizeEmployee(employee);
 }
 
 export async function updateEmployee(id: number, data: Partial<EmployeeInput>): Promise<Employee> {
-  return invoke('update_employee', { id, data });
+  await invoke('update_employee', { id, data: toBackendEmployeeInput(data) });
+  return getEmployee(id);
 }
 
 export async function deleteEmployee(id: number): Promise<void> {
@@ -103,21 +293,35 @@ export async function deleteEmployee(id: number): Promise<void> {
 }
 
 export async function importEmployeesExcel(filePath: string): Promise<ImportResult> {
-  return invoke('import_employees_excel', { filePath });
+  const result = await invoke<ImportResult & { skipped?: number }>('import_employees_excel', { path: filePath });
+  return normalizeImportResult(result);
+}
+
+export async function exportEmployeeImportTemplate(path: string): Promise<void> {
+  await invoke('export_employee_import_template', { path });
 }
 
 // ==================== 考勤管理 ====================
 
 export async function getAttendanceRecords(month: string): Promise<AttendanceRecord[]> {
-  return invoke('get_attendance_records', { month });
+  const records = await invoke<BackendAttendanceRecord[]>('get_attendance_records', { month });
+  return records.map(normalizeAttendanceRecord);
 }
 
 export async function createAttendanceRecord(data: AttendanceRecordInput): Promise<AttendanceRecord> {
-  return invoke('create_attendance_record', { data });
+  const record = await invoke<BackendAttendanceRecord>('create_attendance_record', {
+    data: toBackendAttendanceInput(data),
+  });
+  return normalizeAttendanceRecord(record);
 }
 
 export async function updateAttendanceRecord(id: number, data: Partial<AttendanceRecordInput>): Promise<AttendanceRecord> {
-  return invoke('update_attendance_record', { id, data });
+  const fallback = data.month ? (await getAttendanceRecords(data.month)).find((record) => record.id === id) : undefined;
+  await invoke('update_attendance_record', {
+    id,
+    data: toBackendAttendanceInput(data, fallback),
+  });
+  return fallback ? { ...fallback, ...data } : { id, ...data } as AttendanceRecord;
 }
 
 export async function deleteAttendanceRecord(id: number): Promise<void> {
@@ -125,7 +329,12 @@ export async function deleteAttendanceRecord(id: number): Promise<void> {
 }
 
 export async function importAttendanceExcel(filePath: string, month: string): Promise<ImportResult> {
-  return invoke('import_attendance_excel', { filePath, month });
+  const result = await invoke<ImportResult & { skipped?: number }>('import_attendance_excel', { path: filePath, month });
+  return normalizeImportResult(result);
+}
+
+export async function exportAttendanceImportTemplate(path: string): Promise<void> {
+  await invoke('export_attendance_import_template', { path });
 }
 
 // ==================== 工资规则 ====================
@@ -205,27 +414,37 @@ export async function saveTaxRules(rules: TaxRuleInput[]): Promise<TaxRule[]> {
 // ==================== 工资计算 ====================
 
 export async function getSalaryResults(month: string): Promise<SalaryResult[]> {
-  return invoke('get_salary_results', { month });
+  const results = await invoke<BackendSalaryResult[]>('get_salary_results', { month });
+  return results.map(normalizeSalaryResult);
 }
 
 export async function calculateSalary(month: string): Promise<SalaryResult[]> {
-  return invoke('calculate_salary', { month });
+  const results = await invoke<BackendSalaryResult[]>('calculate_salary', { month });
+  return results.map(normalizeSalaryResult);
 }
 
 export async function recalculateSingle(month: string, employeeId: number): Promise<SalaryResult> {
-  return invoke('recalculate_single', { month, employeeId });
+  const existing = await getSalaryResults(month);
+  const employeeNo = existing.find((result) => result.employee_id === employeeId)?.employee_no;
+  if (!employeeNo) {
+    throw new Error('未找到该员工工资记录');
+  }
+
+  const result = await invoke<BackendSalaryResult>('recalculate_employee', { month, employeeNo });
+  return normalizeSalaryResult(result);
 }
 
 export async function updateSalaryResult(id: number, data: SalaryResultUpdate): Promise<SalaryResult> {
-  return invoke('update_salary_result', { id, data });
+  await invoke('update_salary_result', { id, data });
+  return { id, ...data } as SalaryResult;
 }
 
 export async function lockSalary(month: string): Promise<void> {
-  return invoke('lock_salary', { month });
+  await invoke('lock_salary_results', { month });
 }
 
 export async function reviewSalary(month: string): Promise<void> {
-  return invoke('review_salary', { month });
+  await invoke('review_salary_results', { month });
 }
 
 // ==================== OCR ====================
@@ -276,17 +495,17 @@ export async function confirmOcrResult(batchId: number, records: AttendanceRecor
 // ==================== 导出 ====================
 
 export async function exportSalaryDetail(month: string, savePath: string): Promise<void> {
-  return invoke('export_salary_detail', { month, savePath });
+  return invoke('export_salary_detail', { month, path: savePath });
 }
 
 export async function exportBankPaymentFile(month: string, savePath: string): Promise<void> {
-  return invoke('export_bank_payment_file', { month, savePath });
+  return invoke('export_bank_payment_file', { month, path: savePath });
 }
 
-export async function exportSalarySlips(month: string, savePath: string): Promise<void> {
-  return invoke('export_salary_slips', { month, savePath });
+export async function exportSalarySlips(month: string, dir: string): Promise<void> {
+  return invoke('export_salary_slips', { month, dir });
 }
 
 export async function exportAttendanceSummaryFile(month: string, savePath: string): Promise<void> {
-  return invoke('export_attendance_summary_file', { month, savePath });
+  return invoke('export_attendance_summary_file', { month, path: savePath });
 }
