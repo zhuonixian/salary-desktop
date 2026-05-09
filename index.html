@@ -7,8 +7,22 @@
     <title>工资核算助手</title>
   </head>
   <body>
-    <div id="diag" style="padding:20px;font-size:18px;color:green;">Loading...</div>
+    <div id="diag" style="padding:20px;font-family:monospace;font-size:14px;color:green;white-space:pre;">Loading...</div>
     <div id="root"></div>
+    <script>
+      // Inline diagnostic - no external files needed
+      var d = document.getElementById('diag');
+      d.textContent = 'Step 1: Inline JS works!\n';
+      try {
+        var x = new XMLHttpRequest();
+        x.open('GET', './assets/index-CCDINBXX.js', false);
+        x.send();
+        d.textContent += 'Step 2: JS file status=' + x.status + ' length=' + x.responseText.length + '\n';
+      } catch(e) {
+        d.textContent += 'Step 2: JS file fetch FAILED: ' + e.message + '\n';
+      }
+      d.textContent += 'Step 3: About to load module...\n';
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
