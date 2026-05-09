@@ -43,10 +43,6 @@
       "scope": {
         "allow": ["$APPDATA/**", "$DOWNLOAD/**", "$HOME/**", "**"]
       }
-    },
-    "dialog": {
-      "open": true,
-      "save": true
     }
   }
 }
