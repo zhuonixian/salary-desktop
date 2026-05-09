@@ -15,13 +15,10 @@ fn decode_bytes(data: &[u8]) -> String {
         return s;
     }
     // Fallback: try GBK/GB2312 for Chinese Windows
-    #[cfg(target_os = "windows")]
-    {
-        let (decoded, _, _) = encoding_rs::GBK.decode(data);
-        let decoded = decoded.to_string();
-        if !decoded.contains('�') {
-            return decoded;
-        }
+    let (decoded, _, _) = encoding_rs::GBK.decode(data);
+    let decoded = decoded.to_string();
+    if !decoded.contains('\u{fffd}') {
+        return decoded;
     }
     // Last resort: lossy UTF-8
     String::from_utf8_lossy(data).to_string()
