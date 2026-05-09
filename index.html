@@ -13,6 +13,7 @@
       // Inline diagnostic - error catching
       var d = document.getElementById('diag');
       d.textContent = 'Step 1: Inline JS works!\n';
+      d.textContent += 'Location: ' + window.location.href + '\n';
 
       // Catch ALL errors
       window.onerror = function(msg, url, line, col, error) {
@@ -20,20 +21,32 @@
         if (error && error.stack) d.textContent += '  Stack: ' + error.stack.substring(0, 300) + '\n';
         return false;
       };
+      window.addEventListener('error', function(event) {
+        var target = event.target;
+        if (target && target !== window && target.tagName) {
+          d.textContent += 'RESOURCE ERROR: <' + target.tagName.toLowerCase() + '> ' + (target.src || target.href || '') + '\n';
+        }
+      }, true);
       window.addEventListener('unhandledrejection', function(event) {
         d.textContent += 'PROMISE ERROR: ' + event.reason + '\n';
         if (event.reason && event.reason.stack) d.textContent += '  Stack: ' + event.reason.stack.substring(0, 300) + '\n';
       });
 
-      try {
-        var x = new XMLHttpRequest();
-        x.open('GET', './assets/index-CCDINBXX.js', false);
-        x.send();
-        d.textContent += 'Step 2: JS file status=' + x.status + ' length=' + x.responseText.length + '\n';
-      } catch(e) {
-        d.textContent += 'Step 2: JS file fetch FAILED: ' + e.message + '\n';
-      }
-      d.textContent += 'Step 3: Module loading...\n';
+      window.addEventListener('DOMContentLoaded', function() {
+        var scripts = Array.prototype.slice.call(document.querySelectorAll('script[type="module"][src]'));
+        d.textContent += 'Step 2: Module scripts found=' + scripts.length + '\n';
+        scripts.forEach(function(script, index) {
+          try {
+            var x = new XMLHttpRequest();
+            x.open('GET', script.getAttribute('src'), false);
+            x.send();
+            d.textContent += '  module[' + index + '] status=' + x.status + ' length=' + x.responseText.length + ' src=' + script.getAttribute('src') + '\n';
+          } catch(e) {
+            d.textContent += '  module[' + index + '] fetch FAILED: ' + e.message + '\n';
+          }
+        });
+      });
+      d.textContent += 'Step 3: Waiting for module entry...\n';
 
       // Monitor if React renders into #root
       var checkCount = 0;

@@ -1,10 +1,22 @@
-import { StrictMode } from 'react'
-import { createRoot } from 'react-dom/client'
-import './styles/global.css'
-import App from './App'
+const diag = document.getElementById('diag')
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <App />
-  </StrictMode>,
-)
+if (diag) {
+  diag.textContent += 'Step 3.1: Module entry executed\n'
+}
+
+import('./bootstrap')
+  .then(({ mountApp }) => {
+    if (diag) {
+      diag.textContent += 'Step 3.2: React bootstrap loaded\n'
+    }
+    mountApp()
+  })
+  .catch((error) => {
+    if (diag) {
+      diag.textContent += 'MODULE IMPORT ERROR: ' + String(error) + '\n'
+      if (error && error.stack) {
+        diag.textContent += '  Stack: ' + error.stack.substring(0, 500) + '\n'
+      }
+    }
+    throw error
+  })

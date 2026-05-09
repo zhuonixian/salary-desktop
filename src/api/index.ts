@@ -15,10 +15,44 @@ import type {
   DashboardSummary,
 } from '@/types';
 
+type BackendDashboardSummary = {
+  employee_count?: number;
+  active_employee_count?: number;
+  calculated_count?: number;
+  locked_count?: number;
+  total_gross_salary?: number;
+  total_net_salary?: number;
+  total_social_security?: number;
+  total_housing_fund?: number;
+  total_tax?: number;
+  attendance_count?: number;
+};
+
+const numberOrZero = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) ? value : 0);
+
+export function normalizeDashboardSummary(raw: BackendDashboardSummary, month: string): DashboardSummary {
+  const totalEmployees = numberOrZero(raw.employee_count);
+  const calculatedCount = numberOrZero(raw.calculated_count);
+  const totalGrossSalary = numberOrZero(raw.total_gross_salary);
+  const totalNetSalary = numberOrZero(raw.total_net_salary);
+
+  return {
+    month,
+    total_employees: totalEmployees,
+    pending_count: Math.max(totalEmployees - calculatedCount, 0),
+    calculated_count: calculatedCount,
+    abnormal_attendance_count: numberOrZero(raw.attendance_count),
+    total_gross_salary: totalGrossSalary,
+    total_deduction: Math.max(totalGrossSalary - totalNetSalary, 0),
+    total_net_salary: totalNetSalary,
+  };
+}
+
 // ==================== 仪表盘 ====================
 
 export async function getDashboardSummary(month: string): Promise<DashboardSummary> {
-  return invoke('get_dashboard_summary', { month });
+  const data = await invoke<BackendDashboardSummary>('get_dashboard_summary', { month });
+  return normalizeDashboardSummary(data, month);
 }
 
 // ==================== 员工管理 ====================

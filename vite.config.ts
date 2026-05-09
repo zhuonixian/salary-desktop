@@ -4,14 +4,26 @@ import path from 'path'
 
 const host = process.env.TAURI_DEV_HOST;
 
+const stripCrossorigin = () => ({
+  name: 'strip-crossorigin-from-built-html',
+  enforce: 'post' as const,
+  transformIndexHtml(html: string) {
+    return html.replace(/\s+crossorigin(?=[\s>])/g, '')
+  },
+})
+
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), stripCrossorigin()],
   resolve: {
     alias: {
       '@': path.resolve(__dirname, 'src'),
     },
   },
   base: './',
+  build: {
+    modulePreload: false,
+    cssCodeSplit: false,
+  },
   clearScreen: false,
   server: {
     port: 5173,

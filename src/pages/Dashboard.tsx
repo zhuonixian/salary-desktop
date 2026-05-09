@@ -48,7 +48,7 @@ const Dashboard: React.FC = () => {
     total_net_salary: 0,
   };
 
-  const fmt = (val: number) => val.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const fmt = (val?: number | null) => (val ?? 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
   return (
     <div>
