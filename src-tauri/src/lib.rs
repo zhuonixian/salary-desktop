@@ -14,29 +14,52 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(
+            tauri_plugin_log::Builder::default()
+                .level(log::LevelFilter::Info)
+                .targets([
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir { file_name: None }),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                ])
+                .build(),
+        )
         .setup(|app| {
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
-            }
+            log::info!("Application starting...");
 
             // Initialize database
-            let app_data_dir = app
-                .path()
-                .app_data_dir()
-                .expect("Failed to resolve app data dir");
+            let app_data_dir = match app.path().app_data_dir() {
+                Ok(dir) => dir,
+                Err(e) => {
+                    log::error!("Failed to resolve app data dir: {e}");
+                    return Err(Box::new(e) as Box<dyn std::error::Error>);
+                }
+            };
+
+            log::info!("App data dir: {}", app_data_dir.display());
 
             // Ensure the directory exists
-            std::fs::create_dir_all(&app_data_dir).ok();
+            if let Err(e) = std::fs::create_dir_all(&app_data_dir) {
+                log::error!("Failed to create app data dir: {e}");
+            }
 
-            let conn =
-                db::init_db(app_data_dir.to_str().unwrap()).expect("Failed to initialize database");
+            let db_path = app_data_dir.to_str().unwrap_or("salary.db");
+            log::info!("Database path: {db_path}");
 
+            let conn = match db::init_db(db_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    log::error!("Failed to initialize database: {e}");
+                    return Err(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("Database init failed: {e}"),
+                    )) as Box<dyn std::error::Error>);
+                }
+            };
+
+            log::info!("Database initialized successfully");
             app.manage(Mutex::new(conn));
 
+            log::info!("Application setup complete");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
