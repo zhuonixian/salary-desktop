@@ -8,6 +8,26 @@ use crate::db::*;
 use crate::errors::{AppError, AppResult};
 use crate::models::*;
 
+/// Decode bytes from Python output: try UTF-8 first, fallback to GBK (Windows Chinese)
+fn decode_bytes(data: &[u8]) -> String {
+    // Try UTF-8 first (works when PYTHONUTF8=1 is set)
+    if let Ok(s) = String::from_utf8(data.to_vec()) {
+        return s;
+    }
+    // Fallback: try GBK/GB2312 for Chinese Windows
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(s) = encoding_rs::GBK.decode(data).0 {
+            let decoded = s.to_string();
+            if !decoded.contains('�') {
+                return decoded;
+            }
+        }
+    }
+    // Last resort: lossy UTF-8
+    String::from_utf8_lossy(data).to_string()
+}
+
 /// Run OCR recognition on an image via python3 script.
 /// resource_dir: Tauri resource directory (from app.path().resource_dir()), or None for dev mode.
 pub fn ocr_recognize(image_path: &str, month: &str, conn: &Connection, resource_dir: Option<&std::path::Path>) -> AppResult<OcrResult> {
@@ -17,8 +37,8 @@ pub fn ocr_recognize(image_path: &str, month: &str, conn: &Connection, resource_
     let (python_cmd, output) = run_ocr_script(&script_path, image_path)?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = decode_bytes(&output.stderr);
+        let stdout = decode_bytes(&output.stdout);
         let detail = extract_ocr_error(&stdout)
             .or_else(|| extract_ocr_error(&stderr))
             .unwrap_or_else(|| {
@@ -30,7 +50,7 @@ pub fn ocr_recognize(image_path: &str, month: &str, conn: &Connection, resource_
         )));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = decode_bytes(&output.stdout);
     let output_text = stdout.trim().to_string();
 
     // Parse the JSON result from OCR script
@@ -125,6 +145,10 @@ fn run_ocr_script(script_path: &str, image_path: &str) -> AppResult<(String, Out
         for arg in &candidate[1..] {
             command.arg(arg);
         }
+
+        // Force UTF-8 encoding for Python on Windows (fixes Chinese path handling)
+        command.env("PYTHONIOENCODING", "utf-8");
+        command.env("PYTHONUTF8", "1");
 
         match command
             .arg(script_path)
