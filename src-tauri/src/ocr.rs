@@ -72,9 +72,11 @@ fn find_ocr_script(resource_dir: Option<&std::path::Path>) -> AppResult<String> 
     // 1. Tauri resource directory (production: resources are bundled here)
     if let Some(rdir) = resource_dir {
         candidates.push(rdir.join("python-ocr/main.py"));
+        // Also try flat structure
+        candidates.push(rdir.join("main.py"));
     }
 
-    // 2. Dev mode: relative to project root
+    // 2. Dev mode: relative to project root / cwd
     candidates.push(PathBuf::from("python-ocr/main.py"));
     candidates.push(PathBuf::from("../python-ocr/main.py"));
     candidates.push(PathBuf::from("../../python-ocr/main.py"));
@@ -89,15 +91,25 @@ fn find_ocr_script(resource_dir: Option<&std::path::Path>) -> AppResult<String> 
         }
     }
 
-    for candidate in candidates {
+    for candidate in &candidates {
         if candidate.exists() {
             return Ok(candidate.to_string_lossy().to_string());
         }
     }
 
-    Err(AppError::Ocr(
-        "OCR脚本未找到，请确认 python-ocr 已随安装包一起发布".to_string(),
-    ))
+    // Build detailed error with all attempted paths
+    let tried: Vec<String> = candidates.iter().map(|p| p.to_string_lossy().to_string()).collect();
+    let resource_info = match resource_dir {
+        Some(r) => format!("resource_dir={}", r.display()),
+        None => "resource_dir=None".to_string(),
+    };
+    let cwd = std::env::current_dir().map(|d| d.display().to_string()).unwrap_or_default();
+    let exe = std::env::current_exe().map(|d| d.display().to_string()).unwrap_or_default();
+
+    Err(AppError::Ocr(format!(
+        "OCR脚本未找到。{resource_info}, cwd={cwd}, exe={exe}\n已尝试路径: {}",
+        tried.join("; ")
+    )))
 }
 
 fn run_ocr_script(script_path: &str, image_path: &str) -> AppResult<(String, Output)> {
