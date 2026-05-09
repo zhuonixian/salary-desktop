@@ -1,15 +1,14 @@
 import { useState, useEffect } from 'react';
 import {
-  Card, Upload, Button, Table, Input, Row, Col, Divider, message, Spin, List, Tag,
+  Card, Button, Table, Input, Row, Col, Divider, message, Spin, List, Tag,
 } from 'antd';
 import {
-  InboxOutlined, ScanOutlined, CheckCircleOutlined, HistoryOutlined,
+  ScanOutlined, CheckCircleOutlined, HistoryOutlined, FolderOpenOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
+import { open } from '@tauri-apps/plugin-dialog';
 import { ocrRecognize, getOcrBatches, confirmOcrResult } from '@/api';
 import type { AttendanceRecordInput, OcrBatch } from '@/types';
-
-const { Dragger } = Upload;
 
 const OcrCenter: React.FC = () => {
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
@@ -40,12 +39,21 @@ const OcrCenter: React.FC = () => {
     fetchBatches();
   }, []);
 
-  const handleFileDrop = (file: File) => {
-    setSelectedFile((file as File & { path?: string }).path || file.name);
-    setRawText('');
-    setStructuredData([]);
-    setCurrentBatchId(null);
-    return false;
+  const handleBrowseFile = async () => {
+    try {
+      const selected = await open({
+        multiple: false,
+        filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'bmp', 'tiff'] }],
+      });
+      if (selected) {
+        setSelectedFile(selected as string);
+        setRawText('');
+        setStructuredData([]);
+        setCurrentBatchId(null);
+      }
+    } catch {
+      message.error('选择文件失败');
+    }
   };
 
   const handleRecognize = async () => {
@@ -157,20 +165,23 @@ const OcrCenter: React.FC = () => {
       <Row gutter={24}>
         <Col xs={24} lg={10}>
           <Card title="上传与识别" style={{ marginBottom: 24 }}>
-            <Dragger
-              accept="image/*"
-              showUploadList={false}
-              beforeUpload={(file) => handleFileDrop(file)}
-              customRequest={() => {}}
-            >
-              <p className="ocr-upload-icon"><InboxOutlined /></p>
-              <p style={{ fontSize: 16, color: '#666' }}>点击或拖拽图片到此处上传</p>
-              <p style={{ color: '#999' }}>支持 JPG / PNG / BMP 等图片格式</p>
-            </Dragger>
+            <div style={{ textAlign: 'center', padding: '20px 0' }}>
+              <Button
+                icon={<FolderOpenOutlined />}
+                size="large"
+                onClick={handleBrowseFile}
+                style={{ marginBottom: 16 }}
+              >
+                选择图片文件
+              </Button>
+              <p style={{ color: '#999', fontSize: 13 }}>支持 JPG / PNG / BMP 等图片格式</p>
+            </div>
 
             {selectedFile && (
               <div style={{ marginTop: 16, textAlign: 'center' }}>
-                <p style={{ color: '#666', marginBottom: 8 }}>已选择: {selectedFile}</p>
+                <p style={{ color: '#666', marginBottom: 8, wordBreak: 'break-all' }}>
+                  已选择: {selectedFile}
+                </p>
                 <Button
                   type="primary"
                   icon={<ScanOutlined />}
