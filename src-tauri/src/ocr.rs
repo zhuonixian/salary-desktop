@@ -17,11 +17,10 @@ fn decode_bytes(data: &[u8]) -> String {
     // Fallback: try GBK/GB2312 for Chinese Windows
     #[cfg(target_os = "windows")]
     {
-        if let Ok(s) = encoding_rs::GBK.decode(data).0 {
-            let decoded = s.to_string();
-            if !decoded.contains('�') {
-                return decoded;
-            }
+        let (decoded, _, _) = encoding_rs::GBK.decode(data);
+        let decoded = decoded.to_string();
+        if !decoded.contains('�') {
+            return decoded;
         }
     }
     // Last resort: lossy UTF-8
