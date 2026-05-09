@@ -1,21 +1,22 @@
 import { useState, useEffect } from 'react';
 import {
-  Card, Upload, Button, Table, Input, Row, Col, Divider, message, Spin, List, Tag, Space, Modal,
+  Card, Upload, Button, Table, Input, Row, Col, Divider, message, Spin, List, Tag,
 } from 'antd';
 import {
-  InboxOutlined, ScanOutlined, CheckCircleOutlined, HistoryOutlined, EditOutlined,
+  InboxOutlined, ScanOutlined, CheckCircleOutlined, HistoryOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
-import { ocrRecognize, getOcrBatches, getOcrResults, confirmOcrResult, updateOcrResult } from '@/api';
-import type { OcrBatch, OcrResult } from '@/types';
+import { ocrRecognize, getOcrBatches, confirmOcrResult } from '@/api';
+import type { AttendanceRecordInput, OcrBatch } from '@/types';
 
 const { Dragger } = Upload;
 
 const OcrCenter: React.FC = () => {
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  const [month] = useState(dayjs());
   const [recognizing, setRecognizing] = useState(false);
   const [rawText, setRawText] = useState('');
-  const [structuredData, setStructuredData] = useState<Record<string, string>[]>([]);
+  const [structuredData, setStructuredData] = useState<AttendanceRecordInput[]>([]);
   const [editingCell, setEditingCell] = useState<{ row: number; key: string } | null>(null);
   const [editValue, setEditValue] = useState('');
   const [currentBatchId, setCurrentBatchId] = useState<number | null>(null);
@@ -25,7 +26,7 @@ const OcrCenter: React.FC = () => {
   const fetchBatches = async () => {
     setBatchLoading(true);
     try {
-      const data = await getOcrBatches();
+      const data = await getOcrBatches(month.format('YYYY-MM'));
       setBatches(data);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -54,13 +55,10 @@ const OcrCenter: React.FC = () => {
     }
     setRecognizing(true);
     try {
-      const batch = await ocrRecognize(selectedFile);
-      setCurrentBatchId(batch.id);
-      const results = await getOcrResults(batch.id);
-      if (results.length > 0) {
-        setRawText(results[0].raw_text);
-        setStructuredData(results[0].structured_data);
-      }
+      const result = await ocrRecognize(selectedFile, month.format('YYYY-MM'));
+      setCurrentBatchId(result.batch_id);
+      setRawText(result.raw_text);
+      setStructuredData(result.records);
       message.success('识别完成');
       fetchBatches();
     } catch (e: unknown) {
@@ -71,9 +69,9 @@ const OcrCenter: React.FC = () => {
     }
   };
 
-  const handleCellEdit = (rowIndex: number, key: string, value: string) => {
+  const handleCellEdit = (rowIndex: number, key: string, value: unknown) => {
     setEditingCell({ row: rowIndex, key });
-    setEditValue(value);
+    setEditValue(value == null ? '' : String(value));
   };
 
   const handleCellSave = (rowIndex: number, key: string) => {
@@ -86,13 +84,9 @@ const OcrCenter: React.FC = () => {
   const handleConfirm = async () => {
     if (!currentBatchId) return;
     try {
-      const results = await getOcrResults(currentBatchId);
-      if (results.length > 0) {
-        await updateOcrResult(results[0].id, structuredData);
-        await confirmOcrResult(results[0].id);
-        message.success('已确认入库');
-        fetchBatches();
-      }
+      await confirmOcrResult(currentBatchId, structuredData);
+      message.success('已确认入库');
+      fetchBatches();
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       message.error('入库失败: ' + msg);
@@ -101,11 +95,15 @@ const OcrCenter: React.FC = () => {
 
   const handleViewBatch = async (batchId: number) => {
     try {
-      const results = await getOcrResults(batchId);
-      if (results.length > 0) {
-        setCurrentBatchId(batchId);
-        setRawText(results[0].raw_text);
-        setStructuredData(results[0].structured_data);
+      const batch = batches.find((item) => item.id === batchId);
+      if (batch) {
+        let records: AttendanceRecordInput[] = [];
+        if (batch.parsed_json) {
+          records = JSON.parse(batch.parsed_json) as AttendanceRecordInput[];
+        }
+        setCurrentBatchId(batch.id);
+        setRawText(batch.raw_text ?? '');
+        setStructuredData(records);
       }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -118,6 +116,9 @@ const OcrCenter: React.FC = () => {
     '识别中': 'processing',
     '已完成': 'success',
     '失败': 'error',
+    pending: 'processing',
+    confirmed: 'success',
+    failed: 'error',
   };
 
   // Build table columns from structured data keys
@@ -126,7 +127,7 @@ const OcrCenter: React.FC = () => {
         title: key,
         dataIndex: key,
         key,
-        render: (text: string, _: Record<string, string>, rowIndex: number) =>
+        render: (text: unknown, _: AttendanceRecordInput, rowIndex: number) =>
           editingCell?.row === rowIndex && editingCell?.key === key ? (
             <Input
               size="small"
@@ -141,7 +142,7 @@ const OcrCenter: React.FC = () => {
               style={{ cursor: 'pointer', padding: '2px 4px', borderRadius: 2 }}
               onClick={() => handleCellEdit(rowIndex, key, text)}
             >
-              {text || <span style={{ color: '#ccc' }}>点击编辑</span>}
+              {text == null || text === '' ? <span style={{ color: '#ccc' }}>点击编辑</span> : String(text)}
             </span>
           ),
       }))

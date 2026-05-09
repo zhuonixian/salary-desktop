@@ -155,24 +155,24 @@ export interface SalaryResultUpdate {
 
 // ==================== OCR 相关 ====================
 
-export type OcrStatus = '待识别' | '识别中' | '已完成' | '失败';
+export type OcrStatus = '待识别' | '识别中' | '已完成' | '失败' | 'pending' | 'confirmed' | 'failed';
 
 export interface OcrBatch {
   id: number;
   batch_name: string;
+  salary_month?: string;
   file_path: string;
+  raw_text?: string;
+  parsed_json?: string;
   status: OcrStatus;
   result_count: number;
   created_at: string;
 }
 
 export interface OcrResult {
-  id: number;
   batch_id: number;
   raw_text: string;
-  structured_data: Record<string, string>[];
-  confirmed: boolean;
-  created_at: string;
+  records: AttendanceRecordInput[];
 }
 
 // ==================== 导入导出相关 ====================

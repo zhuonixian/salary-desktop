@@ -7,61 +7,7 @@
     <title>工资核算助手</title>
   </head>
   <body>
-    <div id="diag" style="padding:20px;font-family:monospace;font-size:14px;color:green;white-space:pre;">Loading...</div>
     <div id="root"></div>
-    <script>
-      // Inline diagnostic - error catching
-      var d = document.getElementById('diag');
-      d.textContent = 'Step 1: Inline JS works!\n';
-      d.textContent += 'Location: ' + window.location.href + '\n';
-
-      // Catch ALL errors
-      window.onerror = function(msg, url, line, col, error) {
-        d.textContent += 'JS ERROR: ' + msg + ' at line ' + line + ':' + col + '\n';
-        if (error && error.stack) d.textContent += '  Stack: ' + error.stack.substring(0, 300) + '\n';
-        return false;
-      };
-      window.addEventListener('error', function(event) {
-        var target = event.target;
-        if (target && target !== window && target.tagName) {
-          d.textContent += 'RESOURCE ERROR: <' + target.tagName.toLowerCase() + '> ' + (target.src || target.href || '') + '\n';
-        }
-      }, true);
-      window.addEventListener('unhandledrejection', function(event) {
-        d.textContent += 'PROMISE ERROR: ' + event.reason + '\n';
-        if (event.reason && event.reason.stack) d.textContent += '  Stack: ' + event.reason.stack.substring(0, 300) + '\n';
-      });
-
-      window.addEventListener('DOMContentLoaded', function() {
-        var scripts = Array.prototype.slice.call(document.querySelectorAll('script[type="module"][src]'));
-        d.textContent += 'Step 2: Module scripts found=' + scripts.length + '\n';
-        scripts.forEach(function(script, index) {
-          try {
-            var x = new XMLHttpRequest();
-            x.open('GET', script.getAttribute('src'), false);
-            x.send();
-            d.textContent += '  module[' + index + '] status=' + x.status + ' length=' + x.responseText.length + ' src=' + script.getAttribute('src') + '\n';
-          } catch(e) {
-            d.textContent += '  module[' + index + '] fetch FAILED: ' + e.message + '\n';
-          }
-        });
-      });
-      d.textContent += 'Step 3: Waiting for module entry...\n';
-
-      // Monitor if React renders into #root
-      var checkCount = 0;
-      var checkInterval = setInterval(function() {
-        checkCount++;
-        var root = document.getElementById('root');
-        if (root && root.children.length > 0) {
-          d.textContent += 'Step 4: React RENDERED OK! (' + root.children.length + ' children)\n';
-          clearInterval(checkInterval);
-        } else if (checkCount > 20) {
-          d.textContent += 'Step 4: TIMEOUT - #root still empty after 10s\n';
-          clearInterval(checkInterval);
-        }
-      }, 500);
-    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
