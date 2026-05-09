@@ -8,7 +8,8 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "start:dev": "bash scripts/start-dev.sh"
   },
   "dependencies": {
     "@ant-design/icons": "^6.2.2",

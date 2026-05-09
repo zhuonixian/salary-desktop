@@ -1,6 +1,7 @@
 use std::sync::Mutex;
 
 use rusqlite::Connection;
+use tauri::Manager;
 
 use crate::db;
 use crate::errors::AppError;
@@ -287,9 +288,10 @@ pub fn recalculate_employee(month: String, employee_no: String, state: tauri::St
 // ==================== OCR Commands ====================
 
 #[tauri::command]
-pub fn ocr_recognize(image_path: String, month: String, state: tauri::State<'_, Mutex<Connection>>) -> Result<OcrResult, AppError> {
+pub fn ocr_recognize(image_path: String, month: String, app: tauri::AppHandle, state: tauri::State<'_, Mutex<Connection>>) -> Result<OcrResult, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
-    ocr::ocr_recognize(&image_path, &month, &conn)
+    let resource_dir = app.path().resource_dir().ok();
+    ocr::ocr_recognize(&image_path, &month, &conn, resource_dir.as_deref())
 }
 
 #[tauri::command]

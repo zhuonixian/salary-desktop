@@ -9,10 +9,10 @@ use crate::errors::{AppError, AppResult};
 use crate::models::*;
 
 /// Run OCR recognition on an image via python3 script.
-/// Looks for python-ocr/main.py relative to the app executable or in the project structure.
-pub fn ocr_recognize(image_path: &str, month: &str, conn: &Connection) -> AppResult<OcrResult> {
+/// resource_dir: Tauri resource directory (from app.path().resource_dir()), or None for dev mode.
+pub fn ocr_recognize(image_path: &str, month: &str, conn: &Connection, resource_dir: Option<&std::path::Path>) -> AppResult<OcrResult> {
     // Try to locate the python OCR script
-    let script_path = find_ocr_script()?;
+    let script_path = find_ocr_script(resource_dir)?;
 
     let (python_cmd, output) = run_ocr_script(&script_path, image_path)?;
 
@@ -66,19 +66,25 @@ pub fn ocr_recognize(image_path: &str, month: &str, conn: &Connection) -> AppRes
     })
 }
 
-fn find_ocr_script() -> AppResult<String> {
-    // Try multiple possible locations
-    let mut candidates: Vec<PathBuf> = vec![
-        PathBuf::from("python-ocr/main.py"),
-        PathBuf::from("../python-ocr/main.py"),
-        PathBuf::from("../../python-ocr/main.py"),
-        PathBuf::from("/opt/salary-ocr/main.py"),
-    ];
+fn find_ocr_script(resource_dir: Option<&std::path::Path>) -> AppResult<String> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
 
+    // 1. Tauri resource directory (production: resources are bundled here)
+    if let Some(rdir) = resource_dir {
+        candidates.push(rdir.join("python-ocr/main.py"));
+    }
+
+    // 2. Dev mode: relative to project root
+    candidates.push(PathBuf::from("python-ocr/main.py"));
+    candidates.push(PathBuf::from("../python-ocr/main.py"));
+    candidates.push(PathBuf::from("../../python-ocr/main.py"));
+
+    // 3. Relative to executable
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
             candidates.push(exe_dir.join("python-ocr/main.py"));
             candidates.push(exe_dir.join("resources/python-ocr/main.py"));
+            // macOS .app bundle
             candidates.push(exe_dir.join("../Resources/python-ocr/main.py"));
         }
     }
