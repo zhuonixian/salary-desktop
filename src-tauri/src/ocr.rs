@@ -637,13 +637,11 @@ pub fn ocr_recognize_punch_card(
 
 /// Parse punch card OCR results using position data from Baidu API.
 ///
-/// Strategy: Don't rely on detecting 白/夜 sub-headers (they're often too small for OCR).
-/// Instead:
-/// 1. Group ALL words into rows by Y-coordinate
-/// 2. Find employee rows by pattern: sequence_number + name at left side
-/// 3. For each employee row, count check marks (√/✓ etc.) that appear to the RIGHT of the name
-/// 4. If the next row has no sequence number, it's the night shift row — also count its marks
-/// 5. Merge day + night into one attendance record
+/// Strategy:
+/// 1. Find employee entries by detecting sequence_number + name pattern
+/// 2. For each employee, determine their Y-range (from their name to the next employee's name)
+/// 3. Count ALL check marks (√) within that Y-range and to the RIGHT of the name column
+/// 4. Merge everything into one attendance record per employee
 fn parse_punch_card_ocr(
     words: &[BaiduWord],
     month: &str,
@@ -655,101 +653,23 @@ fn parse_punch_card_ocr(
     let days_in_month = get_days_in_month(month);
     let weekdays = compute_workdays(month, days_in_month);
 
-    // Step 1: Group ALL words into rows by Y-coordinate (including header)
-    let row_groups = group_words_by_row_all(words);
+    // Step 1: Find all words with location data, sort by Y then X
+    let mut located: Vec<&BaiduWord> = words.iter()
+        .filter(|w| w.location.is_some())
+        .collect();
+    located.sort_by(|a, b| {
+        let ya = a.location.as_ref().unwrap().top;
+        let yb = b.location.as_ref().unwrap().top;
+        ya.cmp(&yb).then(a.location.as_ref().unwrap().left.cmp(&b.location.as_ref().unwrap().left))
+    });
 
-    // Step 2: Identify the "name column" X range by finding Chinese names near sequence numbers
-    let name_col_max_x = find_name_column_boundary(&row_groups);
+    // Step 2: Find name column boundary (right edge of the name area)
+    let name_col_max_x = find_name_col_max(&located);
 
-    // Step 3: Find employee rows and count their check marks
-    let mut records = Vec::new();
-    let mut i = 0;
+    // Step 3: Find employee anchors: (seq_number, name, employee_no, y_center)
+    let anchors = find_employee_anchors(&located, name_col_max_x);
 
-    while i < row_groups.len() {
-        let row = &row_groups[i];
-
-        // Sort row by X position
-        let mut sorted_row = row.clone();
-        sorted_row.sort_by_key(|w| w.location.as_ref().map(|l| l.left).unwrap_or(0));
-
-        // Check if this row starts with a sequence number (1-100)
-        let first_text = sorted_row.first().map(|w| w.words.trim().to_string()).unwrap_or_default();
-        let seq: Option<u32> = first_text.parse().ok();
-        if seq.is_none() || seq.unwrap() == 0 || seq.unwrap() > 100 {
-            i += 1;
-            continue;
-        }
-
-        // Find name and employee_no from the left side of the row
-        let mut name = String::new();
-        let mut employee_no: Option<String> = None;
-        for w in sorted_row.iter().skip(1) {
-            let text = w.words.trim();
-            if text.is_empty() { continue; }
-            // Stop once we're past the name column area
-            let wx = w.location.as_ref().map(|l| l.left).unwrap_or(0);
-            if wx > name_col_max_x { break; }
-            if text.chars().all(|c| c.is_ascii_digit()) && employee_no.is_none() {
-                employee_no = Some(text.to_string());
-            } else if !text.chars().all(|c| c.is_ascii_digit() || c == '.') {
-                if name.is_empty() {
-                    name = text.to_string();
-                }
-            }
-        }
-
-        if name.is_empty() {
-            i += 1;
-            continue;
-        }
-
-        // Count check marks in this row (to the RIGHT of the name column)
-        let day_marks = count_row_marks(&sorted_row, name_col_max_x);
-
-        // Check if next row is the night shift row (no sequence number, or same employee)
-        let mut night_marks: f64 = 0.0;
-        if i + 1 < row_groups.len() {
-            let next_row = &row_groups[i + 1];
-            let mut next_sorted = next_row.clone();
-            next_sorted.sort_by_key(|w| w.location.as_ref().map(|l| l.left).unwrap_or(0));
-            let next_first = next_sorted.first().map(|w| w.words.trim().to_string()).unwrap_or_default();
-            let next_seq: Option<u32> = next_first.parse().ok();
-            // Next row is night shift if it doesn't start with the next sequence number
-            if next_seq.is_none() || next_seq.unwrap() != seq.unwrap() + 1 {
-                night_marks = count_row_marks(&next_sorted, name_col_max_x);
-                i += 1; // consume the night row
-            }
-        }
-
-        let total_present = day_marks + night_marks;
-        let expected = weekdays.len() as f64;
-
-        let mut remark_parts = Vec::new();
-        if day_marks > 0.0 { remark_parts.push(format!("白班{}天", day_marks as i32)); }
-        if night_marks > 0.0 { remark_parts.push(format!("夜班{}天", night_marks as i32)); }
-
-        records.push(AttendanceRecordInput {
-            id: None,
-            salary_month: month.to_string(),
-            employee_no: employee_no.unwrap_or_default(),
-            name: Some(name),
-            expected_days: Some(expected),
-            actual_days: Some(total_present),
-            late_count: None,
-            early_leave_count: None,
-            personal_leave_days: None,
-            sick_leave_days: None,
-            absent_days: Some((expected - total_present).max(0.0)),
-            overtime_hours: None,
-            source_type: Some("punch_card".to_string()),
-            ocr_batch_id: None,
-            remark: if remark_parts.is_empty() { None } else { Some(remark_parts.join(" ")) },
-        });
-
-        i += 1;
-    }
-
-    if records.is_empty() {
+    if anchors.is_empty() {
         let sample: Vec<String> = words.iter().take(20).map(|w| {
             let loc = w.location.as_ref().map(|l| format!("[{},{}]", l.left, l.top)).unwrap_or_default();
             format!("{}{loc}", w.words)
@@ -760,84 +680,138 @@ fn parse_punch_card_ocr(
         )));
     }
 
+    // Step 4: For each employee, count √ marks in their Y-range
+    let mut records = Vec::new();
+
+    for (idx, anchor) in anchors.iter().enumerate() {
+        let y_start = anchor.y.saturating_sub(10) as u32;
+        // Y end = next employee's Y - 10, or max Y + 50
+        let y_end = if idx + 1 < anchors.len() {
+            anchors[idx + 1].y.saturating_sub(10) as u32
+        } else {
+            located.last().map(|w| w.location.as_ref().unwrap().top + 50).unwrap_or(y_start + 200)
+        };
+
+        let mut total_checks: f64 = 0.0;
+        for w in &located {
+            let loc = w.location.as_ref().unwrap();
+            let y = loc.top;
+            let x = loc.left;
+            // Within this employee's Y-range AND to the right of name column
+            if y >= y_start && y < y_end && x > name_col_max_x {
+                if is_check_mark(&w.words) {
+                    total_checks += 1.0;
+                }
+            }
+        }
+
+        let expected = weekdays.len() as f64;
+        let name = anchor.name.clone();
+        let employee_no = anchor.employee_no.clone().unwrap_or_default();
+
+        records.push(AttendanceRecordInput {
+            id: None,
+            salary_month: month.to_string(),
+            employee_no,
+            name: Some(name),
+            expected_days: Some(expected),
+            actual_days: Some(total_checks),
+            late_count: None,
+            early_leave_count: None,
+            personal_leave_days: None,
+            sick_leave_days: None,
+            absent_days: Some((expected - total_checks).max(0.0)),
+            overtime_hours: None,
+            source_type: Some("punch_card".to_string()),
+            ocr_batch_id: None,
+            remark: if total_checks > 0.0 { Some(format!("出勤{:.0}天", total_checks)) } else { None },
+        });
+    }
+
     Ok(records)
 }
 
-/// Group ALL words into rows by Y-coordinate proximity (no header filtering).
-fn group_words_by_row_all(words: &[BaiduWord]) -> Vec<Vec<&BaiduWord>> {
-    let mut sorted: Vec<&BaiduWord> = words.iter()
-        .filter(|w| w.location.is_some())
-        .collect();
-    sorted.sort_by_key(|w| w.location.as_ref().unwrap().top);
-
-    let mut groups: Vec<Vec<&BaiduWord>> = Vec::new();
-    let mut current_row: Vec<&BaiduWord> = Vec::new();
-    let mut current_y: i32 = -100;
-
-    for w in &sorted {
-        let loc = w.location.as_ref().unwrap();
-        let y = loc.top as i32;
-        if (y - current_y).abs() > 15 && !current_row.is_empty() {
-            groups.push(current_row.clone());
-            current_row.clear();
-        }
-        current_y = y;
-        current_row.push(w);
-    }
-    if !current_row.is_empty() {
-        groups.push(current_row);
-    }
-    groups
+struct EmployeeAnchor {
+    name: String,
+    employee_no: Option<String>,
+    y: u32,
 }
 
-/// Find the right boundary of the "name column" by looking at X positions
-/// of non-numeric text that appears near sequence numbers in employee rows.
-fn find_name_column_boundary(row_groups: &[Vec<&BaiduWord>]) -> u32 {
-    let mut max_name_x: u32 = 200; // default: assume name column ends at ~200px
+/// Find the right boundary of the name column.
+fn find_name_col_max(located: &[&BaiduWord]) -> u32 {
+    let mut max_x: u32 = 150; // default
+    for w in located {
+        let text = w.words.trim();
+        let loc = w.location.as_ref().unwrap();
+        // Look for Chinese characters (names) that are NOT check marks
+        if !text.is_empty() && !text.chars().all(|c| c.is_ascii_digit() || c == '.') && !is_check_mark(text) {
+            let right = loc.left + loc.width + 30; // add margin
+            if right > max_x && right < 500 { // reasonable name column boundary
+                max_x = right;
+            }
+        }
+    }
+    max_x
+}
 
-    for row in row_groups {
-        let mut sorted_row = row.clone();
-        sorted_row.sort_by_key(|w| w.location.as_ref().map(|l| l.left).unwrap_or(0));
+/// Find employee anchor points: rows with a sequence number (1-100) followed by a name.
+fn find_employee_anchors(located: &[&BaiduWord], name_col_max_x: u32) -> Vec<EmployeeAnchor> {
+    // Group words into rough Y-bands first
+    let mut bands: Vec<Vec<&BaiduWord>> = Vec::new();
+    let mut current_band: Vec<&BaiduWord> = Vec::new();
+    let mut current_y: i32 = -100;
 
-        let first_text = sorted_row.first().map(|w| w.words.trim().to_string()).unwrap_or_default();
-        let seq: Option<u32> = first_text.parse().ok();
+    for w in located {
+        let y = w.location.as_ref().unwrap().top as i32;
+        if (y - current_y).abs() > 20 && !current_band.is_empty() {
+            bands.push(current_band.clone());
+            current_band.clear();
+        }
+        current_y = y;
+        current_band.push(w);
+    }
+    if !current_band.is_empty() {
+        bands.push(current_band);
+    }
+
+    let mut anchors = Vec::new();
+    for band in &bands {
+        let mut sorted = band.clone();
+        sorted.sort_by_key(|w| w.location.as_ref().unwrap().left);
+
+        // First word should be a sequence number (1-100)
+        let first = sorted.first().map(|w| w.words.trim().to_string()).unwrap_or_default();
+        let seq: Option<u32> = first.parse().ok();
         if seq.is_none() || seq.unwrap() == 0 || seq.unwrap() > 100 {
             continue;
         }
 
-        // Find the rightmost non-checkmark, non-pure-number word in the first 3 positions
-        for w in sorted_row.iter().take(4) {
+        // Find name and employee_no within name column area
+        let mut name = String::new();
+        let mut employee_no: Option<String> = None;
+        let mut y_center: u32 = 0;
+
+        for w in sorted.iter().skip(1) {
             let text = w.words.trim();
+            let x = w.location.as_ref().unwrap().left;
+            if x > name_col_max_x { break; }
             if text.is_empty() { continue; }
-            // Skip pure numbers (sequence number, employee_no)
-            if text.chars().all(|c| c.is_ascii_digit()) { continue; }
-            // Skip check marks
-            if is_check_mark(text) { continue; }
-            // This is likely a name - record its right edge
-            if let Some(loc) = &w.location {
-                let right_edge = loc.left + loc.width + 20; // add margin
-                if right_edge > max_name_x {
-                    max_name_x = right_edge;
+            if text.chars().all(|c| c.is_ascii_digit()) && employee_no.is_none() {
+                employee_no = Some(text.to_string());
+            } else if !text.chars().all(|c| c.is_ascii_digit() || c == '.') && !is_check_mark(text) {
+                if name.is_empty() {
+                    name = text.to_string();
+                    y_center = w.location.as_ref().unwrap().top;
                 }
             }
         }
-    }
 
-    max_name_x
-}
-
-/// Count check marks in a sorted row that appear to the RIGHT of the name column.
-fn count_row_marks(sorted_row: &[&BaiduWord], name_col_max_x: u32) -> f64 {
-    let mut count = 0.0;
-    for w in sorted_row {
-        let text = w.words.trim();
-        let wx = w.location.as_ref().map(|l| l.left).unwrap_or(0);
-        // Only count marks to the right of the name column
-        if wx > name_col_max_x && is_check_mark(text) {
-            count += 1.0;
+        if !name.is_empty() {
+            anchors.push(EmployeeAnchor { name, employee_no, y: y_center });
         }
     }
-    count
+
+    anchors
 }
 
 fn is_check_mark(text: &str) -> bool {
