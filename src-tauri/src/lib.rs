@@ -116,6 +116,8 @@ pub fn run() {
         commands::export_salary_slips,
         commands::export_attendance_summary_file,
         commands::get_dashboard_summary,
+        commands::get_ocr_settings,
+        commands::save_ocr_settings,
     ]);
 
     diag("calling builder.run()...");

@@ -177,6 +177,18 @@ export interface OcrResult {
 
 // ==================== 导入导出相关 ====================
 
+export interface OcrSettings {
+  ocr_mode: 'local' | 'online';
+  baidu_api_key: string;
+  baidu_secret_key: string;
+}
+
+export interface OcrSettingsInput {
+  ocr_mode?: 'local' | 'online';
+  baidu_api_key?: string;
+  baidu_secret_key?: string;
+}
+
 export interface ImportResult {
   success: boolean;
   total: number;

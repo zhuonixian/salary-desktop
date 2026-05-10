@@ -28,6 +28,9 @@ pub enum AppError {
 
     #[error("{0}")]
     General(String),
+
+    #[error("网络请求错误: {0}")]
+    Network(String),
 }
 
 impl serde::Serialize for AppError {

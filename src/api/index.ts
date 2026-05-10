@@ -11,6 +11,8 @@ import type {
   SalaryResultUpdate,
   OcrBatch,
   OcrResult,
+  OcrSettings,
+  OcrSettingsInput,
   ImportResult,
   DashboardSummary,
   EmployeeStatus,
@@ -449,10 +451,11 @@ export async function reviewSalary(month: string): Promise<void> {
 
 // ==================== OCR ====================
 
-export async function ocrRecognize(filePath: string, month: string): Promise<OcrResult> {
+export async function ocrRecognize(filePath: string, month: string, mode?: 'local' | 'online'): Promise<OcrResult> {
   const result = await invoke<{ batch_id: number; records: AttendanceRecordInput[]; raw_text?: string | null }>('ocr_recognize', {
     imagePath: filePath,
     month,
+    mode: mode ?? 'local',
   });
   return {
     batch_id: result.batch_id,
@@ -490,6 +493,16 @@ export async function getOcrBatches(month: string): Promise<OcrBatch[]> {
 
 export async function confirmOcrResult(batchId: number, records: AttendanceRecordInput[]): Promise<void> {
   return invoke('confirm_ocr_results', { batchId, records });
+}
+
+// ==================== OCR Settings ====================
+
+export async function getOcrSettings(): Promise<OcrSettings> {
+  return invoke<OcrSettings>('get_ocr_settings');
+}
+
+export async function saveOcrSettings(data: OcrSettingsInput): Promise<void> {
+  await invoke('save_ocr_settings', { data });
 }
 
 // ==================== 导出 ====================

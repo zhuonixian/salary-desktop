@@ -288,10 +288,11 @@ pub fn recalculate_employee(month: String, employee_no: String, state: tauri::St
 // ==================== OCR Commands ====================
 
 #[tauri::command]
-pub fn ocr_recognize(image_path: String, month: String, app: tauri::AppHandle, state: tauri::State<'_, Mutex<Connection>>) -> Result<OcrResult, AppError> {
+pub fn ocr_recognize(image_path: String, month: String, mode: Option<String>, app: tauri::AppHandle, state: tauri::State<'_, Mutex<Connection>>) -> Result<OcrResult, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     let resource_dir = app.path().resource_dir().ok();
-    ocr::ocr_recognize(&image_path, &month, &conn, resource_dir.as_deref())
+    let mode = mode.as_deref().unwrap_or("local");
+    ocr::ocr_recognize(&image_path, &month, mode, &conn, resource_dir.as_deref())
 }
 
 #[tauri::command]
@@ -363,4 +364,18 @@ pub fn export_attendance_summary_file(month: String, path: String, state: tauri:
 pub fn get_dashboard_summary(month: String, state: tauri::State<'_, Mutex<Connection>>) -> Result<DashboardSummary, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     db::get_dashboard_summary(&conn, &month)
+}
+
+// ==================== OCR Settings Commands ====================
+
+#[tauri::command]
+pub fn get_ocr_settings(state: tauri::State<'_, Mutex<Connection>>) -> Result<OcrSettings, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    ocr::get_ocr_settings(&conn)
+}
+
+#[tauri::command]
+pub fn save_ocr_settings(data: OcrSettingsInput, state: tauri::State<'_, Mutex<Connection>>) -> Result<bool, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    ocr::save_ocr_settings(&conn, &data)
 }

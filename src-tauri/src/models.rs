@@ -212,6 +212,20 @@ pub struct DashboardSummary {
 // ==================== Operation Log ====================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OcrSettings {
+    pub ocr_mode: String,
+    pub baidu_api_key: String,
+    pub baidu_secret_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OcrSettingsInput {
+    pub ocr_mode: Option<String>,
+    pub baidu_api_key: Option<String>,
+    pub baidu_secret_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperationLog {
     pub id: i64,
     pub operation_type: String,

@@ -135,6 +135,11 @@ fn create_tables(conn: &Connection) -> AppResult<()> {
             detail TEXT,
             created_at TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
         ",
     )?;
 
@@ -876,4 +881,24 @@ pub fn get_dashboard_summary(conn: &Connection, month: &str) -> AppResult<Dashbo
         total_tax,
         attendance_count: attendance_count as i32,
     })
+}
+
+// ==================== App Settings ====================
+
+pub fn get_setting(conn: &Connection, key: &str) -> AppResult<Option<String>> {
+    let mut stmt = conn.prepare("SELECT value FROM app_settings WHERE key = ?1")?;
+    let result = stmt.query_row(params![key], |row| row.get::<_, String>(0));
+    match result {
+        Ok(v) => Ok(Some(v)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(AppError::from(e)),
+    }
+}
+
+pub fn set_setting(conn: &Connection, key: &str, value: &str) -> AppResult<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, ?2)",
+        params![key, value],
+    )?;
+    Ok(())
 }
