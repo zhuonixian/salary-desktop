@@ -635,16 +635,15 @@ pub fn ocr_recognize_punch_card(
     })
 }
 
-/// A detected shift sub-column (白 or 夜) with its X center position
-#[derive(Clone)]
-struct ShiftColumn {
-    day: u32,
-    shift: String, // "day" or "night"
-    x_center: u32,
-}
-
 /// Parse punch card OCR results using position data from Baidu API.
-/// Real table structure: each date has 白/夜 sub-columns, each employee has 2 rows.
+///
+/// Strategy: Don't rely on detecting 白/夜 sub-headers (they're often too small for OCR).
+/// Instead:
+/// 1. Group ALL words into rows by Y-coordinate
+/// 2. Find employee rows by pattern: sequence_number + name at left side
+/// 3. For each employee row, count check marks (√/✓ etc.) that appear to the RIGHT of the name
+/// 4. If the next row has no sequence number, it's the night shift row — also count its marks
+/// 5. Merge day + night into one attendance record
 fn parse_punch_card_ocr(
     words: &[BaiduWord],
     month: &str,
@@ -655,95 +654,102 @@ fn parse_punch_card_ocr(
 
     let days_in_month = get_days_in_month(month);
     let weekdays = compute_workdays(month, days_in_month);
-    let holidays = compute_holidays(month, days_in_month);
 
-    // Step 1: Detect shift sub-columns (白/夜) in header area
-    // Find "白" and "夜" text in the top region to determine column positions
-    let header_y_max = find_header_boundary(words);
+    // Step 1: Group ALL words into rows by Y-coordinate (including header)
+    let row_groups = group_words_by_row_all(words);
 
-    let mut shift_cols: Vec<ShiftColumn> = Vec::new();
+    // Step 2: Identify the "name column" X range by finding Chinese names near sequence numbers
+    let name_col_max_x = find_name_column_boundary(&row_groups);
 
-    // Find "白" and "夜" labels in header area
-    let mut day_labels: Vec<(u32, u32)> = Vec::new(); // (x_center, y) for "白"
-    let mut night_labels: Vec<(u32, u32)> = Vec::new(); // (x_center, y) for "夜"
+    // Step 3: Find employee rows and count their check marks
+    let mut records = Vec::new();
+    let mut i = 0;
 
-    for w in words {
-        let loc = match &w.location {
-            Some(l) => l,
-            None => continue,
-        };
-        if loc.top > header_y_max {
+    while i < row_groups.len() {
+        let row = &row_groups[i];
+
+        // Sort row by X position
+        let mut sorted_row = row.clone();
+        sorted_row.sort_by_key(|w| w.location.as_ref().map(|l| l.left).unwrap_or(0));
+
+        // Check if this row starts with a sequence number (1-100)
+        let first_text = sorted_row.first().map(|w| w.words.trim().to_string()).unwrap_or_default();
+        let seq: Option<u32> = first_text.parse().ok();
+        if seq.is_none() || seq.unwrap() == 0 || seq.unwrap() > 100 {
+            i += 1;
             continue;
         }
-        let text = w.words.trim();
-        if text == "白" || text == "白班" {
-            day_labels.push((loc.left + loc.width / 2, loc.top));
-        } else if text == "夜" || text == "夜班" {
-            night_labels.push((loc.left + loc.width / 2, loc.top));
-        }
-    }
 
-    // Find day number headers (1-31) in header area
-    let mut day_headers: Vec<(u32, u32, u32)> = Vec::new(); // (day, x_center, width)
-    for w in words {
-        let loc = match &w.location {
-            Some(l) => l,
-            None => continue,
-        };
-        if loc.top > header_y_max {
+        // Find name and employee_no from the left side of the row
+        let mut name = String::new();
+        let mut employee_no: Option<String> = None;
+        for w in sorted_row.iter().skip(1) {
+            let text = w.words.trim();
+            if text.is_empty() { continue; }
+            // Stop once we're past the name column area
+            let wx = w.location.as_ref().map(|l| l.left).unwrap_or(0);
+            if wx > name_col_max_x { break; }
+            if text.chars().all(|c| c.is_ascii_digit()) && employee_no.is_none() {
+                employee_no = Some(text.to_string());
+            } else if !text.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                if name.is_empty() {
+                    name = text.to_string();
+                }
+            }
+        }
+
+        if name.is_empty() {
+            i += 1;
             continue;
         }
-        if let Ok(day) = w.words.trim().parse::<u32>() {
-            if day >= 1 && day <= 31 {
-                day_headers.push((day, loc.left + loc.width / 2, loc.width));
+
+        // Count check marks in this row (to the RIGHT of the name column)
+        let day_marks = count_row_marks(&sorted_row, name_col_max_x);
+
+        // Check if next row is the night shift row (no sequence number, or same employee)
+        let mut night_marks: f64 = 0.0;
+        if i + 1 < row_groups.len() {
+            let next_row = &row_groups[i + 1];
+            let mut next_sorted = next_row.clone();
+            next_sorted.sort_by_key(|w| w.location.as_ref().map(|l| l.left).unwrap_or(0));
+            let next_first = next_sorted.first().map(|w| w.words.trim().to_string()).unwrap_or_default();
+            let next_seq: Option<u32> = next_first.parse().ok();
+            // Next row is night shift if it doesn't start with the next sequence number
+            if next_seq.is_none() || next_seq.unwrap() != seq.unwrap() + 1 {
+                night_marks = count_row_marks(&next_sorted, name_col_max_x);
+                i += 1; // consume the night row
             }
         }
-    }
-    day_headers.sort_by_key(|(_, x, _)| *x);
 
-    // If we found 白/夜 labels, use them to build shift columns
-    // If not found, try the legacy single-column-per-day approach as fallback
-    if !day_labels.is_empty() || !night_labels.is_empty() {
-        // Sort labels by X
-        day_labels.sort_by_key(|(x, _)| *x);
-        night_labels.sort_by_key(|(x, _)| *x);
+        let total_present = day_marks + night_marks;
+        let expected = weekdays.len() as f64;
 
-        // Pair day numbers with 白/夜 labels by X proximity
-        for (day, day_x, _) in &day_headers {
-            // Find closest 白 label
-            if let Some(&(white_x, _)) = day_labels.iter().find(|(lx, _)| (*lx as i32 - *day_x as i32).abs() < 50) {
-                shift_cols.push(ShiftColumn { day: *day, shift: "day".to_string(), x_center: white_x });
-            }
-            // Find closest 夜 label
-            if let Some(&(night_x, _)) = night_labels.iter().find(|(lx, _)| (*lx as i32 - *day_x as i32).abs() < 50) {
-                shift_cols.push(ShiftColumn { day: *day, shift: "night".to_string(), x_center: night_x });
-            }
-        }
-    } else {
-        // Fallback: no 白/夜 labels found, treat each day header as both shifts
-        // Use the day header X as center, check marks to the left = day, to the right = night
-        // (legacy mode for old-style templates with single column per day)
-        for (day, day_x, _) in &day_headers {
-            shift_cols.push(ShiftColumn { day: *day, shift: "day".to_string(), x_center: *day_x });
-        }
-    }
+        let mut remark_parts = Vec::new();
+        if day_marks > 0.0 { remark_parts.push(format!("白班{}天", day_marks as i32)); }
+        if night_marks > 0.0 { remark_parts.push(format!("夜班{}天", night_marks as i32)); }
 
-    if shift_cols.is_empty() {
-        // Last fallback: just use numbers directly
-        for (day, x, _) in &day_headers {
-            shift_cols.push(ShiftColumn { day: *day, shift: "day".to_string(), x_center: *x });
-        }
+        records.push(AttendanceRecordInput {
+            id: None,
+            salary_month: month.to_string(),
+            employee_no: employee_no.unwrap_or_default(),
+            name: Some(name),
+            expected_days: Some(expected),
+            actual_days: Some(total_present),
+            late_count: None,
+            early_leave_count: None,
+            personal_leave_days: None,
+            sick_leave_days: None,
+            absent_days: Some((expected - total_present).max(0.0)),
+            overtime_hours: None,
+            source_type: Some("punch_card".to_string()),
+            ocr_batch_id: None,
+            remark: if remark_parts.is_empty() { None } else { Some(remark_parts.join(" ")) },
+        });
+
+        i += 1;
     }
 
-    // Step 2: Group words into rows by Y-coordinate proximity
-    let row_groups = group_words_by_row(words, header_y_max);
-
-    // Step 3: Identify employee blocks
-    // Each employee has 2 rows (day shift row + night shift row)
-    // The first row of each block has a sequence number + name
-    let employee_blocks = identify_employee_blocks(&row_groups);
-
-    if employee_blocks.is_empty() {
+    if records.is_empty() {
         let sample: Vec<String> = words.iter().take(20).map(|w| {
             let loc = w.location.as_ref().map(|l| format!("[{},{}]", l.left, l.top)).unwrap_or_default();
             format!("{}{loc}", w.words)
@@ -754,109 +760,22 @@ fn parse_punch_card_ocr(
         )));
     }
 
-    // Step 4: Parse attendance marks for each employee
-    let mut records = Vec::new();
-
-    for block in &employee_blocks {
-        let name = block.name.clone();
-        let day_words: Vec<&BaiduWord> = block.day_row.iter().flat_map(|r| r.iter().copied()).collect();
-        let night_words: Vec<&BaiduWord> = block.night_row.iter().flat_map(|r| r.iter().copied()).collect();
-
-        // Count day shift attendance
-        let (day_present, day_personal, day_sick, day_overtime) =
-            count_attendance(&day_words, &shift_cols, "day", &weekdays, &holidays);
-
-        // Count night shift attendance
-        let (night_present, night_personal, night_sick, night_overtime) =
-            count_attendance(&night_words, &shift_cols, "night", &weekdays, &holidays);
-
-        let total_present = day_present + night_present;
-        let total_personal = day_personal + night_personal;
-        let total_sick = day_sick + night_sick;
-        let total_overtime = day_overtime + night_overtime;
-
-        // Expected days = workdays (Mon-Fri) minus holidays
-        let expected = weekdays.len() as f64;
-
-        let mut remark_parts = Vec::new();
-        if day_present > 0.0 { remark_parts.push(format!("白班{}天", day_present as i32)); }
-        if night_present > 0.0 { remark_parts.push(format!("夜班{}天", night_present as i32)); }
-        if total_overtime > 0.0 { remark_parts.push(format!("加班{:.0}h转调休", total_overtime)); }
-        if total_personal > 0.0 { remark_parts.push(format!("事假{:.1}天", total_personal)); }
-        if total_sick > 0.0 { remark_parts.push(format!("病假{:.1}天", total_sick)); }
-
-        // Try to find employee_no from the data
-        let employee_no = block.employee_no.clone().unwrap_or_default();
-        if employee_no.is_empty() && name.is_empty() {
-            continue;
-        }
-
-        records.push(AttendanceRecordInput {
-            id: None,
-            salary_month: month.to_string(),
-            employee_no,
-            name: Some(name),
-            expected_days: Some(expected),
-            actual_days: Some(total_present),
-            late_count: None,
-            early_leave_count: None,
-            personal_leave_days: if total_personal > 0.0 { Some(total_personal) } else { None },
-            sick_leave_days: if total_sick > 0.0 { Some(total_sick) } else { None },
-            absent_days: Some((expected - total_present - total_personal - total_sick).max(0.0)),
-            overtime_hours: if total_overtime > 0.0 { Some(total_overtime) } else { None },
-            source_type: Some("punch_card".to_string()),
-            ocr_batch_id: None,
-            remark: if remark_parts.is_empty() { None } else { Some(remark_parts.join(" ")) },
-        });
-    }
-
     Ok(records)
 }
 
-/// Find the Y boundary between header and data area.
-/// Look for where the first sequence number appears.
-fn find_header_boundary(words: &[BaiduWord]) -> u32 {
-    let mut min_data_y = u32::MAX;
-    for w in words {
-        let text = w.words.trim();
-        // Check if this looks like a sequence number in a data row
-        if let Ok(num) = text.parse::<u32>() {
-            if num >= 1 && num <= 100 {
-                let y = w.location.as_ref().map(|l| l.top).unwrap_or(0);
-                // Only consider if there are other words nearby at similar Y (employee row)
-                if y < min_data_y && y > 20 {
-                    min_data_y = y;
-                }
-            }
-        }
-    }
-    // Header is above the first data row; use a threshold
-    if min_data_y < u32::MAX {
-        min_data_y.saturating_sub(15)
-    } else {
-        80 // fallback
-    }
-}
-
-/// Group words into rows by Y-coordinate proximity.
-/// Only returns rows below the header boundary.
-fn group_words_by_row<'a>(words: &'a [BaiduWord], header_y_max: u32) -> Vec<Vec<&'a BaiduWord>> {
-    let mut sorted: Vec<&BaiduWord> = words.iter().collect();
-    sorted.sort_by_key(|w| w.location.as_ref().map(|l| l.top).unwrap_or(0));
+/// Group ALL words into rows by Y-coordinate proximity (no header filtering).
+fn group_words_by_row_all(words: &[BaiduWord]) -> Vec<Vec<&BaiduWord>> {
+    let mut sorted: Vec<&BaiduWord> = words.iter()
+        .filter(|w| w.location.is_some())
+        .collect();
+    sorted.sort_by_key(|w| w.location.as_ref().unwrap().top);
 
     let mut groups: Vec<Vec<&BaiduWord>> = Vec::new();
     let mut current_row: Vec<&BaiduWord> = Vec::new();
     let mut current_y: i32 = -100;
 
     for w in &sorted {
-        let loc = match &w.location {
-            Some(l) => l,
-            None => continue,
-        };
-        // Skip header area
-        if loc.top <= header_y_max {
-            continue;
-        }
+        let loc = w.location.as_ref().unwrap();
         let y = loc.top as i32;
         if (y - current_y).abs() > 15 && !current_row.is_empty() {
             groups.push(current_row.clone());
@@ -871,170 +790,61 @@ fn group_words_by_row<'a>(words: &'a [BaiduWord], header_y_max: u32) -> Vec<Vec<
     groups
 }
 
-/// An employee block with their day/night shift rows.
-struct EmployeeBlock<'a> {
-    seq: u32,
-    name: String,
-    employee_no: Option<String>,
-    day_row: Vec<Vec<&'a BaiduWord>>,
-    night_row: Vec<Vec<&'a BaiduWord>>,
-}
+/// Find the right boundary of the "name column" by looking at X positions
+/// of non-numeric text that appears near sequence numbers in employee rows.
+fn find_name_column_boundary(row_groups: &[Vec<&BaiduWord>]) -> u32 {
+    let mut max_name_x: u32 = 200; // default: assume name column ends at ~200px
 
-/// Identify employee blocks from row groups.
-/// Each block starts with a row containing a sequence number + name,
-/// followed by additional rows for night shift data.
-fn identify_employee_blocks<'a>(row_groups: &[Vec<&'a BaiduWord>]) -> Vec<EmployeeBlock<'a>> {
-    let mut blocks = Vec::new();
-    let mut i = 0;
-
-    while i < row_groups.len() {
-        let row = &row_groups[i];
-
-        // Sort row by X position
+    for row in row_groups {
         let mut sorted_row = row.clone();
         sorted_row.sort_by_key(|w| w.location.as_ref().map(|l| l.left).unwrap_or(0));
 
-        // Check if first element is a sequence number
-        let first = sorted_row.first().map(|w| w.words.trim().to_string()).unwrap_or_default();
-        let seq: Option<u32> = first.parse().ok();
+        let first_text = sorted_row.first().map(|w| w.words.trim().to_string()).unwrap_or_default();
+        let seq: Option<u32> = first_text.parse().ok();
         if seq.is_none() || seq.unwrap() == 0 || seq.unwrap() > 100 {
-            i += 1;
             continue;
         }
-        let seq = seq.unwrap();
 
-        // Try to find name: look for non-numeric text after the sequence number
-        let mut name = String::new();
-        let mut employee_no: Option<String> = None;
-
-        for w in sorted_row.iter().skip(1) {
+        // Find the rightmost non-checkmark, non-pure-number word in the first 3 positions
+        for w in sorted_row.iter().take(4) {
             let text = w.words.trim();
             if text.is_empty() { continue; }
-            // If it looks like a number (employee_no), store it
-            if text.chars().all(|c| c.is_ascii_digit()) && employee_no.is_none() {
-                employee_no = Some(text.to_string());
-            } else if !text.chars().all(|c| c.is_ascii_digit() || c == '.') {
-                // First non-pure-number text after seq is the name
-                if name.is_empty() {
-                    name = text.to_string();
+            // Skip pure numbers (sequence number, employee_no)
+            if text.chars().all(|c| c.is_ascii_digit()) { continue; }
+            // Skip check marks
+            if is_check_mark(text) { continue; }
+            // This is likely a name - record its right edge
+            if let Some(loc) = &w.location {
+                let right_edge = loc.left + loc.width + 20; // add margin
+                if right_edge > max_name_x {
+                    max_name_x = right_edge;
                 }
             }
         }
-
-        if name.is_empty() {
-            i += 1;
-            continue;
-        }
-
-        // Collect day shift row (current row) and night shift row (next row if no seq number)
-        let day_row = vec![row.clone()];
-        let night_row = if i + 1 < row_groups.len() {
-            let next_row = &row_groups[i + 1];
-            let next_sorted: Vec<&BaiduWord> = {
-                let mut s = next_row.clone();
-                s.sort_by_key(|w| w.location.as_ref().map(|l| l.left).unwrap_or(0));
-                s
-            };
-            let next_first = next_sorted.first().map(|w| w.words.trim().to_string()).unwrap_or_default();
-            let next_seq: Option<u32> = next_first.parse().ok();
-            // If next row doesn't start with a sequence number, it's the night shift row
-            if next_seq.is_none() || next_seq.unwrap() != seq + 1 {
-                i += 1; // skip next row since it belongs to this employee
-                vec![next_row.clone()]
-            } else {
-                Vec::new()
-            }
-        } else {
-            Vec::new()
-        };
-
-        blocks.push(EmployeeBlock {
-            seq,
-            name,
-            employee_no,
-            day_row,
-            night_row,
-        });
-
-        i += 1;
     }
 
-    blocks
+    max_name_x
 }
 
-/// Count attendance marks in a row of words for a specific shift type.
-/// Returns (present_days, personal_leave_days, sick_leave_days, overtime_hours)
-fn count_attendance(
-    row_words: &[&BaiduWord],
-    shift_cols: &[ShiftColumn],
-    shift: &str,
-    weekdays: &[u32],
-    holidays: &[u32],
-) -> (f64, f64, f64, f64) {
-    let mut present_days: f64 = 0.0;
-    let mut personal_leave: f64 = 0.0;
-    let mut sick_leave: f64 = 0.0;
-    let mut overtime_hours: f64 = 0.0;
-
-    for w in row_words {
+/// Count check marks in a sorted row that appear to the RIGHT of the name column.
+fn count_row_marks(sorted_row: &[&BaiduWord], name_col_max_x: u32) -> f64 {
+    let mut count = 0.0;
+    for w in sorted_row {
         let text = w.words.trim();
-        let mark_x = w.location.as_ref().map(|l| l.left + l.width / 2).unwrap_or(0);
-
-        // Find which shift column this mark belongs to
-        let matched_col = shift_cols.iter().find(|sc| {
-            sc.shift == shift && (mark_x as i32 - sc.x_center as i32).abs() < 25
-        });
-
-        if let Some(col) = matched_col {
-            let day = col.day;
-            let is_workday = weekdays.contains(&day);
-            let is_holiday = holidays.contains(&day);
-
-            if is_check_mark(text) {
-                present_days += 1.0;
-                // Overtime: attendance on non-workday (weekend or holiday)
-                if !is_workday || is_holiday {
-                    overtime_hours += 8.0;
-                }
-            } else if is_personal_leave(text) {
-                personal_leave += 1.0;
-            } else if is_sick_leave(text) {
-                sick_leave += 1.0;
-            }
-            // "休", "清明", "公休" etc. = rest day, no attendance, no penalty
+        let wx = w.location.as_ref().map(|l| l.left).unwrap_or(0);
+        // Only count marks to the right of the name column
+        if wx > name_col_max_x && is_check_mark(text) {
+            count += 1.0;
         }
     }
-
-    (present_days, personal_leave, sick_leave, overtime_hours)
+    count
 }
 
 fn is_check_mark(text: &str) -> bool {
-    text == "√" || text == "✓" || text == "✔" || text == "✗" || text == "签"
-        || text.contains("签") || text.contains("√") || text.contains("✓")
-}
-
-fn is_personal_leave(text: &str) -> bool {
-    text.starts_with('S') || text.starts_with('s') || text.contains("事假") || text.contains("事")
-}
-
-fn is_sick_leave(text: &str) -> bool {
-    text.contains("病") || text.contains("病假")
-}
-
-/// Compute holidays for the given month (simplified 2026 Chinese public holidays)
-fn compute_holidays(month: &str, days_in_month: u32) -> Vec<u32> {
-    let parts: Vec<&str> = month.split('-').collect();
-    let mon: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
-
-    let mut hdays = Vec::new();
-    for &(h_mon, h_start, h_end, _) in crate::excel::HOLIDAYS_2026 {
-        if h_mon == mon {
-            for d in h_start..=h_end.min(days_in_month) {
-                hdays.push(d);
-            }
-        }
-    }
-    hdays
+    let t = text.trim();
+    t == "√" || t == "✓" || t == "✔" || t == "✗" || t == "签" || t == "V" || t == "v"
+        || t.contains("签") || t.contains("√") || t.contains("✓")
+        || (t.len() == 1 && t.chars().next().map(|c| c as u32).map(|c| c == 0x2713 || c == 0x2714 || c == 0x221A).unwrap_or(false))
 }
 
 fn get_days_in_month(month: &str) -> u32 {
@@ -1058,7 +868,6 @@ fn compute_workdays(month: &str, days_in_month: u32) -> Vec<u32> {
 
     let mut workdays = Vec::new();
     for day in 1..=days_in_month {
-        // Use chrono to get weekday
         if let Some(date) = chrono::NaiveDate::from_ymd_opt(year, mon, day) {
             let weekday = date.weekday().num_days_from_monday(); // 0=Mon, 6=Sun
             if weekday < 5 { // Mon-Fri
