@@ -411,57 +411,5 @@ pub fn ocr_recognize_punch_card(
     let connection = conn.lock().map_err(|e| AppError::General(e.to_string()))?;
     let shift = shift_type.as_deref().unwrap_or("day");
     let m = mode.as_deref().unwrap_or("online");
-
-    // Get raw OCR text using existing online/local path
-    let raw_text = match m {
-        "online" => {
-            let image_data = std::fs::read(&image_path)
-                .map_err(|e| AppError::Ocr(format!("读取图片失败: {e}")))?;
-            let image_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &image_data);
-            let access_token = crate::ocr::get_baidu_access_token(&connection)?;
-            let url = format!("https://aip.baidubce.com/rest/2.0/ocr/v1/general_basic?access_token={access_token}");
-            let client = reqwest::blocking::Client::new();
-            let response = client
-                .post(&url)
-                .header("Content-Type", "application/x-www-form-urlencoded")
-                .form(&[("image", image_b64.as_str()), ("language_type", "CHN_ENG")])
-                .send()
-                .map_err(|e| AppError::Network(format!("百度OCR请求失败: {e}")))?;
-            let body: serde_json::Value = response.json()
-                .map_err(|e| AppError::Network(format!("百度OCR响应解析失败: {e}")))?;
-            // Extract words
-            if let Some(words) = body.get("words_result").and_then(|w| w.as_array()) {
-                words.iter()
-                    .filter_map(|w| w.get("words").and_then(|w| w.as_str()).map(|s| s.to_string()))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            } else {
-                return Err(AppError::Ocr("百度OCR未返回有效结果".to_string()));
-            }
-        }
-        _ => return Err(AppError::Ocr("打卡表识别目前仅支持在线模式".to_string())),
-    };
-
-    // Parse punch card
-    let records = crate::ocr::parse_punch_card_ocr(&raw_text, &month, shift)?;
-
-    // Save batch
-    let parsed_json = serde_json::to_string(&records).unwrap_or_default();
-    let batch = OcrBatch {
-        id: 0,
-        batch_name: Some(format!("打卡表-{}", chrono::Utc::now().format("%Y%m%d%H%M%S"))),
-        salary_month: Some(month.to_string()),
-        image_path: Some(image_path),
-        raw_text: Some(raw_text),
-        parsed_json: Some(parsed_json),
-        status: "pending".to_string(),
-        created_at: None,
-    };
-    let batch_id = db::save_ocr_batch(&connection, &batch)?;
-
-    Ok(OcrResult {
-        batch_id,
-        records,
-        raw_text: batch.raw_text,
-    })
+    ocr::ocr_recognize_punch_card(&image_path, &month, shift, m, &connection)
 }

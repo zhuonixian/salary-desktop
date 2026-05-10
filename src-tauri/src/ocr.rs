@@ -27,9 +27,18 @@ struct BaiduOcrResponse {
     error_msg: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct BaiduWord {
     words: String,
+    location: Option<BaiduLocation>,
+}
+
+#[derive(Deserialize, Clone)]
+struct BaiduLocation {
+    left: u32,
+    top: u32,
+    width: u32,
+    height: u32,
 }
 
 // ==================== Main Entry ====================
@@ -549,57 +558,189 @@ pub fn save_ocr_settings(conn: &Connection, data: &OcrSettingsInput) -> AppResul
 
 // ==================== Punch Card OCR ====================
 
-/// Parse punch card OCR results into attendance records.
-/// The punch card has: employee rows × day columns, with marks in cells indicating attendance.
-pub fn parse_punch_card_ocr(
-    raw_text: &str,
+/// Recognize punch card image: call Baidu accurate API (returns location data), then parse.
+pub fn ocr_recognize_punch_card(
+    image_path: &str,
+    month: &str,
+    shift_type: &str,
+    mode: &str,
+    conn: &Connection,
+) -> AppResult<OcrResult> {
+    if mode != "online" {
+        return Err(AppError::Ocr("打卡表识别目前仅支持在线模式".to_string()));
+    }
+
+    // Read and encode image
+    let image_data = std::fs::read(image_path)
+        .map_err(|e| AppError::Ocr(format!("读取图片失败: {e}")))?;
+    let image_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &image_data);
+
+    // Get access token
+    let access_token = get_baidu_access_token(conn)?;
+
+    // Call Baidu accurate OCR API (returns location data per word)
+    let url = format!(
+        "https://aip.baidubce.com/rest/2.0/ocr/v1/accurate?access_token={access_token}"
+    );
+
+    let client = reqwest::blocking::Client::new();
+    let response = client
+        .post(&url)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .form(&[("image", image_b64.as_str()), ("language_type", "CHN_ENG")])
+        .send()
+        .map_err(|e| AppError::Network(format!("百度OCR请求失败: {e}")))?;
+
+    let body: BaiduOcrResponse = response
+        .json()
+        .map_err(|e| AppError::Network(format!("百度OCR响应解析失败: {e}")))?;
+
+    if let Some(code) = body.error_code {
+        let msg = body.error_msg.unwrap_or_default();
+        return Err(AppError::Ocr(format!("百度OCR错误({code}): {msg}")));
+    }
+
+    let words = body.words_result.unwrap_or_default();
+    let raw_text = words.iter().map(|w| w.words.as_str()).collect::<Vec<_>>().join("\n");
+
+    // Parse punch card using position data
+    let records = parse_punch_card_ocr(&words, month, shift_type)?;
+
+    // Save batch
+    let parsed_json = serde_json::to_string(&records).unwrap_or_default();
+    let batch = OcrBatch {
+        id: 0,
+        batch_name: Some(format!("打卡表-{}", chrono::Utc::now().format("%Y%m%d%H%M%S"))),
+        salary_month: Some(month.to_string()),
+        image_path: Some(image_path.to_string()),
+        raw_text: Some(raw_text.clone()),
+        parsed_json: Some(parsed_json),
+        status: "pending".to_string(),
+        created_at: None,
+    };
+    let batch_id = save_ocr_batch(conn, &batch)?;
+
+    let mut ocr_records = Vec::new();
+    for mut r in records {
+        r.salary_month = month.to_string();
+        r.ocr_batch_id = Some(batch_id);
+        ocr_records.push(r);
+    }
+
+    Ok(OcrResult {
+        batch_id,
+        records: ocr_records,
+        raw_text: Some(raw_text),
+    })
+}
+
+/// Parse punch card OCR results using position data from Baidu API.
+/// Words are individual cells in the table. We rebuild the grid using X/Y coordinates.
+fn parse_punch_card_ocr(
+    words: &[BaiduWord],
     month: &str,
     shift_type: &str,
 ) -> AppResult<Vec<AttendanceRecordInput>> {
-    let lines: Vec<&str> = raw_text.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
-    if lines.is_empty() {
+    if words.is_empty() {
         return Err(AppError::Ocr("打卡表OCR结果为空".to_string()));
     }
 
     let days_in_month = get_days_in_month(month);
     let weekdays = compute_workdays(month, days_in_month);
 
-    // Parse each line looking for employee rows
-    // Format: "序号 工号 姓名 [day marks...]"
+    // Step 1: Detect date columns from header row
+    // Date headers are single numbers 1-31 at the top of the table
+    let mut day_columns: Vec<(u32, u32)> = Vec::new(); // (day_number, x_center)
+    for w in words {
+        let loc = match &w.location {
+            Some(l) => l,
+            None => continue,
+        };
+        // Day headers are small numbers in the header row (top < 60 in our test)
+        if loc.top < 80 {
+            if let Ok(day) = w.words.parse::<u32>() {
+                if day >= 1 && day <= 31 {
+                    let x_center = loc.left + loc.width / 2;
+                    day_columns.push((day, x_center));
+                }
+            }
+        }
+    }
+
+    // Sort by X position
+    day_columns.sort_by_key(|(_, x)| *x);
+
+    // Step 2: Detect employee rows
+    // Employee rows have: sequence number, employee_no, name at different X positions
+    // Group words by Y position (row)
+    let mut row_groups: Vec<Vec<&BaiduWord>> = Vec::new();
+    let mut sorted_words: Vec<&BaiduWord> = words.iter().collect();
+    sorted_words.sort_by_key(|w| w.location.as_ref().map(|l| l.top).unwrap_or(0));
+
+    let mut current_row: Vec<&BaiduWord> = Vec::new();
+    let mut current_y: i32 = -100;
+
+    for w in &sorted_words {
+        let loc = match &w.location {
+            Some(l) => l,
+            None => continue,
+        };
+        let y = loc.top as i32;
+        if (y - current_y).abs() > 10 && !current_row.is_empty() {
+            row_groups.push(current_row.clone());
+            current_row.clear();
+        }
+        current_y = y;
+        current_row.push(w);
+    }
+    if !current_row.is_empty() {
+        row_groups.push(current_row);
+    }
+
+    // Step 3: Find employee data rows
+    // A data row has: a sequence number (1,2,3...) + employee_no + name + check marks
     let mut records = Vec::new();
 
-    for line in &lines {
-        let cells: Vec<&str> = line.split_whitespace().collect();
-        if cells.len() < 3 { continue; }
+    for row in &row_groups {
+        if row.len() < 2 { continue; }
 
-        // Try to detect employee row: first cell should be a number (序号)
-        let seq: Option<u32> = cells[0].parse().ok();
-        if seq.is_none() { continue; }
+        // Sort row by X position
+        let mut sorted_row = row.clone();
+        sorted_row.sort_by_key(|w| w.location.as_ref().map(|l| l.left).unwrap_or(0));
 
-        // Second cell = employee_no, third = name
-        let employee_no = cells[1].to_string();
-        let name = cells[2].to_string();
+        // Check if first element is a sequence number (small integer)
+        let first = sorted_row[0].words.trim();
+        let seq: Option<u32> = first.parse().ok();
+        if seq.is_none() || seq.unwrap() == 0 || seq.unwrap() > 100 {
+            continue;
+        }
 
-        // Skip if employee_no doesn't look like an ID (too short or not alphanumeric)
+        // Second element = employee_no, third = name
+        if sorted_row.len() < 3 { continue; }
+        let employee_no = sorted_row[1].words.trim().to_string();
+        let name = sorted_row[2].words.trim().to_string();
+
         if employee_no.is_empty() || name.is_empty() { continue; }
 
-        // Count attendance marks in day columns (columns 3 onwards)
+        // Step 4: Count check marks (√) aligned with date columns
         let mut present_days: f64 = 0.0;
         let mut overtime_hours: f64 = 0.0;
         let mut present_on_days: Vec<u32> = Vec::new();
 
-        for (day_idx, cell) in cells.iter().skip(3).enumerate() {
-            let day = (day_idx + 1) as u32;
-            if day > days_in_month { break; }
-
-            // Any non-empty cell content indicates a signature/mark
-            if !cell.is_empty() && cell != &"-" && cell != &"0" {
-                present_days += 1.0;
-                present_on_days.push(day);
+        // Each word after name that is a check mark (✓, √, etc.) = attendance
+        for w in sorted_row.iter().skip(3) {
+            let text = w.words.trim();
+            if text == "√" || text == "✓" || text == "✗" || text == "✔" || text == "签" || text.contains("签") || text.contains("√") {
+                // Find which day column this mark belongs to by X position
+                let mark_x = w.location.as_ref().map(|l| l.left + l.width / 2).unwrap_or(0);
+                if let Some(&(day, _)) = day_columns.iter().find(|(_, col_x)| (mark_x as i32 - *col_x as i32).abs() < 20) {
+                    present_days += 1.0;
+                    present_on_days.push(day);
+                }
             }
         }
 
-        // Calculate overtime: attendance on non-workdays = 8h overtime per day
+        // Calculate overtime: attendance on non-workdays
         for day in &present_on_days {
             if !weekdays.contains(day) {
                 overtime_hours += 8.0;
@@ -626,7 +767,15 @@ pub fn parse_punch_card_ocr(
     }
 
     if records.is_empty() {
-        return Err(AppError::Ocr("未能从打卡表中识别出员工记录".to_string()));
+        // Fallback: return raw text info for debugging
+        let sample: Vec<String> = words.iter().take(20).map(|w| {
+            let loc = w.location.as_ref().map(|l| format!("[{},{}]", l.left, l.top)).unwrap_or_default();
+            format!("{}{loc}", w.words)
+        }).collect();
+        return Err(AppError::Ocr(format!(
+            "未能从打卡表中识别出员工记录。OCR返回{}个文字，前20个: {}",
+            words.len(), sample.join("; ")
+        )));
     }
 
     Ok(records)
