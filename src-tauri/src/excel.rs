@@ -579,3 +579,72 @@ pub fn export_attendance_summary(records: &[AttendanceRecord], path: &str) -> Ap
     workbook.save(path)?;
     Ok(())
 }
+
+// ==================== Punch Card Template ====================
+
+pub fn export_punch_card_template(
+    path: &str,
+    month: &str,
+    department: &str,
+    shift_type: &str,
+    employees: &[Employee],
+) -> AppResult<()> {
+    let mut workbook = Workbook::new();
+    let worksheet = workbook.add_worksheet();
+
+    let title_fmt = Format::new().set_bold().set_font_size(16);
+    let header_fmt = Format::new().set_bold().set_font_size(11).set_background_color("D9E1F2");
+    let cell_fmt = Format::new().set_font_size(10);
+    let center_fmt = Format::new().set_font_size(10).set_align(rust_xlsxwriter::FormatAlign::Center);
+
+    let days_in_month = get_days_in_month(month);
+
+    worksheet.write_string_with_format(0, 0, &format!("员工签到表 - {month}"), &title_fmt)?;
+    worksheet.write_string_with_format(1, 0, &format!("部门: {department}"), &cell_fmt)?;
+    worksheet.write_string_with_format(1, 2, &format!("班次: {}", if shift_type == "night" { "夜班" } else { "白班" }), &cell_fmt)?;
+    worksheet.write_string_with_format(1, 4, &format!("当月天数: {days_in_month}"), &cell_fmt)?;
+
+    let mut col: u16 = 0;
+    for h in &["序号", "工号", "姓名"] {
+        worksheet.write_string_with_format(3, col, *h, &header_fmt)?;
+        col += 1;
+    }
+    for day in 1..=days_in_month {
+        worksheet.write_string_with_format(3, col, &format!("{day}"), &header_fmt)?;
+        col += 1;
+    }
+    worksheet.write_string_with_format(3, col, "备注", &header_fmt)?;
+
+    for (i, emp) in employees.iter().enumerate() {
+        let row: u32 = (4 + i) as u32;
+        worksheet.write_number_with_format(row, 0, (i + 1) as f64, &center_fmt)?;
+        worksheet.write_string_with_format(row, 1, &emp.employee_no, &cell_fmt)?;
+        worksheet.write_string_with_format(row, 2, &emp.name, &cell_fmt)?;
+    }
+
+    worksheet.set_column_width(0, 5)?;
+    worksheet.set_column_width(1, 10)?;
+    worksheet.set_column_width(2, 10)?;
+    for day in 0..days_in_month {
+        worksheet.set_column_width(3 + day as u16, 4)?;
+    }
+    worksheet.set_column_width(3 + days_in_month as u16, 15)?;
+
+    worksheet.set_print_scale(80);
+
+    workbook.save(path)?;
+    Ok(())
+}
+
+fn get_days_in_month(month: &str) -> u32 {
+    let parts: Vec<&str> = month.split('-').collect();
+    if parts.len() != 2 { return 31; }
+    let year: u32 = parts[0].parse().unwrap_or(2026);
+    let mon: u32 = parts[1].parse().unwrap_or(1);
+    match mon {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => if (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0) { 29 } else { 28 },
+        _ => 31,
+    }
+}

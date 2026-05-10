@@ -522,3 +522,26 @@ export async function exportSalarySlips(month: string, dir: string): Promise<voi
 export async function exportAttendanceSummaryFile(month: string, savePath: string): Promise<void> {
   return invoke('export_attendance_summary_file', { month, path: savePath });
 }
+
+// ==================== Punch Card ====================
+
+export async function generatePunchCardTemplate(
+  path: string, month: string, department?: string, position?: string, shiftType?: string,
+): Promise<void> {
+  await invoke('generate_punch_card_template', {
+    path, month, department: department ?? '', position: position ?? '', shiftType: shiftType ?? 'day',
+  });
+}
+
+export async function ocrRecognizePunchCard(
+  imagePath: string, month: string, shiftType?: string, mode?: 'local' | 'online',
+): Promise<OcrResult> {
+  const result = await invoke<{ batch_id: number; records: AttendanceRecordInput[]; raw_text?: string | null }>(
+    'ocr_recognize_punch_card', {
+      imagePath, month,
+      shiftType: shiftType ?? 'day',
+      mode: mode ?? 'online',
+    },
+  );
+  return { batch_id: result.batch_id, records: result.records, raw_text: result.raw_text ?? '' };
+}

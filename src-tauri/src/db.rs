@@ -140,6 +140,17 @@ fn create_tables(conn: &Connection) -> AppResult<()> {
             key TEXT PRIMARY KEY,
             value TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS punch_card_batches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            salary_month TEXT NOT NULL,
+            department TEXT,
+            position TEXT,
+            shift_type TEXT DEFAULT 'day',
+            image_path TEXT,
+            status TEXT DEFAULT 'pending',
+            created_at TEXT
+        );
         ",
     )?;
 

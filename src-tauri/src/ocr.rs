@@ -8,6 +8,7 @@ use serde_json::Value;
 use crate::db::*;
 use crate::errors::{AppError, AppResult};
 use crate::models::*;
+use chrono::Datelike;
 
 // ==================== Baidu OCR API Types ====================
 
@@ -117,7 +118,7 @@ fn ocr_recognize_online(image_path: &str, month: &str, conn: &Connection) -> App
     })
 }
 
-fn get_baidu_access_token(conn: &Connection) -> AppResult<String> {
+pub(crate) fn get_baidu_access_token(conn: &Connection) -> AppResult<String> {
     // Check cached token
     if let Some(token) = get_setting(conn, "baidu_access_token")? {
         if let Some(expires_str) = get_setting(conn, "baidu_token_expires_at")? {
@@ -544,4 +545,121 @@ pub fn save_ocr_settings(conn: &Connection, data: &OcrSettingsInput) -> AppResul
         set_setting(conn, "baidu_access_token", "")?;
     }
     Ok(true)
+}
+
+// ==================== Punch Card OCR ====================
+
+/// Parse punch card OCR results into attendance records.
+/// The punch card has: employee rows × day columns, with marks in cells indicating attendance.
+pub fn parse_punch_card_ocr(
+    raw_text: &str,
+    month: &str,
+    shift_type: &str,
+) -> AppResult<Vec<AttendanceRecordInput>> {
+    let lines: Vec<&str> = raw_text.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+    if lines.is_empty() {
+        return Err(AppError::Ocr("打卡表OCR结果为空".to_string()));
+    }
+
+    let days_in_month = get_days_in_month(month);
+    let weekdays = compute_workdays(month, days_in_month);
+
+    // Parse each line looking for employee rows
+    // Format: "序号 工号 姓名 [day marks...]"
+    let mut records = Vec::new();
+
+    for line in &lines {
+        let cells: Vec<&str> = line.split_whitespace().collect();
+        if cells.len() < 3 { continue; }
+
+        // Try to detect employee row: first cell should be a number (序号)
+        let seq: Option<u32> = cells[0].parse().ok();
+        if seq.is_none() { continue; }
+
+        // Second cell = employee_no, third = name
+        let employee_no = cells[1].to_string();
+        let name = cells[2].to_string();
+
+        // Skip if employee_no doesn't look like an ID (too short or not alphanumeric)
+        if employee_no.is_empty() || name.is_empty() { continue; }
+
+        // Count attendance marks in day columns (columns 3 onwards)
+        let mut present_days: f64 = 0.0;
+        let mut overtime_hours: f64 = 0.0;
+        let mut present_on_days: Vec<u32> = Vec::new();
+
+        for (day_idx, cell) in cells.iter().skip(3).enumerate() {
+            let day = (day_idx + 1) as u32;
+            if day > days_in_month { break; }
+
+            // Any non-empty cell content indicates a signature/mark
+            if !cell.is_empty() && cell != &"-" && cell != &"0" {
+                present_days += 1.0;
+                present_on_days.push(day);
+            }
+        }
+
+        // Calculate overtime: attendance on non-workdays = 8h overtime per day
+        for day in &present_on_days {
+            if !weekdays.contains(day) {
+                overtime_hours += 8.0;
+            }
+        }
+
+        records.push(AttendanceRecordInput {
+            id: None,
+            salary_month: month.to_string(),
+            employee_no,
+            name: Some(name),
+            expected_days: Some(weekdays.len() as f64),
+            actual_days: Some(present_days),
+            late_count: None,
+            early_leave_count: None,
+            personal_leave_days: None,
+            sick_leave_days: None,
+            absent_days: Some((weekdays.len() as f64 - present_days).max(0.0)),
+            overtime_hours: if overtime_hours > 0.0 { Some(overtime_hours) } else { None },
+            source_type: Some(format!("punch_card-{shift_type}")),
+            ocr_batch_id: None,
+            remark: if overtime_hours > 0.0 { Some(format!("加班{overtime_hours:.0}h转调休")) } else { None },
+        });
+    }
+
+    if records.is_empty() {
+        return Err(AppError::Ocr("未能从打卡表中识别出员工记录".to_string()));
+    }
+
+    Ok(records)
+}
+
+fn get_days_in_month(month: &str) -> u32 {
+    let parts: Vec<&str> = month.split('-').collect();
+    if parts.len() != 2 { return 31; }
+    let year: u32 = parts[0].parse().unwrap_or(2026);
+    let mon: u32 = parts[1].parse().unwrap_or(1);
+    match mon {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => if (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0) { 29 } else { 28 },
+        _ => 31,
+    }
+}
+
+/// Compute workdays (Mon-Fri) for the given month
+fn compute_workdays(month: &str, days_in_month: u32) -> Vec<u32> {
+    let parts: Vec<&str> = month.split('-').collect();
+    let year: i32 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(2026);
+    let mon: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
+
+    let mut workdays = Vec::new();
+    for day in 1..=days_in_month {
+        // Use chrono to get weekday
+        if let Some(date) = chrono::NaiveDate::from_ymd_opt(year, mon, day) {
+            let weekday = date.weekday().num_days_from_monday(); // 0=Mon, 6=Sun
+            if weekday < 5 { // Mon-Fri
+                workdays.push(day);
+            }
+        }
+    }
+    workdays
 }

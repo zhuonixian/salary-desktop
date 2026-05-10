@@ -11,6 +11,7 @@ import {
   ExportOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
+  FormOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import type { Dayjs } from 'dayjs';
@@ -22,6 +23,7 @@ import OcrCenter from '@/pages/OcrCenter';
 import SalaryRules from '@/pages/SalaryRules';
 import SalaryCalculate from '@/pages/SalaryCalculate';
 import ExportCenter from '@/pages/ExportCenter';
+import PunchCard from '@/pages/PunchCard';
 
 const { Sider, Header, Content } = Layout;
 
@@ -29,6 +31,7 @@ const menuItems = [
   { key: '/', label: '首页仪表盘', icon: <DashboardOutlined /> },
   { key: '/employees', label: '员工管理', icon: <TeamOutlined /> },
   { key: '/attendance', label: '考勤管理', icon: <CalendarOutlined /> },
+  { key: '/punch-card', label: '打卡表管理', icon: <FormOutlined /> },
   { key: '/ocr', label: 'OCR识别中心', icon: <ScanOutlined /> },
   { key: '/rules', label: '规则配置', icon: <SettingOutlined /> },
   { key: '/salary', label: '工资计算', icon: <CalculatorOutlined /> },
@@ -91,6 +94,7 @@ const AppLayout: React.FC = () => {
             <Route path="/" element={<Dashboard />} />
             <Route path="/employees" element={<Employees />} />
             <Route path="/attendance" element={<Attendance />} />
+            <Route path="/punch-card" element={<PunchCard />} />
             <Route path="/ocr" element={<OcrCenter />} />
             <Route path="/rules" element={<SalaryRules />} />
             <Route path="/salary" element={<SalaryCalculate />} />

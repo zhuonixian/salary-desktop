@@ -118,6 +118,8 @@ pub fn run() {
         commands::get_dashboard_summary,
         commands::get_ocr_settings,
         commands::save_ocr_settings,
+        commands::generate_punch_card_template,
+        commands::ocr_recognize_punch_card,
     ]);
 
     diag("calling builder.run()...");
