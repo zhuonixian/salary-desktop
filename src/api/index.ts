@@ -526,20 +526,20 @@ export async function exportAttendanceSummaryFile(month: string, savePath: strin
 // ==================== Punch Card ====================
 
 export async function generatePunchCardTemplate(
-  path: string, month: string, department?: string, position?: string, shiftType?: string,
+  path: string, month: string, department?: string,
 ): Promise<void> {
   await invoke('generate_punch_card_template', {
-    path, month, department: department ?? '', position: position ?? '', shiftType: shiftType ?? 'day',
+    path, month, department: department ?? '', position: '', shiftType: 'day',
   });
 }
 
 export async function ocrRecognizePunchCard(
-  imagePath: string, month: string, shiftType?: string, mode?: 'local' | 'online',
+  imagePath: string, month: string, mode?: 'local' | 'online',
 ): Promise<OcrResult> {
   const result = await invoke<{ batch_id: number; records: AttendanceRecordInput[]; raw_text?: string | null }>(
     'ocr_recognize_punch_card', {
       imagePath, month,
-      shiftType: shiftType ?? 'day',
+      shiftType: 'day',
       mode: mode ?? 'online',
     },
   );

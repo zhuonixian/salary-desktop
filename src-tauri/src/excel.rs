@@ -582,58 +582,166 @@ pub fn export_attendance_summary(records: &[AttendanceRecord], path: &str) -> Ap
 
 // ==================== Punch Card Template ====================
 
+/// 2026 Chinese public holidays (month, day ranges)
+pub const HOLIDAYS_2026: &[(u32, u32, u32, &str)] = &[
+    (1, 1, 1, "元旦"),
+    (2, 17, 19, "春节"),  // Spring Festival approx
+    (4, 4, 6, "清明"),
+    (5, 1, 3, "劳动节"),
+    (5, 31, 6, "端午"),   // spans month boundary
+    (9, 25, 27, "中秋"),
+    (10, 1, 7, "国庆"),
+];
+
+fn is_holiday(month: u32, day: u32) -> Option<&'static str> {
+    for &(h_mon, h_start, h_end, name) in HOLIDAYS_2026 {
+        if h_mon == month && day >= h_start && day <= h_end {
+            return Some(name);
+        }
+        // Handle holidays spanning month boundary (e.g., 5/31 - 6/2)
+        if h_start > h_end && h_mon == month && day >= h_start {
+            return Some(name);
+        }
+    }
+    None
+}
+
 pub fn export_punch_card_template(
     path: &str,
     month: &str,
-    department: &str,
-    shift_type: &str,
+    _department: &str,
+    _shift_type: &str,
     employees: &[Employee],
 ) -> AppResult<()> {
     let mut workbook = Workbook::new();
-    let worksheet = workbook.add_worksheet();
+    let ws = workbook.add_worksheet();
 
-    let title_fmt = Format::new().set_bold().set_font_size(16);
-    let header_fmt = Format::new().set_bold().set_font_size(11).set_background_color("D9E1F2");
-    let cell_fmt = Format::new().set_font_size(10);
-    let center_fmt = Format::new().set_font_size(10).set_align(rust_xlsxwriter::FormatAlign::Center);
+    let title_fmt = Format::new().set_bold().set_font_size(14).set_align(rust_xlsxwriter::FormatAlign::Center);
+    let info_fmt = Format::new().set_font_size(10);
+    let header_fmt = Format::new().set_bold().set_font_size(9).set_background_color("D9E1F2").set_align(rust_xlsxwriter::FormatAlign::Center);
+    let cell_fmt = Format::new().set_font_size(9).set_align(rust_xlsxwriter::FormatAlign::Center);
+    let holiday_fmt = Format::new().set_font_size(7).set_font_color("FF0000").set_align(rust_xlsxwriter::FormatAlign::Center);
 
     let days_in_month = get_days_in_month(month);
+    let month_parts: Vec<&str> = month.split('-').collect();
+    let mon: u32 = month_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
+    let year: u32 = month_parts.first().and_then(|s| s.parse().ok()).unwrap_or(2026);
 
-    worksheet.write_string_with_format(0, 0, &format!("员工签到表 - {month}"), &title_fmt)?;
-    worksheet.write_string_with_format(1, 0, &format!("部门: {department}"), &cell_fmt)?;
-    worksheet.write_string_with_format(1, 2, &format!("班次: {}", if shift_type == "night" { "夜班" } else { "白班" }), &cell_fmt)?;
-    worksheet.write_string_with_format(1, 4, &format!("当月天数: {days_in_month}"), &cell_fmt)?;
+    // Display month name (e.g., "2026年5月")
+    let month_label = format!("{}年{}月", year, mon);
 
-    let mut col: u16 = 0;
-    for h in &["序号", "工号", "姓名"] {
-        worksheet.write_string_with_format(3, col, *h, &header_fmt)?;
-        col += 1;
-    }
+    // Column layout: 序号(Col 0), 姓名(Col 1), then day*2 cols (白/夜 per day), then 合计白(Col -4), 合计夜(Col -3), 合计(Col -2), 备注(Col -1)
+    let day_col_start: u16 = 2; // first day sub-column
+    let summary_col_day: u16 = day_col_start + (days_in_month * 2) as u16;
+    let summary_col_night: u16 = summary_col_day + 1;
+    let summary_col_total: u16 = summary_col_day + 2;
+    let remark_col: u16 = summary_col_day + 3;
+
+    // Row 0: Title (merged across all columns)
+    ws.merge_range(0, 0, 0, remark_col, &format!("{}员工考勤汇总表", month_label), &title_fmt)?;
+
+    // Row 1: Department info
+    ws.write_string_with_format(1, 0, &format!("部门: {}", _department), &info_fmt)?;
+
+    // Row 2-3: Headers
+    ws.merge_range(2, 0, 3, 0, "序号", &header_fmt)?;
+    ws.merge_range(2, 1, 3, 1, "姓名", &header_fmt)?;
+
     for day in 1..=days_in_month {
-        worksheet.write_string_with_format(3, col, &format!("{day}"), &header_fmt)?;
-        col += 1;
+        let col = day_col_start + ((day - 1) * 2) as u16;
+        ws.merge_range(2, col, 2, col + 1, &day.to_string(), &header_fmt)?;
     }
-    worksheet.write_string_with_format(3, col, "备注", &header_fmt)?;
 
+    // Summary headers (merged row 2-3)
+    ws.merge_range(2, summary_col_day, 3, summary_col_day, "白班合计", &header_fmt)?;
+    ws.merge_range(2, summary_col_night, 3, summary_col_night, "夜班合计", &header_fmt)?;
+    ws.merge_range(2, summary_col_total, 3, summary_col_total, "合计", &header_fmt)?;
+    ws.merge_range(2, remark_col, 3, remark_col, "备注", &header_fmt)?;
+
+    // Row 3: Shift sub-headers (白/夜 per day)
+    for day in 1..=days_in_month {
+        let col = day_col_start + ((day - 1) * 2) as u16;
+        ws.write_string_with_format(3, col, "白", &header_fmt)?;
+        ws.write_string_with_format(3, col + 1, "夜", &header_fmt)?;
+    }
+
+    // Data rows: 2 rows per employee
     for (i, emp) in employees.iter().enumerate() {
-        let row: u32 = (4 + i) as u32;
-        worksheet.write_number_with_format(row, 0, (i + 1) as f64, &center_fmt)?;
-        worksheet.write_string_with_format(row, 1, &emp.employee_no, &cell_fmt)?;
-        worksheet.write_string_with_format(row, 2, &emp.name, &cell_fmt)?;
+        let base_row: u32 = (4 + i * 2) as u32;
+        let day_row = base_row;
+        let night_row = base_row + 1;
+
+        // Seq number (merged 2 rows)
+        ws.merge_range(day_row, 0, night_row, 0, &(i + 1).to_string(), &cell_fmt)?;
+
+        // Name (merged 2 rows)
+        ws.merge_range(day_row, 1, night_row, 1, &emp.name, &cell_fmt)?;
+
+        // Pre-fill holidays in both day and night rows
+        for day in 1..=days_in_month {
+            let col = day_col_start + ((day - 1) * 2) as u16;
+            if let Some(holiday_name) = is_holiday(mon, day) {
+                ws.write_string_with_format(day_row, col, holiday_name, &holiday_fmt)?;
+                ws.write_string_with_format(night_row, col + 1, holiday_name, &holiday_fmt)?;
+            }
+        }
+
+        // Summary formulas
+        // White shift count = COUNTIF of √ in day columns
+        let day_col_letter_start = col_letter(day_col_start);
+        let day_col_letter_end = col_letter(day_col_start + ((days_in_month - 1) * 2) as u16);
+        let night_col_letter_start = col_letter(day_col_start + 1);
+        let night_col_letter_end = col_letter(day_col_start + ((days_in_month - 1) * 2 + 1) as u16);
+
+        ws.write_string_with_format(day_row, summary_col_day, &format!("=COUNTIF({day_col_letter_start}{day_row}:{day_col_letter_end}{day_row},\"√\")"), &cell_fmt)?;
+        ws.write_string_with_format(night_row, summary_col_night, &format!("=COUNTIF({night_col_letter_start}{night_row}:{night_col_letter_end}{night_row},\"√\")"), &cell_fmt)?;
+        let day_total_col = col_letter(summary_col_day);
+        let night_total_col = col_letter(summary_col_night);
+        ws.write_string_with_format(day_row, summary_col_total, &format!("={day_total_col}{day_row}+{night_total_col}{night_row}"), &cell_fmt)?;
+
+        // Remark (merged 2 rows)
+        ws.merge_range(day_row, remark_col, night_row, remark_col, "", &cell_fmt)?;
     }
 
-    worksheet.set_column_width(0, 5)?;
-    worksheet.set_column_width(1, 10)?;
-    worksheet.set_column_width(2, 10)?;
-    for day in 0..days_in_month {
-        worksheet.set_column_width(3 + day as u16, 4)?;
-    }
-    worksheet.set_column_width(3 + days_in_month as u16, 15)?;
+    // Bottom legend row
+    let legend_row = (4 + employees.len() * 2 + 1) as u32;
+    ws.write_string_with_format(legend_row, 0, "标注:", &info_fmt)?;
+    ws.write_string_with_format(legend_row, 1, "√=出勤  休=公休  S(+时数)=事假  病=病假", &info_fmt)?;
 
-    worksheet.set_print_scale(80);
+    // Signature area
+    let sign_row = legend_row + 1;
+    ws.write_string_with_format(sign_row, 0, "考勤人签字:", &info_fmt)?;
+    ws.write_string_with_format(sign_row, 5, "行政经理签字:", &info_fmt)?;
+    ws.write_string_with_format(sign_row, 10, "日期:", &info_fmt)?;
+
+    // Column widths
+    ws.set_column_width(0, 5)?;    // 序号
+    ws.set_column_width(1, 10)?;   // 姓名
+    for day in 0..days_in_month * 2 {
+        ws.set_column_width(day_col_start + day as u16, 4)?;
+    }
+    ws.set_column_width(summary_col_day, 6)?;
+    ws.set_column_width(summary_col_night, 6)?;
+    ws.set_column_width(summary_col_total, 6)?;
+    ws.set_column_width(remark_col, 12)?;
+
+    // Print settings
+    ws.set_print_scale(60);
 
     workbook.save(path)?;
     Ok(())
+}
+
+/// Convert a 0-based column index to Excel column letter(s) (A, B, ..., Z, AA, AB, ...)
+fn col_letter(col: u16) -> String {
+    let mut result = String::new();
+    let mut c = col;
+    loop {
+        result.insert(0, (b'A' + (c % 26) as u8) as char);
+        if c < 26 { break; }
+        c = c / 26 - 1;
+    }
+    result
 }
 
 fn get_days_in_month(month: &str) -> u32 {

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import {
-  Card, Button, Radio, Select, message, Table, Spin, Input, Row, Col, Divider,
+  Card, Button, Select, message, Table, Spin, Input, Row, Col, Divider,
 } from 'antd';
 import {
   FileExcelOutlined, CameraOutlined, CheckCircleOutlined,
@@ -16,7 +16,6 @@ import type { AttendanceRecordInput } from '@/types';
 const PunchCard: React.FC = () => {
   const [month] = useState(dayjs());
   const [department, setDepartment] = useState('');
-  const [shiftType, setShiftType] = useState<'day' | 'night'>('day');
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [recognizing, setRecognizing] = useState(false);
   const [rawText, setRawText] = useState('');
@@ -36,7 +35,7 @@ const PunchCard: React.FC = () => {
     });
     if (!selected) return;
     try {
-      await generatePunchCardTemplate(selected as string, monthStr, department, undefined, shiftType);
+      await generatePunchCardTemplate(selected as string, monthStr, department);
       message.success('打卡表模板已生成');
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -56,7 +55,7 @@ const PunchCard: React.FC = () => {
     if (!selectedFile) { message.warning('请先选择图片'); return; }
     setRecognizing(true);
     try {
-      const result = await ocrRecognizePunchCard(selectedFile, month.format('YYYY-MM'), shiftType, ocrMode);
+      const result = await ocrRecognizePunchCard(selectedFile, month.format('YYYY-MM'), ocrMode);
       setCurrentBatchId(result.batch_id);
       setRawText(result.raw_text);
       setRecords(result.records);
@@ -97,13 +96,6 @@ const PunchCard: React.FC = () => {
         <Col xs={24} lg={10}>
           <Card title="生成打卡表模板" style={{ marginBottom: 24 }}>
             <div style={{ display: 'flex', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
-              <div>
-                <label style={{ display: 'block', marginBottom: 4, fontSize: 12, color: '#666' }}>班次</label>
-                <Radio.Group value={shiftType} onChange={(e) => setShiftType(e.target.value)} optionType="button" buttonStyle="solid" size="small">
-                  <Radio.Button value="day">白班</Radio.Button>
-                  <Radio.Button value="night">夜班</Radio.Button>
-                </Radio.Group>
-              </div>
               <div style={{ flex: 1, minWidth: 120 }}>
                 <label style={{ display: 'block', marginBottom: 4, fontSize: 12, color: '#666' }}>部门（可选）</label>
                 <Input value={department} onChange={(e) => setDepartment(e.target.value)} placeholder="留空为全部" size="small" />
