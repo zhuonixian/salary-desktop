@@ -1,73 +1,40 @@
-# React + TypeScript + Vite
+# Salary Desktop - 工资核算助手
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+基于 Tauri + React + TypeScript 的桌面端工资核算工具，支持员工管理、考勤导入、工资计算与导出。
 
-Currently, two official plugins are available:
+## 功能特性
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- **员工管理** — 导入/导出员工信息 Excel，管理基本工资、社保公积金等参数
+- **考勤管理** — Excel 导入考勤数据，OCR 识别打卡考勤表（百度 API / 本地 PaddleOCR）
+- **工资核算** — 自动计算个税、社保、公积金、考勤扣款，生成工资明细
+- **报表导出** — 工资明细、银行代发、工资条、考勤汇总多格式 Excel 导出
 
-## React Compiler
+## 技术栈
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+| 层级 | 技术 |
+|------|------|
+| 前端 | React 19 + TypeScript + Ant Design 6 + Vite |
+| 后端 | Tauri 2 (Rust) + SQLite |
+| OCR | 百度云 OCR API + 本地 Python PaddleOCR |
 
-## Expanding the ESLint configuration
+## 开发
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+```bash
+# 安装前端依赖
+npm install
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+# 开发模式
+npm run tauri dev
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+# 构建
+npm run tauri build
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+### OCR 配置
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+- **在线模式**：在应用设置中填入百度云 OCR API Key 和 Secret Key
+- **本地模式**：需要安装 Python 3 及 PaddleOCR 依赖（见 `python-ocr/` 目录）
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+## License
+
+[Apache License 2.0](LICENSE)

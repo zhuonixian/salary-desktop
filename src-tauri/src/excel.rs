@@ -277,7 +277,7 @@ pub fn export_employee_template(path: &str) -> AppResult<()> {
     worksheet.write_string_with_format(1, 2, "生产部", &cell_fmt)?;
     worksheet.write_string_with_format(1, 3, "操作员", &cell_fmt)?;
     worksheet.write_string_with_format(1, 4, "", &cell_fmt)?;
-    worksheet.write_string_with_format(1, 5, "13800000000", &cell_fmt)?;
+    worksheet.write_string_with_format(1, 5, "1XXXXXXXXXX", &cell_fmt)?;
     worksheet.write_string_with_format(1, 6, "", &cell_fmt)?;
     worksheet.write_string_with_format(1, 7, "", &cell_fmt)?;
     worksheet.write_string_with_format(1, 8, "2026-01-01", &cell_fmt)?;
