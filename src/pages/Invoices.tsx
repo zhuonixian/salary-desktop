@@ -146,8 +146,8 @@ const Invoices: React.FC = () => {
 
   const handleSaveInvoice = async () => {
     const { form, editingId, selectedFilePath } = uploadModal;
-    if (!form.invoice_code || !form.invoice_number) {
-      message.warning('发票代码和号码必填');
+    if (!form.invoice_number) {
+      message.warning('发票号码必填（全电票可无发票代码）');
       return;
     }
     if (!form.employee_id) {
@@ -340,7 +340,6 @@ const Invoices: React.FC = () => {
   ];
 
   const isSaveDisabled =
-    !uploadModal.form.invoice_code ||
     !uploadModal.form.invoice_number ||
     !uploadModal.form.employee_id ||
     !uploadModal.form.expense_type_code ||
@@ -392,6 +391,8 @@ const Invoices: React.FC = () => {
               { value: '增值税普通发票', label: '增值税普通发票' },
               { value: '增值税专用发票', label: '增值税专用发票' },
               { value: '增值税电子普通发票', label: '增值税电子普通发票' },
+              { value: '电子发票(普通发票)', label: '电子发票(普通发票) - 全电票' },
+              { value: '电子发票(增值税专用发票)', label: '电子发票(增值税专用发票) - 全电票' },
             ]}
           />
           <Input.Search
@@ -448,7 +449,7 @@ const Invoices: React.FC = () => {
           <Row gutter={16}>
             <Col span={12}>
               <Form layout="vertical" size="small">
-                <Form.Item label="发票代码" required>
+                <Form.Item label="发票代码（全电票可空）">
                   <Input
                     value={uploadModal.form.invoice_code || ''}
                     onChange={(e) => setUploadModal(prev => ({

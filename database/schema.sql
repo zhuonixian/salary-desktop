@@ -171,10 +171,10 @@ CREATE TABLE IF NOT EXISTS invoices (
   FOREIGN KEY (expense_type_code) REFERENCES invoice_expense_types(code) ON DELETE SET NULL
 );
 
--- 发票相关索引
+-- 发票相关索引（COALESCE 让 invoice_code 为 NULL 的全电票也能按 number 去重）
 DROP INDEX IF EXISTS idx_invoices_code_number;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_code_number
-  ON invoices(invoice_code, invoice_number) WHERE status != 'void';
+  ON invoices(COALESCE(invoice_code, ''), invoice_number) WHERE status != 'void';
 CREATE INDEX IF NOT EXISTS idx_invoices_employee ON invoices(employee_id);
 CREATE INDEX IF NOT EXISTS idx_invoices_month ON invoices(belong_month);
 CREATE INDEX IF NOT EXISTS idx_invoices_expense_type ON invoices(expense_type_code);

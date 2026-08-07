@@ -26,8 +26,10 @@ pub(crate) struct BaiduVatInvoiceResponse {
 // ==================== OCR Entry ====================
 
 pub fn ocr_invoice(image_path: &str, conn: &Connection) -> AppResult<InvoiceOcrPreview> {
-    let image_data = std::fs::read(image_path)
-        .map_err(|e| AppError::Io(e))?;
+    // PDF 需先转 PNG（百度 vat_invoice 对扫描件 PDF 支持有局限）
+    let effective_path = ensure_png_for_ocr(image_path)?;
+    let image_data = std::fs::read(&effective_path)
+        .map_err(AppError::Io)?;
     let image_b64 = base64::Engine::encode(
         &base64::engine::general_purpose::STANDARD, &image_data
     );
@@ -56,9 +58,10 @@ pub fn ocr_invoice(image_path: &str, conn: &Connection) -> AppResult<InvoiceOcrP
 
     let mut preview = map_baidu_response(&parsed, &raw_text);
 
-    // 查重
-    if let (Some(c), Some(n)) = (preview.invoice_code.as_ref(), preview.invoice_number.as_ref()) {
-        if let Some(existing) = db::find_invoice_by_code_number(conn, c, n)? {
+    // 查重（code 可空，支持全电票）
+    if let Some(n) = preview.invoice_number.as_ref() {
+        let code_ref = preview.invoice_code.as_deref();
+        if let Some(existing) = db::find_invoice_by_dedup_key(conn, code_ref, n)? {
             preview.is_duplicate = true;
             preview.duplicate_invoice_id = Some(existing.id);
             preview.warnings.push(format!(
@@ -68,10 +71,76 @@ pub fn ocr_invoice(image_path: &str, conn: &Connection) -> AppResult<InvoiceOcrP
             ));
         }
     } else {
-        preview.warnings.push("未能识别发票代码或号码，需手工补全".to_string());
+        preview.warnings.push("未能识别发票号码，需手工补全".to_string());
     }
 
     Ok(preview)
+}
+
+/// 检测文件类型，PDF 自动转 PNG（同目录生成 `.png` 临时文件）。
+/// 转换依赖系统命令 `pdftocairo`（推荐）或 `pdftoppm`（poppler-utils）：
+///   - Linux: `sudo apt install poppler-utils`
+///   - macOS: `brew install poppler`
+///   - Windows: 需手动安装 poppler 并加入 PATH
+fn ensure_png_for_ocr(image_path: &str) -> AppResult<String> {
+    let lower = image_path.to_lowercase();
+    if !lower.ends_with(".pdf") {
+        return Ok(image_path.to_string());
+    }
+
+    let src = std::path::Path::new(image_path);
+    if !src.exists() {
+        return Err(AppError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("PDF 文件不存在: {image_path}"),
+        )));
+    }
+
+    let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("invoice");
+    let parent = src.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let target = parent.join(format!("{stem}.ocr-converted.png"));
+
+    // 优先 pdftocairo（更高质量），失败回退 pdftoppm
+    let candidates: &[&[&str]] = &[
+        &["pdftocairo", "-png", "-r", "200", "-singlefile"],
+        &["pdftoppm", "-png", "-r", "200", "-f", "1", "-l", "1"],
+    ];
+
+    let mut last_err = None;
+    for cmd_args in candidates {
+        let mut cmd = std::process::Command::new(cmd_args[0]);
+        cmd.args(&cmd_args[1..])
+            .arg(image_path)
+            .arg(target.with_extension("")); // pdftocairo -singlefile 不需要后缀；pdftoppm 会加 -1
+        match cmd.output() {
+            Ok(out) if out.status.success() => {
+                // pdftocairo -singlefile 生成 target；pdftoppm 生成 target-1.png
+                let produced = if cmd_args[0] == "pdftocairo" {
+                    target.clone()
+                } else {
+                    parent.join(format!("{stem}.ocr-converted-1.png"))
+                };
+                if produced.exists() {
+                    if produced != target {
+                        let _ = std::fs::rename(&produced, &target);
+                    }
+                    return Ok(target.to_string_lossy().to_string());
+                }
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                last_err = Some(format!("{} 失败: {}", cmd_args[0], stderr.trim()));
+            }
+            Err(e) => {
+                last_err = Some(format!("{} 未安装或不可执行: {}", cmd_args[0], e));
+            }
+        }
+    }
+
+    Err(AppError::Ocr(format!(
+        "PDF 自动转换 PNG 失败（{}）。请安装 poppler-utils（Linux: apt install poppler-utils；macOS: brew install poppler；Windows: 安装 poppler 并加入 PATH），或将 PDF 截图导出为 PNG 后再上传。",
+        last_err.unwrap_or_else(|| "未知错误".to_string())
+    )))
 }
 
 // ==================== Pure Mapping Functions ====================
@@ -142,16 +211,18 @@ pub fn save_invoice(
     conn: &Connection,
     app_data_dir: &std::path::Path,
 ) -> AppResult<Invoice> {
-    // 二次查重
-    if let (Some(c), Some(n)) = (input.invoice_code.as_ref(), input.invoice_number.as_ref()) {
-        if let Some(existing) = db::find_invoice_by_code_number(conn, c, n)? {
-            return Err(AppError::General(format!(
-                "发票已存在：代码{c} 号码{n}，记录ID={}",
-                existing.id
-            )));
-        }
-    } else {
-        return Err(AppError::InvalidParam("发票代码和号码必填".into()));
+    // 二次查重（发票号码必填；发票代码可空，支持全电票）
+    let number = input.invoice_number.as_deref().unwrap_or("");
+    if number.is_empty() {
+        return Err(AppError::InvalidParam("发票号码必填".into()));
+    }
+    let code_ref = input.invoice_code.as_deref();
+    if let Some(existing) = db::find_invoice_by_dedup_key(conn, code_ref, number)? {
+        let code_disp = code_ref.unwrap_or("");
+        return Err(AppError::General(format!(
+            "发票已存在：代码{code_disp} 号码{number}，记录ID={}",
+            existing.id
+        )));
     }
 
     // 复制原图到应用目录
@@ -380,7 +451,7 @@ mod business_tests {
                 image_path TEXT, raw_ocr_json TEXT,
                 created_at TEXT, updated_at TEXT
             );
-            CREATE UNIQUE INDEX idx_invoices_code_number ON invoices(invoice_code, invoice_number) WHERE status != 'void';
+            CREATE UNIQUE INDEX idx_invoices_code_number ON invoices(COALESCE(invoice_code, ''), invoice_number) WHERE status != 'void';
             CREATE TABLE operation_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 operation_type TEXT NOT NULL, description TEXT,
@@ -423,13 +494,33 @@ mod business_tests {
     }
 
     #[test]
-    fn test_save_invoice_requires_code_and_number() {
+    fn test_save_invoice_requires_number_only() {
+        // 全电票无 code 也应能保存（只检查 number 必填）
         let conn = setup_db();
         let mut input = sample_input();
         input.invoice_code = None;
         let result = save_invoice(&input, &conn, &std::env::temp_dir());
+        assert!(result.is_ok(), "missing code should be allowed for full-electronic invoices");
+
+        // 但 number 缺失要被拒绝
+        let mut no_number = sample_input();
+        no_number.invoice_number = None;
+        let result = save_invoice(&no_number, &conn, &std::env::temp_dir());
         let err = result.unwrap_err();
-        assert!(matches!(err, AppError::InvalidParam(_)), "expected InvalidParam, got {:?}", err);
+        assert!(matches!(err, AppError::InvalidParam(_)), "expected InvalidParam for missing number, got {:?}", err);
+    }
+
+    #[test]
+    fn test_save_invoice_blocks_duplicate_full_electronic() {
+        // 两条全电票（无 code）同号应被拦截
+        let conn = setup_db();
+        let tmp = std::env::temp_dir();
+        let mut a = sample_input(); a.invoice_code = None; a.invoice_number = Some("FULL001".into());
+        let mut b = sample_input(); b.invoice_code = None; b.invoice_number = Some("FULL001".into());
+        save_invoice(&a, &conn, &tmp).unwrap();
+        let result = save_invoice(&b, &conn, &tmp);
+        assert!(result.is_err(), "duplicate full-electronic (no code) should be blocked");
+        assert!(result.unwrap_err().to_string().contains("发票已存在"));
     }
 
     #[test]

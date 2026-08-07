@@ -190,7 +190,7 @@ fn create_tables(conn: &Connection) -> AppResult<()> {
 
         DROP INDEX IF EXISTS idx_invoices_code_number;
         CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_code_number
-            ON invoices(invoice_code, invoice_number) WHERE status != 'void';
+            ON invoices(COALESCE(invoice_code, ''), invoice_number) WHERE status != 'void';
         CREATE INDEX IF NOT EXISTS idx_invoices_employee ON invoices(employee_id);
         CREATE INDEX IF NOT EXISTS idx_invoices_month ON invoices(belong_month);
         CREATE INDEX IF NOT EXISTS idx_invoices_expense_type ON invoices(expense_type_code);
@@ -1105,9 +1105,17 @@ fn row_to_invoice(row: &rusqlite::Row<'_>) -> rusqlite::Result<Invoice> {
     })
 }
 
-pub fn find_invoice_by_code_number(conn: &Connection, code: &str, number: &str) -> AppResult<Option<Invoice>> {
-    let sql = format!("SELECT {INVOICE_SELECT_FIELDS} FROM invoices WHERE invoice_code = ?1 AND invoice_number = ?2 AND status != 'void' LIMIT 1");
-    let result = conn.query_row(&sql, params![code, number], row_to_invoice);
+/// 按去重 key 查找已存在的发票。
+/// - 全电票（数电票）没有发票代码，code 为 None 时按空字符串匹配。
+/// - 配合 schema 中的 `(COALESCE(invoice_code, ''), invoice_number)` 唯一索引，
+///   同号码 + 空代码会被正确去重。
+pub fn find_invoice_by_dedup_key(conn: &Connection, code: Option<&str>, number: &str) -> AppResult<Option<Invoice>> {
+    let code_str = code.unwrap_or("");
+    let sql = format!(
+        "SELECT {INVOICE_SELECT_FIELDS} FROM invoices \
+         WHERE COALESCE(invoice_code, '') = ?1 AND invoice_number = ?2 AND status != 'void' LIMIT 1"
+    );
+    let result = conn.query_row(&sql, params![code_str, number], row_to_invoice);
     match result {
         Ok(inv) => Ok(Some(inv)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -1142,14 +1150,15 @@ pub fn update_invoice(conn: &Connection, id: i64, data: &InvoiceInput, new_image
     let existing = get_invoice(conn, id)?;
     let image_path = new_image_path.unwrap_or(existing.image_path.as_deref().unwrap_or(""));
 
-    // 若改了 code/number，需校验不撞其他记录
+    // 若改了 code/number，需校验不撞其他记录（code 可空，支持全电票）
     let new_code = data.invoice_code.as_ref().or(existing.invoice_code.as_ref());
     let new_number = data.invoice_number.as_ref().or(existing.invoice_number.as_ref());
-    if let (Some(c), Some(n)) = (new_code, new_number) {
-        if let Some(other) = find_invoice_by_code_number(conn, c, n)? {
+    if let Some(n) = new_number {
+        if let Some(other) = find_invoice_by_dedup_key(conn, new_code.map(|s| s.as_str()), n)? {
             if other.id != id {
+                let code_disp = new_code.cloned().unwrap_or_default();
                 return Err(AppError::General(format!(
-                    "发票代码{c}+号码{n}已被记录ID={}占用", other.id
+                    "发票代码{code_disp}+号码{n}已被记录ID={}占用", other.id
                 )));
             }
         }
@@ -1272,7 +1281,7 @@ mod tests {
                 image_path TEXT, raw_ocr_json TEXT,
                 created_at TEXT, updated_at TEXT
             );
-            CREATE UNIQUE INDEX idx_invoices_code_number ON invoices(invoice_code, invoice_number) WHERE status != 'void';
+            CREATE UNIQUE INDEX idx_invoices_code_number ON invoices(COALESCE(invoice_code, ''), invoice_number) WHERE status != 'void';
             INSERT INTO invoice_expense_types (code, name, sort_order) VALUES
                 ('office', '办公费', 1), ('other', '其他', 99);
             INSERT INTO employees (id, name) VALUES (1, '张三');
@@ -1302,7 +1311,7 @@ mod tests {
         let conn = setup_db();
         let inv = insert_invoice(&conn, &sample_input("12345", "67890"), "/stored/x.pdf").unwrap();
         assert_eq!(inv.invoice_code.as_deref(), Some("12345"));
-        let found = find_invoice_by_code_number(&conn, "12345", "67890").unwrap();
+        let found = find_invoice_by_dedup_key(&conn, Some("12345"), "67890").unwrap();
         assert!(found.is_some());
         assert_eq!(found.unwrap().id, inv.id);
     }
@@ -1310,8 +1319,32 @@ mod tests {
     #[test]
     fn test_find_nonexistent_returns_none() {
         let conn = setup_db();
-        let found = find_invoice_by_code_number(&conn, "X", "Y").unwrap();
+        let found = find_invoice_by_dedup_key(&conn, Some("X"), "Y").unwrap();
         assert!(found.is_none());
+    }
+
+    #[test]
+    fn test_find_full_electronic_invoice_no_code() {
+        // 全电票无发票代码，应能按 number 找到
+        let conn = setup_db();
+        let mut input = sample_input("", "99999");
+        input.invoice_code = None;
+        let inv = insert_invoice(&conn, &input, "/e.pdf").unwrap();
+        assert!(inv.invoice_code.is_none());
+        let found = find_invoice_by_dedup_key(&conn, None, "99999").unwrap();
+        assert!(found.is_some(), "None code should match via COALESCE");
+        assert_eq!(found.unwrap().id, inv.id);
+    }
+
+    #[test]
+    fn test_unique_index_blocks_duplicate_no_code() {
+        // 两条全电票同号应被拦截（COALESCE 把 NULL 转 '' 后冲突）
+        let conn = setup_db();
+        let mut a = sample_input("", "88888"); a.invoice_code = None;
+        let mut b = sample_input("", "88888"); b.invoice_code = None;
+        insert_invoice(&conn, &a, "/a.pdf").unwrap();
+        let result = insert_invoice(&conn, &b, "/b.pdf");
+        assert!(result.is_err(), "duplicate full-electronic invoice should be blocked by COALESCE index");
     }
 
     #[test]
@@ -1338,7 +1371,7 @@ mod tests {
         let inv = insert_invoice(&conn, &sample_input("333", "444"), "/c.pdf").unwrap();
         assert!(soft_delete_invoice(&conn, inv.id).unwrap());
         // find 应该返回 None（因为 status='void' 被过滤）
-        assert!(find_invoice_by_code_number(&conn, "333", "444").unwrap().is_none());
+        assert!(find_invoice_by_dedup_key(&conn, Some("333"), "444").unwrap().is_none());
         // query_invoices 默认也应过滤
         let list = query_invoices(&conn, &InvoiceQuery::default()).unwrap();
         assert!(list.is_empty());
