@@ -2,6 +2,7 @@ mod commands;
 mod db;
 mod errors;
 mod excel;
+mod invoice;
 mod models;
 mod ocr;
 mod salary;
