@@ -121,6 +121,15 @@ pub fn run() {
         commands::save_ocr_settings,
         commands::generate_punch_card_template,
         commands::ocr_recognize_punch_card,
+        commands::get_invoice_expense_types,
+        commands::save_invoice_expense_type,
+        commands::delete_invoice_expense_type,
+        commands::ocr_invoice,
+        commands::save_invoice,
+        commands::update_invoice,
+        commands::delete_invoice,
+        commands::query_invoices,
+        commands::export_invoice_list,
     ]);
 
     diag("calling builder.run()...");

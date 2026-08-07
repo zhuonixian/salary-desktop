@@ -756,3 +756,9 @@ fn get_days_in_month(month: &str) -> u32 {
         _ => 31,
     }
 }
+
+// ==================== Invoice List Export (placeholder) ====================
+// TODO(task-7): replace with real implementation
+pub fn export_invoice_list(_invoices: &[crate::models::Invoice], _path: &str) -> crate::errors::AppResult<bool> {
+    Ok(true)
+}

@@ -413,3 +413,78 @@ pub fn ocr_recognize_punch_card(
     let m = mode.as_deref().unwrap_or("online");
     ocr::ocr_recognize_punch_card(&image_path, &month, shift, m, &connection)
 }
+
+// ==================== Invoice Commands ====================
+
+#[tauri::command]
+pub fn get_invoice_expense_types(state: tauri::State<'_, Mutex<Connection>>) -> Result<Vec<InvoiceExpenseType>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    db::get_invoice_expense_types(&conn)
+}
+
+#[tauri::command]
+pub fn save_invoice_expense_type(data: InvoiceExpenseTypeInput, state: tauri::State<'_, Mutex<Connection>>) -> Result<InvoiceExpenseType, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    if let Some(id) = data.id {
+        let result = db::update_invoice_expense_type(&conn, id, &data)?;
+        db::log_operation(&conn, "update_expense_type", &format!("更新费用类型: {}", result.name), "system", None)?;
+        Ok(result)
+    } else {
+        let result = db::insert_invoice_expense_type(&conn, &data)?;
+        db::log_operation(&conn, "create_expense_type", &format!("新增费用类型: {}", result.name), "system", None)?;
+        Ok(result)
+    }
+}
+
+#[tauri::command]
+pub fn delete_invoice_expense_type(id: i64, state: tauri::State<'_, Mutex<Connection>>) -> Result<bool, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let result = db::delete_invoice_expense_type(&conn, id)?;
+    if result {
+        db::log_operation(&conn, "delete_expense_type", &format!("删除费用类型ID={id}"), "system", None)?;
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn ocr_invoice(image_path: String, app: tauri::AppHandle, state: tauri::State<'_, Mutex<Connection>>) -> Result<InvoiceOcrPreview, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    crate::invoice::ocr_invoice(&image_path, &conn)
+}
+
+#[tauri::command]
+pub fn save_invoice(data: InvoiceInput, app: tauri::AppHandle, state: tauri::State<'_, Mutex<Connection>>) -> Result<Invoice, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let app_data_dir = app.path().app_data_dir()
+        .map_err(|e| AppError::General(format!("获取app_data_dir失败: {e}")))?;
+    crate::invoice::save_invoice(&data, &conn, &app_data_dir)
+}
+
+#[tauri::command]
+pub fn update_invoice(id: i64, data: InvoiceInput, app: tauri::AppHandle, state: tauri::State<'_, Mutex<Connection>>) -> Result<bool, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let app_data_dir = app.path().app_data_dir()
+        .map_err(|e| AppError::General(format!("获取app_data_dir失败: {e}")))?;
+    crate::invoice::update_invoice(id, &data, &conn, &app_data_dir)
+}
+
+#[tauri::command]
+pub fn delete_invoice(id: i64, state: tauri::State<'_, Mutex<Connection>>) -> Result<bool, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    crate::invoice::delete_invoice(id, &conn)
+}
+
+#[tauri::command]
+pub fn query_invoices(query: InvoiceQuery, state: tauri::State<'_, Mutex<Connection>>) -> Result<Vec<Invoice>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    db::query_invoices(&conn, &query)
+}
+
+#[tauri::command]
+pub fn export_invoice_list(query: InvoiceQuery, path: String, state: tauri::State<'_, Mutex<Connection>>) -> Result<bool, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let invoices = db::query_invoices(&conn, &query)?;
+    excel::export_invoice_list(&invoices, &path)?;
+    db::log_operation(&conn, "export_invoices", &format!("导出发票清单: {}条到{}", invoices.len(), path), "system", None)?;
+    Ok(true)
+}
