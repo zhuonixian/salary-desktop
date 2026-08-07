@@ -980,3 +980,385 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) -> AppResult<()> {
     )?;
     Ok(())
 }
+
+// ==================== Invoice Expense Types ====================
+
+pub fn get_invoice_expense_types(conn: &Connection) -> AppResult<Vec<InvoiceExpenseType>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, code, name, sort_order, enabled, remark FROM invoice_expense_types ORDER BY sort_order, id"
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(InvoiceExpenseType {
+            id: row.get(0)?,
+            code: row.get(1)?,
+            name: row.get(2)?,
+            sort_order: row.get(3)?,
+            enabled: row.get(4)?,
+            remark: row.get(5)?,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
+pub fn insert_invoice_expense_type(conn: &Connection, data: &InvoiceExpenseTypeInput) -> AppResult<InvoiceExpenseType> {
+    let code = data.code.as_ref().ok_or_else(|| AppError::InvalidParam("code 必填".into()))?;
+    let name = data.name.as_ref().ok_or_else(|| AppError::InvalidParam("name 必填".into()))?;
+    let sort_order = data.sort_order.unwrap_or(99);
+    let enabled = data.enabled.unwrap_or(1);
+    conn.execute(
+        "INSERT INTO invoice_expense_types (code, name, sort_order, enabled, remark) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![code, name, sort_order, enabled, data.remark],
+    )?;
+    let id = conn.last_insert_rowid();
+    Ok(InvoiceExpenseType {
+        id, code: code.clone(), name: name.clone(), sort_order, enabled, remark: data.remark.clone(),
+    })
+}
+
+pub fn update_invoice_expense_type(conn: &Connection, id: i64, data: &InvoiceExpenseTypeInput) -> AppResult<InvoiceExpenseType> {
+    let existing = conn.query_row(
+        "SELECT id, code, name, sort_order, enabled, remark FROM invoice_expense_types WHERE id = ?1",
+        params![id],
+        |row| Ok(InvoiceExpenseType {
+            id: row.get(0)?, code: row.get(1)?, name: row.get(2)?,
+            sort_order: row.get(3)?, enabled: row.get(4)?, remark: row.get(5)?,
+        }),
+    ).map_err(|e| AppError::NotFound(format!("费用类型ID={id}未找到: {e}")))?;
+
+    // 不允许修改 code（避免破坏外键关联）
+    let name = data.name.as_ref().unwrap_or(&existing.name);
+    let sort_order = data.sort_order.unwrap_or(existing.sort_order);
+    let enabled = data.enabled.unwrap_or(existing.enabled);
+    let remark = data.remark.as_ref().or(existing.remark.as_ref());
+
+    conn.execute(
+        "UPDATE invoice_expense_types SET name=?1, sort_order=?2, enabled=?3, remark=?4 WHERE id=?5",
+        params![name, sort_order, enabled, remark, id],
+    )?;
+
+    Ok(InvoiceExpenseType {
+        id, code: existing.code, name: name.clone(), sort_order, enabled, remark: remark.cloned(),
+    })
+}
+
+pub fn delete_invoice_expense_type(conn: &Connection, id: i64) -> AppResult<bool> {
+    // 不允许删除"other"
+    let code: String = conn.query_row(
+        "SELECT code FROM invoice_expense_types WHERE id = ?1",
+        params![id],
+        |row| row.get(0),
+    ).map_err(|e| AppError::NotFound(format!("费用类型ID={id}未找到: {e}")))?;
+
+    if code == "other" {
+        return Err(AppError::InvalidParam("「其他」类型不允许删除".into()));
+    }
+
+    let in_use = count_invoices_by_expense_type(conn, &code)?;
+    if in_use > 0 {
+        return Err(AppError::InvalidParam(format!(
+            "费用类型「{code}」已被 {in_use} 张发票引用，请改用禁用"
+        )));
+    }
+
+    let deleted = conn.execute("DELETE FROM invoice_expense_types WHERE id=?1", params![id])?;
+    Ok(deleted > 0)
+}
+
+pub fn count_invoices_by_expense_type(conn: &Connection, code: &str) -> AppResult<i64> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM invoices WHERE expense_type_code = ?1 AND status != 'void'",
+        params![code],
+        |row| row.get(0),
+    )?;
+    Ok(count)
+}
+
+// ==================== Invoices ====================
+
+const INVOICE_SELECT_FIELDS: &str = "id, invoice_code, invoice_number, invoice_type, issue_date, check_code, amount, tax_amount, total_amount, seller_name, seller_tax_id, buyer_name, buyer_tax_id, expense_type_code, employee_id, belong_month, status, remark, image_path, raw_ocr_json, created_at, updated_at";
+
+fn row_to_invoice(row: &rusqlite::Row<'_>) -> rusqlite::Result<Invoice> {
+    Ok(Invoice {
+        id: row.get(0)?,
+        invoice_code: row.get(1)?,
+        invoice_number: row.get(2)?,
+        invoice_type: row.get(3)?,
+        issue_date: row.get(4)?,
+        check_code: row.get(5)?,
+        amount: row.get(6)?,
+        tax_amount: row.get(7)?,
+        total_amount: row.get(8)?,
+        seller_name: row.get(9)?,
+        seller_tax_id: row.get(10)?,
+        buyer_name: row.get(11)?,
+        buyer_tax_id: row.get(12)?,
+        expense_type_code: row.get(13)?,
+        employee_id: row.get(14)?,
+        belong_month: row.get(15)?,
+        status: row.get(16)?,
+        remark: row.get(17)?,
+        image_path: row.get(18)?,
+        raw_ocr_json: row.get(19)?,
+        created_at: row.get(20)?,
+        updated_at: row.get(21)?,
+    })
+}
+
+pub fn find_invoice_by_code_number(conn: &Connection, code: &str, number: &str) -> AppResult<Option<Invoice>> {
+    let sql = format!("SELECT {INVOICE_SELECT_FIELDS} FROM invoices WHERE invoice_code = ?1 AND invoice_number = ?2 AND status != 'void' LIMIT 1");
+    let result = conn.query_row(&sql, params![code, number], row_to_invoice);
+    match result {
+        Ok(inv) => Ok(Some(inv)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(AppError::from(e)),
+    }
+}
+
+pub fn get_invoice(conn: &Connection, id: i64) -> AppResult<Invoice> {
+    let sql = format!("SELECT {INVOICE_SELECT_FIELDS} FROM invoices WHERE id = ?1");
+    conn.query_row(&sql, params![id], row_to_invoice)
+        .map_err(|e| AppError::NotFound(format!("发票ID={id}未找到: {e}")))
+}
+
+pub fn insert_invoice(conn: &Connection, data: &InvoiceInput, image_path: &str) -> AppResult<Invoice> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO invoices (invoice_code, invoice_number, invoice_type, issue_date, check_code, amount, tax_amount, total_amount, seller_name, seller_tax_id, buyer_name, buyer_tax_id, expense_type_code, employee_id, belong_month, status, remark, image_path, raw_ocr_json, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 'normal', ?16, ?17, ?18, ?19, ?20)",
+        params![
+            data.invoice_code, data.invoice_number, data.invoice_type, data.issue_date,
+            data.check_code, data.amount.unwrap_or(0.0), data.tax_amount.unwrap_or(0.0),
+            data.total_amount.unwrap_or(0.0), data.seller_name, data.seller_tax_id,
+            data.buyer_name, data.buyer_tax_id, data.expense_type_code, data.employee_id,
+            data.belong_month, data.remark, image_path, data.raw_ocr_json, now, now
+        ],
+    )?;
+    get_invoice(conn, conn.last_insert_rowid())
+}
+
+pub fn update_invoice(conn: &Connection, id: i64, data: &InvoiceInput, new_image_path: Option<&str>) -> AppResult<bool> {
+    let now = Utc::now().to_rfc3339();
+    let existing = get_invoice(conn, id)?;
+    let image_path = new_image_path.unwrap_or(existing.image_path.as_deref().unwrap_or(""));
+
+    // 若改了 code/number，需校验不撞其他记录
+    let new_code = data.invoice_code.as_ref().or(existing.invoice_code.as_ref());
+    let new_number = data.invoice_number.as_ref().or(existing.invoice_number.as_ref());
+    if let (Some(c), Some(n)) = (new_code, new_number) {
+        if let Some(other) = find_invoice_by_code_number(conn, c, n)? {
+            if other.id != id {
+                return Err(AppError::General(format!(
+                    "发票代码{c}+号码{n}已被记录ID={}占用", other.id
+                )));
+            }
+        }
+    }
+
+    let updated = conn.execute(
+        "UPDATE invoices SET invoice_code=?1, invoice_number=?2, invoice_type=?3, issue_date=?4, check_code=?5, amount=?6, tax_amount=?7, total_amount=?8, seller_name=?9, seller_tax_id=?10, buyer_name=?11, buyer_tax_id=?12, expense_type_code=?13, employee_id=?14, belong_month=?15, remark=?16, image_path=?17, raw_ocr_json=?18, updated_at=?19 WHERE id=?20",
+        params![
+            data.invoice_code.as_ref().or(existing.invoice_code.as_ref()),
+            data.invoice_number.as_ref().or(existing.invoice_number.as_ref()),
+            data.invoice_type.as_ref().or(existing.invoice_type.as_ref()),
+            data.issue_date.as_ref().or(existing.issue_date.as_ref()),
+            data.check_code.as_ref().or(existing.check_code.as_ref()),
+            data.amount.unwrap_or(existing.amount),
+            data.tax_amount.unwrap_or(existing.tax_amount),
+            data.total_amount.unwrap_or(existing.total_amount),
+            data.seller_name.as_ref().or(existing.seller_name.as_ref()),
+            data.seller_tax_id.as_ref().or(existing.seller_tax_id.as_ref()),
+            data.buyer_name.as_ref().or(existing.buyer_name.as_ref()),
+            data.buyer_tax_id.as_ref().or(existing.buyer_tax_id.as_ref()),
+            data.expense_type_code.as_ref().or(existing.expense_type_code.as_ref()),
+            data.employee_id.or(existing.employee_id),
+            data.belong_month.as_ref().or(existing.belong_month.as_ref()),
+            data.remark.as_ref().or(existing.remark.as_ref()),
+            image_path,
+            data.raw_ocr_json.as_ref().or(existing.raw_ocr_json.as_ref()),
+            now, id
+        ],
+    )?;
+    Ok(updated > 0)
+}
+
+pub fn soft_delete_invoice(conn: &Connection, id: i64) -> AppResult<bool> {
+    let now = Utc::now().to_rfc3339();
+    let updated = conn.execute(
+        "UPDATE invoices SET status='void', updated_at=?1 WHERE id=?2 AND status != 'void'",
+        params![now, id],
+    )?;
+    Ok(updated > 0)
+}
+
+pub fn query_invoices(conn: &Connection, q: &InvoiceQuery) -> AppResult<Vec<Invoice>> {
+    let mut where_clauses: Vec<String> = vec!["status != 'void'".to_string()];
+    let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let mut idx = 1;
+
+    if let Some(m) = &q.belong_month {
+        where_clauses.push(format!("belong_month = ?{idx}"));
+        params_vec.push(Box::new(m.clone()));
+        idx += 1;
+    }
+    if let Some(eid) = q.employee_id {
+        where_clauses.push(format!("employee_id = ?{idx}"));
+        params_vec.push(Box::new(eid));
+        idx += 1;
+    }
+    if let Some(code) = &q.expense_type_code {
+        where_clauses.push(format!("expense_type_code = ?{idx}"));
+        params_vec.push(Box::new(code.clone()));
+        idx += 1;
+    }
+    if let Some(t) = &q.invoice_type {
+        where_clauses.push(format!("invoice_type = ?{idx}"));
+        params_vec.push(Box::new(t.clone()));
+        idx += 1;
+    }
+    if let Some(s) = &q.status {
+        where_clauses[0] = format!("status = ?{idx}");
+        params_vec.push(Box::new(s.clone()));
+        idx += 1;
+    }
+    if let Some(kw) = &q.keyword {
+        let pat = format!("%{kw}%");
+        where_clauses.push(format!("(seller_name LIKE ?{idx} OR buyer_name LIKE ?{idx} OR remark LIKE ?{idx})"));
+        params_vec.push(Box::new(pat));
+        idx += 1;
+    }
+
+    let sql = format!(
+        "SELECT {INVOICE_SELECT_FIELDS} FROM invoices WHERE {} ORDER BY issue_date DESC, id DESC",
+        where_clauses.join(" AND ")
+    );
+
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_refs.as_slice(), row_to_invoice)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn setup_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("
+            CREATE TABLE employees (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT);
+            CREATE TABLE invoice_expense_types (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT UNIQUE NOT NULL,
+                name TEXT NOT NULL,
+                sort_order INTEGER DEFAULT 0,
+                enabled INTEGER DEFAULT 1,
+                remark TEXT
+            );
+            CREATE TABLE invoices (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                invoice_code TEXT, invoice_number TEXT, invoice_type TEXT,
+                issue_date TEXT, check_code TEXT,
+                amount REAL DEFAULT 0, tax_amount REAL DEFAULT 0, total_amount REAL DEFAULT 0,
+                seller_name TEXT, seller_tax_id TEXT, buyer_name TEXT, buyer_tax_id TEXT,
+                expense_type_code TEXT, employee_id INTEGER, belong_month TEXT,
+                status TEXT DEFAULT 'normal', remark TEXT,
+                image_path TEXT, raw_ocr_json TEXT,
+                created_at TEXT, updated_at TEXT
+            );
+            CREATE UNIQUE INDEX idx_invoices_code_number ON invoices(invoice_code, invoice_number);
+            INSERT INTO invoice_expense_types (code, name, sort_order) VALUES
+                ('office', '办公费', 1), ('other', '其他', 99);
+            INSERT INTO employees (id, name) VALUES (1, '张三');
+        ").unwrap();
+        conn
+    }
+
+    fn sample_input(code: &str, num: &str) -> InvoiceInput {
+        InvoiceInput {
+            invoice_code: Some(code.into()),
+            invoice_number: Some(num.into()),
+            invoice_type: Some("普通发票".into()),
+            issue_date: Some("2026-08-01".into()),
+            check_code: None,
+            amount: Some(100.0), tax_amount: Some(6.0), total_amount: Some(106.0),
+            seller_name: Some("测试销售方".into()), seller_tax_id: Some("91XXXX".into()),
+            buyer_name: Some("测试购买方".into()), buyer_tax_id: Some("92XXXX".into()),
+            expense_type_code: Some("office".into()),
+            employee_id: Some(1),
+            belong_month: Some("2026-08".into()),
+            remark: None, image_path: Some("/tmp/x.pdf".into()), raw_ocr_json: Some("{}".into()),
+        }
+    }
+
+    #[test]
+    fn test_insert_and_find_invoice() {
+        let conn = setup_db();
+        let inv = insert_invoice(&conn, &sample_input("12345", "67890"), "/stored/x.pdf").unwrap();
+        assert_eq!(inv.invoice_code.as_deref(), Some("12345"));
+        let found = find_invoice_by_code_number(&conn, "12345", "67890").unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().id, inv.id);
+    }
+
+    #[test]
+    fn test_find_nonexistent_returns_none() {
+        let conn = setup_db();
+        let found = find_invoice_by_code_number(&conn, "X", "Y").unwrap();
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn test_unique_index_blocks_duplicate() {
+        let conn = setup_db();
+        insert_invoice(&conn, &sample_input("111", "222"), "/a.pdf").unwrap();
+        let result = insert_invoice(&conn, &sample_input("111", "222"), "/b.pdf");
+        assert!(result.is_err(), "重复插入应被唯一索引拦截");
+    }
+
+    #[test]
+    fn test_soft_delete_hides_record() {
+        let conn = setup_db();
+        let inv = insert_invoice(&conn, &sample_input("333", "444"), "/c.pdf").unwrap();
+        assert!(soft_delete_invoice(&conn, inv.id).unwrap());
+        // find 应该返回 None（因为 status='void' 被过滤）
+        assert!(find_invoice_by_code_number(&conn, "333", "444").unwrap().is_none());
+        // query_invoices 默认也应过滤
+        let list = query_invoices(&conn, &InvoiceQuery::default()).unwrap();
+        assert!(list.is_empty());
+    }
+
+    #[test]
+    fn test_query_invoices_filters() {
+        let conn = setup_db();
+        let mut a = sample_input("555", "001"); a.belong_month = Some("2026-07".into());
+        let mut b = sample_input("555", "002"); b.belong_month = Some("2026-08".into());
+        insert_invoice(&conn, &a, "/a.pdf").unwrap();
+        insert_invoice(&conn, &b, "/b.pdf").unwrap();
+
+        let july = query_invoices(&conn, &InvoiceQuery { belong_month: Some("2026-07".into()), ..Default::default() }).unwrap();
+        assert_eq!(july.len(), 1);
+        assert_eq!(july[0].invoice_number.as_deref(), Some("001"));
+    }
+
+    #[test]
+    fn test_delete_other_expense_type_blocked() {
+        let conn = setup_db();
+        let other_id: i64 = conn.query_row(
+            "SELECT id FROM invoice_expense_types WHERE code='other'", [], |r| r.get(0)
+        ).unwrap();
+        let result = delete_invoice_expense_type(&conn, other_id);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_delete_used_expense_type_blocked() {
+        let conn = setup_db();
+        insert_invoice(&conn, &sample_input("777", "888"), "/d.pdf").unwrap();
+        let office_id: i64 = conn.query_row(
+            "SELECT id FROM invoice_expense_types WHERE code='office'", [], |r| r.get(0)
+        ).unwrap();
+        let result = delete_invoice_expense_type(&conn, office_id);
+        assert!(result.is_err(), "被引用的费用类型不允许删除");
+    }
+}
