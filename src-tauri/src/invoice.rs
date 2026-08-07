@@ -101,21 +101,30 @@ fn ensure_png_for_ocr(image_path: &str) -> AppResult<String> {
     let target = parent.join(format!("{stem}.ocr-converted.png"));
 
     // 优先 pdftocairo（更高质量），失败回退 pdftoppm
-    let candidates: &[&[&str]] = &[
-        &["pdftocairo", "-png", "-r", "200", "-singlefile"],
-        &["pdftoppm", "-png", "-r", "200", "-f", "1", "-l", "1"],
+    // 用 find_pdf_tool 查找绝对路径，避免 GUI 应用启动时 PATH 受限
+    let candidates: &[(&str, &[&str])] = &[
+        ("pdftocairo", &["-png", "-r", "200", "-singlefile"]),
+        ("pdftoppm", &["-png", "-r", "200", "-f", "1", "-l", "1"]),
     ];
 
     let mut last_err = None;
-    for cmd_args in candidates {
-        let mut cmd = std::process::Command::new(cmd_args[0]);
-        cmd.args(&cmd_args[1..])
+    for (tool_name, args) in candidates {
+        let tool_path = match find_pdf_tool(tool_name) {
+            Some(p) => p,
+            None => {
+                last_err = Some(format!("{tool_name} 未在 PATH 或常见目录中找到"));
+                continue;
+            }
+        };
+
+        let mut cmd = std::process::Command::new(&tool_path);
+        cmd.args(*args)
             .arg(image_path)
             .arg(target.with_extension("")); // pdftocairo -singlefile 不需要后缀；pdftoppm 会加 -1
         match cmd.output() {
             Ok(out) if out.status.success() => {
                 // pdftocairo -singlefile 生成 target；pdftoppm 生成 target-1.png
-                let produced = if cmd_args[0] == "pdftocairo" {
+                let produced = if *tool_name == "pdftocairo" {
                     target.clone()
                 } else {
                     parent.join(format!("{stem}.ocr-converted-1.png"))
@@ -126,21 +135,63 @@ fn ensure_png_for_ocr(image_path: &str) -> AppResult<String> {
                     }
                     return Ok(target.to_string_lossy().to_string());
                 }
+                last_err = Some(format!("{tool_name} 执行成功但产物未生成"));
             }
             Ok(out) => {
                 let stderr = String::from_utf8_lossy(&out.stderr);
-                last_err = Some(format!("{} 失败: {}", cmd_args[0], stderr.trim()));
+                last_err = Some(format!("{tool_name} 失败: {}", stderr.trim()));
             }
             Err(e) => {
-                last_err = Some(format!("{} 未安装或不可执行: {}", cmd_args[0], e));
+                last_err = Some(format!("{tool_name} ({}) 不可执行: {}", tool_path.display(), e));
             }
         }
     }
 
     Err(AppError::Ocr(format!(
-        "PDF 自动转换 PNG 失败（{}）。请安装 poppler-utils（Linux: apt install poppler-utils；macOS: brew install poppler；Windows: 安装 poppler 并加入 PATH），或将 PDF 截图导出为 PNG 后再上传。",
+        "PDF 自动转换 PNG 失败（{}）。请安装 poppler-utils（Linux: apt install poppler-utils；macOS: brew install poppler；Windows: 从 https://github.com/oschwartz10612/poppler-windows 下载并加入 PATH），或将 PDF 截图导出为 PNG 后再上传。",
         last_err.unwrap_or_else(|| "未知错误".to_string())
     )))
+}
+
+/// 在 PATH 与常见绝对路径中查找可执行文件。
+/// 适用于 GUI 应用启动时 PATH 受限的情况（systemd user / desktop session）。
+fn find_pdf_tool(name: &str) -> Option<std::path::PathBuf> {
+    // exe 后缀（Windows 上 .exe，其他平台空）
+    let exe_suffix = if cfg!(windows) { ".exe" } else { "" };
+    let name_with_suffix = format!("{name}{exe_suffix}");
+
+    // 1. PATH 中查找
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            let p = dir.join(&name_with_suffix);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+
+    // 2. 常见绝对路径兜底
+    let fallback_dirs: &[&str] = if cfg!(target_os = "macos") {
+        &["/usr/bin", "/usr/local/bin", "/opt/homebrew/bin", "/opt/local/bin"]
+    } else if cfg!(windows) {
+        &[
+            r"C:\poppler\Library\bin",
+            r"C:\poppler\bin",
+            r"C:\Program Files\poppler\Library\bin",
+            r"C:\Program Files\poppler\bin",
+            r"C:\Program Files (x86)\poppler\Library\bin",
+        ]
+    } else {
+        &["/usr/bin", "/usr/local/bin", "/snap/bin"]
+    };
+
+    for dir in fallback_dirs {
+        let p = std::path::PathBuf::from(dir).join(&name_with_suffix);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    None
 }
 
 // ==================== Pure Mapping Functions ====================
@@ -362,6 +413,28 @@ mod tests {
             error_msg: json_value.get("error_msg").and_then(|v| v.as_str()).map(String::from),
             extra,
         }
+    }
+
+    #[test]
+    fn test_find_pdf_tool_locates_pdftocairo_when_in_path() {
+        // 这个测试依赖系统环境：Linux CI 通常装了 poppler-utils
+        // 如果系统没装 pdftocairo，跳过断言（不报失败，仅打日志）
+        let found = find_pdf_tool("pdftocairo");
+        if found.is_none() {
+            eprintln!("skip: pdftocairo not found on this system");
+            return;
+        }
+        let path = found.unwrap();
+        assert!(path.is_file(), "find_pdf_tool 返回的路径必须是文件: {}", path.display());
+        // 验证至少是 pdftocairo 名字（兼容 .exe 后缀）
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        assert!(name.starts_with("pdftocairo"), "unexpected: {name}");
+    }
+
+    #[test]
+    fn test_find_pdf_tool_returns_none_for_missing() {
+        let found = find_pdf_tool("definitely-not-a-real-tool-xyz123");
+        assert!(found.is_none(), "找不到的工具应返回 None");
     }
 
     #[test]
