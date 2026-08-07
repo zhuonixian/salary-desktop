@@ -35,3 +35,9 @@ __pycache__/
 
 # Database
 *.db
+
+# Superpowers SDD scratch (specs/plans tracked, scratch not)
+.superpowers/sdd/
+
+# Graphify output
+graphify-out/
