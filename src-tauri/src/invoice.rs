@@ -135,6 +135,127 @@ fn parse_amount(s: &Option<String>) -> Option<f64> {
     cleaned.parse::<f64>().ok()
 }
 
+// ==================== Business Layer ====================
+
+pub fn save_invoice(
+    input: &InvoiceInput,
+    conn: &Connection,
+    app_data_dir: &std::path::Path,
+) -> AppResult<Invoice> {
+    // 二次查重
+    if let (Some(c), Some(n)) = (input.invoice_code.as_ref(), input.invoice_number.as_ref()) {
+        if let Some(existing) = db::find_invoice_by_code_number(conn, c, n)? {
+            return Err(AppError::General(format!(
+                "发票已存在：代码{c} 号码{n}，记录ID={}",
+                existing.id
+            )));
+        }
+    } else {
+        return Err(AppError::InvalidParam("发票代码和号码必填".into()));
+    }
+
+    // 复制原图到应用目录
+    let target_path = match input.image_path.as_deref() {
+        Some(src) if !src.is_empty() => {
+            Some(copy_image_to_app_dir(src, input.belong_month.as_deref(), app_data_dir)?)
+        }
+        _ => None,
+    };
+
+    let invoice = db::insert_invoice(conn, input, target_path.as_deref().unwrap_or(""))?;
+
+    db::log_operation(
+        conn,
+        "save_invoice",
+        &format!(
+            "录入发票：代码{} 号码{} 价税合计{:.2}",
+            input.invoice_code.as_deref().unwrap_or(""),
+            input.invoice_number.as_deref().unwrap_or(""),
+            input.total_amount.unwrap_or(0.0)
+        ),
+        "system",
+        None,
+    )?;
+
+    Ok(invoice)
+}
+
+pub fn update_invoice(
+    id: i64,
+    input: &InvoiceInput,
+    conn: &Connection,
+    app_data_dir: &std::path::Path,
+) -> AppResult<bool> {
+    let existing = db::get_invoice(conn, id)?;
+    let new_image_path = if let Some(new_src) = input.image_path.as_deref() {
+        if !new_src.is_empty() && new_src != existing.image_path.as_deref().unwrap_or("") {
+            // 用户换图，复制新图
+            let copied = copy_image_to_app_dir(
+                new_src,
+                input.belong_month.as_deref().or(existing.belong_month.as_deref()),
+                app_data_dir,
+            )?;
+            Some(copied)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let result = db::update_invoice(conn, id, input, new_image_path.as_deref())?;
+
+    if result {
+        db::log_operation(
+            conn,
+            "update_invoice",
+            &format!("更新发票ID={id}"),
+            "system",
+            None,
+        )?;
+    }
+
+    Ok(result)
+}
+
+pub fn delete_invoice(id: i64, conn: &Connection) -> AppResult<bool> {
+    let result = db::soft_delete_invoice(conn, id)?;
+    if result {
+        db::log_operation(
+            conn,
+            "delete_invoice",
+            &format!("删除发票ID={id}"),
+            "system",
+            None,
+        )?;
+    }
+    Ok(result)
+}
+
+/// 复制源文件到 {app_data_dir}/invoices/{belong_month}/{timestamp}_{filename}
+pub(crate) fn copy_image_to_app_dir(
+    src: &str,
+    belong_month: Option<&str>,
+    app_data_dir: &std::path::Path,
+) -> AppResult<String> {
+    let src_path = std::path::Path::new(src);
+    let filename = src_path.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "invoice.bin".to_string());
+
+    let month = belong_month.unwrap_or("unclassified");
+    let timestamp = chrono::Utc::now().format("%Y%m%d%H%M%S");
+    let target_name = format!("{timestamp}_{filename}");
+
+    let target_dir = app_data_dir.join("invoices").join(month);
+    std::fs::create_dir_all(&target_dir)?;
+
+    let target_path = target_dir.join(target_name);
+    std::fs::copy(src_path, &target_path)?;
+
+    Ok(target_path.to_string_lossy().to_string())
+}
+
 // ==================== Unit Tests ====================
 
 #[cfg(test)]
@@ -222,5 +343,124 @@ mod tests {
         assert!(translate_baidu_error(18, "").contains("QPS"));
         assert!(translate_baidu_error(216201, "").contains("图片"));
         assert!(translate_baidu_error(999, "raw msg").contains("raw msg"));
+    }
+}
+
+#[cfg(test)]
+mod business_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn setup_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("
+            CREATE TABLE employees (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT);
+            CREATE TABLE invoice_expense_types (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT UNIQUE NOT NULL,
+                name TEXT NOT NULL,
+                sort_order INTEGER DEFAULT 0,
+                enabled INTEGER DEFAULT 1,
+                remark TEXT
+            );
+            CREATE TABLE invoices (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                invoice_code TEXT, invoice_number TEXT, invoice_type TEXT,
+                issue_date TEXT, check_code TEXT,
+                amount REAL DEFAULT 0, tax_amount REAL DEFAULT 0, total_amount REAL DEFAULT 0,
+                seller_name TEXT, seller_tax_id TEXT, buyer_name TEXT, buyer_tax_id TEXT,
+                expense_type_code TEXT, employee_id INTEGER, belong_month TEXT,
+                status TEXT DEFAULT 'normal', remark TEXT,
+                image_path TEXT, raw_ocr_json TEXT,
+                created_at TEXT, updated_at TEXT
+            );
+            CREATE UNIQUE INDEX idx_invoices_code_number ON invoices(invoice_code, invoice_number);
+            CREATE TABLE operation_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                operation_type TEXT NOT NULL, description TEXT,
+                operator TEXT, detail TEXT, created_at TEXT
+            );
+            INSERT INTO invoice_expense_types (code, name, sort_order) VALUES ('office', '办公费', 1);
+            INSERT INTO employees (id, name) VALUES (1, '张三');
+        ").unwrap();
+        conn
+    }
+
+    fn sample_input() -> InvoiceInput {
+        InvoiceInput {
+            invoice_code: Some("12345".into()),
+            invoice_number: Some("67890".into()),
+            invoice_type: Some("普通发票".into()),
+            issue_date: Some("2026-08-01".into()),
+            check_code: None,
+            amount: Some(100.0), tax_amount: Some(6.0), total_amount: Some(106.0),
+            seller_name: Some("销售方".into()), seller_tax_id: Some("91X".into()),
+            buyer_name: Some("购买方".into()), buyer_tax_id: Some("92X".into()),
+            expense_type_code: Some("office".into()),
+            employee_id: Some(1),
+            belong_month: Some("2026-08".into()),
+            remark: None,
+            image_path: None,
+            raw_ocr_json: Some("{}".into()),
+        }
+    }
+
+    #[test]
+    fn test_save_invoice_blocks_duplicate() {
+        let conn = setup_db();
+        let tmp = std::env::temp_dir();
+        let input = sample_input();
+        save_invoice(&input, &conn, &tmp).unwrap();
+        let result = save_invoice(&input, &conn, &tmp);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("发票已存在"));
+    }
+
+    #[test]
+    fn test_save_invoice_requires_code_and_number() {
+        let conn = setup_db();
+        let mut input = sample_input();
+        input.invoice_code = None;
+        let result = save_invoice(&input, &conn, &std::env::temp_dir());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_save_invoice_logs_operation() {
+        let conn = setup_db();
+        save_invoice(&sample_input(), &conn, &std::env::temp_dir()).unwrap();
+        let log_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM operation_logs WHERE operation_type = 'save_invoice'",
+            [], |r| r.get(0)
+        ).unwrap();
+        assert_eq!(log_count, 1);
+    }
+
+    #[test]
+    fn test_copy_image_to_app_dir() {
+        let tmp = std::env::temp_dir();
+        let src = tmp.join("test_invoice_src.txt");
+        std::fs::write(&src, b"hello").unwrap();
+        let dest = copy_image_to_app_dir(
+            src.to_str().unwrap(),
+            Some("2026-08"),
+            &tmp.join("app_data"),
+        ).unwrap();
+        assert!(dest.contains("invoices/2026-08/"));
+        let content = std::fs::read_to_string(&dest).unwrap();
+        assert_eq!(content, "hello");
+    }
+
+    #[test]
+    fn test_copy_image_to_app_dir_unclassified_month() {
+        let tmp = std::env::temp_dir();
+        let src = tmp.join("test_invoice_src2.txt");
+        std::fs::write(&src, b"hello").unwrap();
+        let dest = copy_image_to_app_dir(
+            src.to_str().unwrap(),
+            None,
+            &tmp.join("app_data2"),
+        ).unwrap();
+        assert!(dest.contains("invoices/unclassified/"));
     }
 }
