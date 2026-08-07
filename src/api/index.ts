@@ -562,8 +562,8 @@ export async function saveInvoiceExpenseType(data: InvoiceExpenseTypeInput): Pro
   return invoke<InvoiceExpenseType>('save_invoice_expense_type', { data });
 }
 
-export async function deleteInvoiceExpenseType(id: number): Promise<void> {
-  await invoke('delete_invoice_expense_type', { id });
+export async function deleteInvoiceExpenseType(id: number): Promise<boolean> {
+  return invoke<boolean>('delete_invoice_expense_type', { id });
 }
 
 export async function ocrInvoice(filePath: string): Promise<InvoiceOcrPreview> {
@@ -578,14 +578,14 @@ export async function updateInvoice(id: number, data: InvoiceInput): Promise<boo
   return invoke<boolean>('update_invoice', { id, data });
 }
 
-export async function deleteInvoice(id: number): Promise<void> {
-  await invoke('delete_invoice', { id });
+export async function deleteInvoice(id: number): Promise<boolean> {
+  return invoke<boolean>('delete_invoice', { id });
 }
 
 export async function queryInvoices(query: InvoiceQuery): Promise<Invoice[]> {
   return invoke<Invoice[]>('query_invoices', { query });
 }
 
-export async function exportInvoiceList(query: InvoiceQuery, savePath: string): Promise<void> {
-  await invoke('export_invoice_list', { query, path: savePath });
+export async function exportInvoiceList(query: InvoiceQuery, savePath: string): Promise<boolean> {
+  return invoke<boolean>('export_invoice_list', { query, path: savePath });
 }

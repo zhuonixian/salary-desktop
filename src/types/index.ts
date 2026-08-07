@@ -260,7 +260,7 @@ export interface Invoice {
   expense_type_code?: string;
   employee_id?: number;
   belong_month?: string;
-  status: InvoiceStatus;
+  status?: string;
   remark?: string;
   image_path?: string;
   raw_ocr_json?: string;
