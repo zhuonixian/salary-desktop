@@ -238,12 +238,18 @@ pub(crate) fn copy_image_to_app_dir(
     belong_month: Option<&str>,
     app_data_dir: &std::path::Path,
 ) -> AppResult<String> {
+    let raw_month = belong_month.unwrap_or("unclassified");
+    // Sanitize: reject path separators and parent traversal
+    let sanitized: String = raw_month.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    let month = if sanitized.is_empty() { "unclassified" } else { sanitized.as_str() };
+
     let src_path = std::path::Path::new(src);
     let filename = src_path.file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "invoice.bin".to_string());
 
-    let month = belong_month.unwrap_or("unclassified");
     let timestamp = chrono::Utc::now().format("%Y%m%d%H%M%S");
     let target_name = format!("{timestamp}_{filename}");
 
@@ -374,7 +380,7 @@ mod business_tests {
                 image_path TEXT, raw_ocr_json TEXT,
                 created_at TEXT, updated_at TEXT
             );
-            CREATE UNIQUE INDEX idx_invoices_code_number ON invoices(invoice_code, invoice_number);
+            CREATE UNIQUE INDEX idx_invoices_code_number ON invoices(invoice_code, invoice_number) WHERE status != 'void';
             CREATE TABLE operation_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 operation_type TEXT NOT NULL, description TEXT,
@@ -422,7 +428,26 @@ mod business_tests {
         let mut input = sample_input();
         input.invoice_code = None;
         let result = save_invoice(&input, &conn, &std::env::temp_dir());
-        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, AppError::InvalidParam(_)), "expected InvalidParam, got {:?}", err);
+    }
+
+    #[test]
+    fn test_update_invoice_blocks_cross_record_collision() {
+        let conn = setup_db();
+        let tmp = std::env::temp_dir();
+        // Insert two invoices with different codes
+        let mut a = sample_input(); a.invoice_code = Some("AAA".into()); a.invoice_number = Some("001".into());
+        let mut b = sample_input(); b.invoice_code = Some("BBB".into()); b.invoice_number = Some("002".into());
+        let inv_a = save_invoice(&a, &conn, &tmp).unwrap();
+        let _inv_b = save_invoice(&b, &conn, &tmp).unwrap();
+
+        // Try to update A to use B's code+number — should fail
+        let mut collision_input = a.clone();
+        collision_input.invoice_code = Some("BBB".into());
+        collision_input.invoice_number = Some("002".into());
+        let result = update_invoice(inv_a.id, &collision_input, &conn, &tmp);
+        assert!(result.is_err(), "updating to collide with another record should fail");
     }
 
     #[test]

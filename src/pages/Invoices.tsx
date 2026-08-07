@@ -382,7 +382,7 @@ const Invoices: React.FC = () => {
             style={{ width: 160 }} allowClear placeholder="费用类型"
             value={filterExpenseType}
             onChange={(v) => setFilterExpenseType(v)}
-            options={expenseTypes.map(t => ({ value: t.code, label: t.name }))}
+            options={expenseTypes.filter(t => t.enabled === 1).map(t => ({ value: t.code, label: t.name }))}
           />
           <Select
             style={{ width: 160 }} allowClear placeholder="发票类型"
@@ -552,7 +552,7 @@ const Invoices: React.FC = () => {
                     onChange={(v) => setUploadModal(prev => ({
                       ...prev, form: { ...prev.form, expense_type_code: v }
                     }))}
-                    options={expenseTypes.map(t => ({ value: t.code, label: t.name }))}
+                    options={expenseTypes.filter(t => t.enabled === 1).map(t => ({ value: t.code, label: t.name }))}
                     placeholder="选择费用类型"
                   />
                 </Form.Item>

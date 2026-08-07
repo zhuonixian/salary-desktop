@@ -188,8 +188,9 @@ fn create_tables(conn: &Connection) -> AppResult<()> {
             FOREIGN KEY (expense_type_code) REFERENCES invoice_expense_types(code) ON DELETE SET NULL
         );
 
+        DROP INDEX IF EXISTS idx_invoices_code_number;
         CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_code_number
-            ON invoices(invoice_code, invoice_number);
+            ON invoices(invoice_code, invoice_number) WHERE status != 'void';
         CREATE INDEX IF NOT EXISTS idx_invoices_employee ON invoices(employee_id);
         CREATE INDEX IF NOT EXISTS idx_invoices_month ON invoices(belong_month);
         CREATE INDEX IF NOT EXISTS idx_invoices_expense_type ON invoices(expense_type_code);
@@ -1191,9 +1192,19 @@ pub fn soft_delete_invoice(conn: &Connection, id: i64) -> AppResult<bool> {
 }
 
 pub fn query_invoices(conn: &Connection, q: &InvoiceQuery) -> AppResult<Vec<Invoice>> {
-    let mut where_clauses: Vec<String> = vec!["status != 'void'".to_string()];
+    let void_filter;
+    let mut where_clauses: Vec<String> = Vec::new();
     let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     let mut idx = 1;
+
+    if let Some(s) = &q.status {
+        where_clauses.push(format!("status = ?{idx}"));
+        params_vec.push(Box::new(s.clone()));
+        idx += 1;
+    } else {
+        void_filter = "status != 'void'";
+        where_clauses.push(void_filter.to_string());
+    }
 
     if let Some(m) = &q.belong_month {
         where_clauses.push(format!("belong_month = ?{idx}"));
@@ -1213,11 +1224,6 @@ pub fn query_invoices(conn: &Connection, q: &InvoiceQuery) -> AppResult<Vec<Invo
     if let Some(t) = &q.invoice_type {
         where_clauses.push(format!("invoice_type = ?{idx}"));
         params_vec.push(Box::new(t.clone()));
-        idx += 1;
-    }
-    if let Some(s) = &q.status {
-        where_clauses[0] = format!("status = ?{idx}");
-        params_vec.push(Box::new(s.clone()));
         idx += 1;
     }
     if let Some(kw) = &q.keyword {
@@ -1266,7 +1272,7 @@ mod tests {
                 image_path TEXT, raw_ocr_json TEXT,
                 created_at TEXT, updated_at TEXT
             );
-            CREATE UNIQUE INDEX idx_invoices_code_number ON invoices(invoice_code, invoice_number);
+            CREATE UNIQUE INDEX idx_invoices_code_number ON invoices(invoice_code, invoice_number) WHERE status != 'void';
             INSERT INTO invoice_expense_types (code, name, sort_order) VALUES
                 ('office', '办公费', 1), ('other', '其他', 99);
             INSERT INTO employees (id, name) VALUES (1, '张三');
@@ -1314,6 +1320,16 @@ mod tests {
         insert_invoice(&conn, &sample_input("111", "222"), "/a.pdf").unwrap();
         let result = insert_invoice(&conn, &sample_input("111", "222"), "/b.pdf");
         assert!(result.is_err(), "重复插入应被唯一索引拦截");
+    }
+
+    #[test]
+    fn test_soft_delete_allows_resubmission() {
+        let conn = setup_db();
+        let inv = insert_invoice(&conn, &sample_input("111", "222"), "/a.pdf").unwrap();
+        assert!(soft_delete_invoice(&conn, inv.id).unwrap());
+        // Re-inserting same code/number should now succeed
+        let result = insert_invoice(&conn, &sample_input("111", "222"), "/b.pdf");
+        assert!(result.is_ok(), "soft-deleted invoice should allow re-submission");
     }
 
     #[test]

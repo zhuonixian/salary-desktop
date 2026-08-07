@@ -172,8 +172,9 @@ CREATE TABLE IF NOT EXISTS invoices (
 );
 
 -- 发票相关索引
+DROP INDEX IF EXISTS idx_invoices_code_number;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_code_number
-  ON invoices(invoice_code, invoice_number);
+  ON invoices(invoice_code, invoice_number) WHERE status != 'void';
 CREATE INDEX IF NOT EXISTS idx_invoices_employee ON invoices(employee_id);
 CREATE INDEX IF NOT EXISTS idx_invoices_month ON invoices(belong_month);
 CREATE INDEX IF NOT EXISTS idx_invoices_expense_type ON invoices(expense_type_code);
