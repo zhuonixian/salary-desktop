@@ -757,8 +757,58 @@ fn get_days_in_month(month: &str) -> u32 {
     }
 }
 
-// ==================== Invoice List Export (placeholder) ====================
-// TODO(task-7): replace with real implementation
-pub fn export_invoice_list(_invoices: &[crate::models::Invoice], _path: &str) -> crate::errors::AppResult<bool> {
+// ==================== Invoice List Export ====================
+
+pub fn export_invoice_list(invoices: &[Invoice], path: &str) -> AppResult<bool> {
+    use rust_xlsxwriter::FormatBorder;
+
+    let mut workbook = Workbook::new();
+    let worksheet = workbook.add_worksheet();
+    worksheet.set_name("发票清单")?;
+
+    let header_fmt = Format::new()
+        .set_bold()
+        .set_background_color("#D9E1F2")
+        .set_border(FormatBorder::Thin);
+
+    let headers = [
+        "归属月份", "报销人ID", "发票类型", "发票代码", "发票号码",
+        "开票日期", "金额", "税额", "价税合计",
+        "销售方", "销售方税号", "购买方", "购买方税号",
+        "费用类型", "状态", "备注", "录入时间",
+    ];
+    for (col, h) in headers.iter().enumerate() {
+        worksheet.write_with_format(0, col as u16, *h, &header_fmt)?;
+    }
+
+    for (row_idx, inv) in invoices.iter().enumerate() {
+        let row = (row_idx + 1) as u32;
+        worksheet.write_string(row, 0, inv.belong_month.clone().unwrap_or_default())?;
+        worksheet.write_number(row, 1, inv.employee_id.unwrap_or(0) as f64)?;
+        worksheet.write_string(row, 2, inv.invoice_type.clone().unwrap_or_default())?;
+        worksheet.write_string(row, 3, inv.invoice_code.clone().unwrap_or_default())?;
+        worksheet.write_string(row, 4, inv.invoice_number.clone().unwrap_or_default())?;
+        worksheet.write_string(row, 5, inv.issue_date.clone().unwrap_or_default())?;
+        worksheet.write_number(row, 6, inv.amount)?;
+        worksheet.write_number(row, 7, inv.tax_amount)?;
+        worksheet.write_number(row, 8, inv.total_amount)?;
+        worksheet.write_string(row, 9, inv.seller_name.clone().unwrap_or_default())?;
+        worksheet.write_string(row, 10, inv.seller_tax_id.clone().unwrap_or_default())?;
+        worksheet.write_string(row, 11, inv.buyer_name.clone().unwrap_or_default())?;
+        worksheet.write_string(row, 12, inv.buyer_tax_id.clone().unwrap_or_default())?;
+        worksheet.write_string(row, 13, inv.expense_type_code.clone().unwrap_or_default())?;
+        worksheet.write_string(row, 14, inv.status.clone().unwrap_or_default())?;
+        worksheet.write_string(row, 15, inv.remark.clone().unwrap_or_default())?;
+        worksheet.write_string(row, 16, inv.created_at.clone().unwrap_or_default())?;
+    }
+
+    worksheet.set_column_width(0, 10)?;
+    worksheet.set_column_width(3, 16)?;
+    worksheet.set_column_width(4, 12)?;
+    worksheet.set_column_width(9, 30)?;
+    worksheet.set_column_width(11, 30)?;
+    worksheet.set_column_width(16, 22)?;
+
+    workbook.save(path)?;
     Ok(true)
 }
