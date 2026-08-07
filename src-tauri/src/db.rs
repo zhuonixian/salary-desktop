@@ -151,6 +151,48 @@ fn create_tables(conn: &Connection) -> AppResult<()> {
             status TEXT DEFAULT 'pending',
             created_at TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS invoice_expense_types (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT UNIQUE NOT NULL,
+            name TEXT NOT NULL,
+            sort_order INTEGER DEFAULT 0,
+            enabled INTEGER DEFAULT 1,
+            remark TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS invoices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            invoice_code TEXT,
+            invoice_number TEXT,
+            invoice_type TEXT,
+            issue_date TEXT,
+            check_code TEXT,
+            amount REAL DEFAULT 0,
+            tax_amount REAL DEFAULT 0,
+            total_amount REAL DEFAULT 0,
+            seller_name TEXT,
+            seller_tax_id TEXT,
+            buyer_name TEXT,
+            buyer_tax_id TEXT,
+            expense_type_code TEXT,
+            employee_id INTEGER,
+            belong_month TEXT,
+            status TEXT DEFAULT 'normal',
+            remark TEXT,
+            image_path TEXT,
+            raw_ocr_json TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE SET NULL,
+            FOREIGN KEY (expense_type_code) REFERENCES invoice_expense_types(code) ON DELETE SET NULL
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_code_number
+            ON invoices(invoice_code, invoice_number);
+        CREATE INDEX IF NOT EXISTS idx_invoices_employee ON invoices(employee_id);
+        CREATE INDEX IF NOT EXISTS idx_invoices_month ON invoices(belong_month);
+        CREATE INDEX IF NOT EXISTS idx_invoices_expense_type ON invoices(expense_type_code);
         ",
     )?;
 
@@ -208,6 +250,31 @@ fn insert_default_data(conn: &Connection) -> AppResult<()> {
             conn.execute(
                 "INSERT INTO tax_rules (min_amount, max_amount, tax_rate, quick_deduction) VALUES (?1, ?2, ?3, ?4)",
                 params![min, max, rate, deduction],
+            )?;
+        }
+    }
+
+    let expense_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM invoice_expense_types",
+        [],
+        |row| row.get(0),
+    )?;
+
+    if expense_count == 0 {
+        let default_expense_types = vec![
+            ("office",        "办公费",   1),
+            ("travel",        "差旅费",   2),
+            ("meal",          "餐饮费",   3),
+            ("transport",     "交通费",   4),
+            ("accommodation", "住宿费",   5),
+            ("communication", "通讯费",   6),
+            ("other",         "其他",     99),
+        ];
+
+        for (code, name, sort_order) in &default_expense_types {
+            conn.execute(
+                "INSERT INTO invoice_expense_types (code, name, sort_order) VALUES (?1, ?2, ?3)",
+                params![code, name, sort_order],
             )?;
         }
     }

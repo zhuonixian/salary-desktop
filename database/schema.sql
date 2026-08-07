@@ -132,3 +132,58 @@ INSERT INTO tax_rules (min_amount, max_amount, tax_rate, quick_deduction) VALUES
   (35000, 55000, 0.30, 4410),
   (55000, 80000, 0.35, 7160),
   (80000, NULL, 0.45, 15160);
+
+-- 发票费用类型字典
+CREATE TABLE IF NOT EXISTS invoice_expense_types (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT UNIQUE NOT NULL,
+  name TEXT NOT NULL,
+  sort_order INTEGER DEFAULT 0,
+  enabled INTEGER DEFAULT 1,
+  remark TEXT
+);
+
+-- 发票主表
+CREATE TABLE IF NOT EXISTS invoices (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  invoice_code TEXT,
+  invoice_number TEXT,
+  invoice_type TEXT,
+  issue_date TEXT,
+  check_code TEXT,
+  amount REAL DEFAULT 0,
+  tax_amount REAL DEFAULT 0,
+  total_amount REAL DEFAULT 0,
+  seller_name TEXT,
+  seller_tax_id TEXT,
+  buyer_name TEXT,
+  buyer_tax_id TEXT,
+  expense_type_code TEXT,
+  employee_id INTEGER,
+  belong_month TEXT,
+  status TEXT DEFAULT 'normal',
+  remark TEXT,
+  image_path TEXT,
+  raw_ocr_json TEXT,
+  created_at TEXT,
+  updated_at TEXT,
+  FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE SET NULL,
+  FOREIGN KEY (expense_type_code) REFERENCES invoice_expense_types(code) ON DELETE SET NULL
+);
+
+-- 发票相关索引
+CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_code_number
+  ON invoices(invoice_code, invoice_number);
+CREATE INDEX IF NOT EXISTS idx_invoices_employee ON invoices(employee_id);
+CREATE INDEX IF NOT EXISTS idx_invoices_month ON invoices(belong_month);
+CREATE INDEX IF NOT EXISTS idx_invoices_expense_type ON invoices(expense_type_code);
+
+-- 默认发票费用类型
+INSERT OR IGNORE INTO invoice_expense_types (code, name, sort_order) VALUES
+  ('office', '办公费', 1),
+  ('travel', '差旅费', 2),
+  ('meal', '餐饮费', 3),
+  ('transport', '交通费', 4),
+  ('accommodation', '住宿费', 5),
+  ('communication', '通讯费', 6),
+  ('other', '其他', 99);
