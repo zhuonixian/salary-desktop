@@ -25,23 +25,48 @@ pub(crate) struct BaiduVatInvoiceResponse {
 
 // ==================== OCR Entry ====================
 
+/// 识别发票。PDF 直接走百度的 `pdf_file` 参数（不依赖系统 poppler），
+/// 图片走 `image` 参数。token 失效（错误码 110）自动清缓存重试一次。
 pub fn ocr_invoice(image_path: &str, conn: &Connection) -> AppResult<InvoiceOcrPreview> {
-    // PDF 需先转 PNG（百度 vat_invoice 对扫描件 PDF 支持有局限）
-    let effective_path = ensure_png_for_ocr(image_path)?;
-    let image_data = std::fs::read(&effective_path)
-        .map_err(AppError::Io)?;
-    let image_b64 = base64::Engine::encode(
-        &base64::engine::general_purpose::STANDARD, &image_data
+    match ocr_invoice_inner(image_path, conn) {
+        Ok(preview) => Ok(preview),
+        Err(e) => {
+            let msg = e.to_string();
+            // 110 = Access token invalid or no longer valid
+            // 通常发生在用户重置 secret 后旧 token 还在 DB 缓存里
+            if msg.contains("(110)") || msg.contains("Access token invalid") {
+                db::set_setting(conn, "baidu_access_token", "")?;
+                db::set_setting(conn, "baidu_token_expires_at", "")?;
+                ocr_invoice_inner(image_path, conn)
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+fn ocr_invoice_inner(image_path: &str, conn: &Connection) -> AppResult<InvoiceOcrPreview> {
+    let file_data = std::fs::read(image_path).map_err(AppError::Io)?;
+    let file_b64 = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD, &file_data,
     );
 
     let token = ocr::get_baidu_access_token(conn)?;
     let url = format!("{BAIDU_VAT_INVOICE_URL}?access_token={token}");
 
+    // PDF 用 pdf_file + pdf_file_num=1；图片用 image
+    let is_pdf = image_path.to_lowercase().ends_with(".pdf");
+    let form_data: Vec<(&str, &str)> = if is_pdf {
+        vec![("pdf_file", file_b64.as_str()), ("pdf_file_num", "1")]
+    } else {
+        vec![("image", file_b64.as_str())]
+    };
+
     let client = reqwest::blocking::Client::new();
     let response = client
         .post(&url)
         .header("Content-Type", "application/x-www-form-urlencoded")
-        .form(&[("image", image_b64.as_str())])
+        .form(&form_data)
         .send()
         .map_err(|e| AppError::Network(format!("百度发票OCR请求失败: {e}")))?;
 
@@ -75,123 +100,6 @@ pub fn ocr_invoice(image_path: &str, conn: &Connection) -> AppResult<InvoiceOcrP
     }
 
     Ok(preview)
-}
-
-/// 检测文件类型，PDF 自动转 PNG（同目录生成 `.png` 临时文件）。
-/// 转换依赖系统命令 `pdftocairo`（推荐）或 `pdftoppm`（poppler-utils）：
-///   - Linux: `sudo apt install poppler-utils`
-///   - macOS: `brew install poppler`
-///   - Windows: 需手动安装 poppler 并加入 PATH
-fn ensure_png_for_ocr(image_path: &str) -> AppResult<String> {
-    let lower = image_path.to_lowercase();
-    if !lower.ends_with(".pdf") {
-        return Ok(image_path.to_string());
-    }
-
-    let src = std::path::Path::new(image_path);
-    if !src.exists() {
-        return Err(AppError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("PDF 文件不存在: {image_path}"),
-        )));
-    }
-
-    let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("invoice");
-    let parent = src.parent().unwrap_or_else(|| std::path::Path::new("."));
-    let target = parent.join(format!("{stem}.ocr-converted.png"));
-
-    // 优先 pdftocairo（更高质量），失败回退 pdftoppm
-    // 用 find_pdf_tool 查找绝对路径，避免 GUI 应用启动时 PATH 受限
-    let candidates: &[(&str, &[&str])] = &[
-        ("pdftocairo", &["-png", "-r", "200", "-singlefile"]),
-        ("pdftoppm", &["-png", "-r", "200", "-f", "1", "-l", "1"]),
-    ];
-
-    let mut last_err = None;
-    for (tool_name, args) in candidates {
-        let tool_path = match find_pdf_tool(tool_name) {
-            Some(p) => p,
-            None => {
-                last_err = Some(format!("{tool_name} 未在 PATH 或常见目录中找到"));
-                continue;
-            }
-        };
-
-        let mut cmd = std::process::Command::new(&tool_path);
-        cmd.args(*args)
-            .arg(image_path)
-            .arg(target.with_extension("")); // pdftocairo -singlefile 不需要后缀；pdftoppm 会加 -1
-        match cmd.output() {
-            Ok(out) if out.status.success() => {
-                // pdftocairo -singlefile 生成 target；pdftoppm 生成 target-1.png
-                let produced = if *tool_name == "pdftocairo" {
-                    target.clone()
-                } else {
-                    parent.join(format!("{stem}.ocr-converted-1.png"))
-                };
-                if produced.exists() {
-                    if produced != target {
-                        let _ = std::fs::rename(&produced, &target);
-                    }
-                    return Ok(target.to_string_lossy().to_string());
-                }
-                last_err = Some(format!("{tool_name} 执行成功但产物未生成"));
-            }
-            Ok(out) => {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                last_err = Some(format!("{tool_name} 失败: {}", stderr.trim()));
-            }
-            Err(e) => {
-                last_err = Some(format!("{tool_name} ({}) 不可执行: {}", tool_path.display(), e));
-            }
-        }
-    }
-
-    Err(AppError::Ocr(format!(
-        "PDF 自动转换 PNG 失败（{}）。请安装 poppler-utils（Linux: apt install poppler-utils；macOS: brew install poppler；Windows: 从 https://github.com/oschwartz10612/poppler-windows 下载并加入 PATH），或将 PDF 截图导出为 PNG 后再上传。",
-        last_err.unwrap_or_else(|| "未知错误".to_string())
-    )))
-}
-
-/// 在 PATH 与常见绝对路径中查找可执行文件。
-/// 适用于 GUI 应用启动时 PATH 受限的情况（systemd user / desktop session）。
-fn find_pdf_tool(name: &str) -> Option<std::path::PathBuf> {
-    // exe 后缀（Windows 上 .exe，其他平台空）
-    let exe_suffix = if cfg!(windows) { ".exe" } else { "" };
-    let name_with_suffix = format!("{name}{exe_suffix}");
-
-    // 1. PATH 中查找
-    if let Some(path) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path) {
-            let p = dir.join(&name_with_suffix);
-            if p.is_file() {
-                return Some(p);
-            }
-        }
-    }
-
-    // 2. 常见绝对路径兜底
-    let fallback_dirs: &[&str] = if cfg!(target_os = "macos") {
-        &["/usr/bin", "/usr/local/bin", "/opt/homebrew/bin", "/opt/local/bin"]
-    } else if cfg!(windows) {
-        &[
-            r"C:\poppler\Library\bin",
-            r"C:\poppler\bin",
-            r"C:\Program Files\poppler\Library\bin",
-            r"C:\Program Files\poppler\bin",
-            r"C:\Program Files (x86)\poppler\Library\bin",
-        ]
-    } else {
-        &["/usr/bin", "/usr/local/bin", "/snap/bin"]
-    };
-
-    for dir in fallback_dirs {
-        let p = std::path::PathBuf::from(dir).join(&name_with_suffix);
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    None
 }
 
 // ==================== Pure Mapping Functions ====================
@@ -413,28 +321,6 @@ mod tests {
             error_msg: json_value.get("error_msg").and_then(|v| v.as_str()).map(String::from),
             extra,
         }
-    }
-
-    #[test]
-    fn test_find_pdf_tool_locates_pdftocairo_when_in_path() {
-        // 这个测试依赖系统环境：Linux CI 通常装了 poppler-utils
-        // 如果系统没装 pdftocairo，跳过断言（不报失败，仅打日志）
-        let found = find_pdf_tool("pdftocairo");
-        if found.is_none() {
-            eprintln!("skip: pdftocairo not found on this system");
-            return;
-        }
-        let path = found.unwrap();
-        assert!(path.is_file(), "find_pdf_tool 返回的路径必须是文件: {}", path.display());
-        // 验证至少是 pdftocairo 名字（兼容 .exe 后缀）
-        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        assert!(name.starts_with("pdftocairo"), "unexpected: {name}");
-    }
-
-    #[test]
-    fn test_find_pdf_tool_returns_none_for_missing() {
-        let found = find_pdf_tool("definitely-not-a-real-tool-xyz123");
-        assert!(found.is_none(), "找不到的工具应返回 None");
     }
 
     #[test]
