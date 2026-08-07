@@ -30,6 +30,12 @@ npm run tauri dev
 npm run tauri build
 ```
 
+## 安装
+
+从 [Releases](https://github.com/zhuonixian/salary-desktop/releases) 下载 Windows / Linux 安装包。
+
+**Windows 首次运行会被 SmartScreen 拦截**（应用未购买代码签名证书），按 [Windows 首次安装指南](docs/windows-install-guide.md) 操作即可。
+
 ### OCR 配置
 
 - **在线模式**：在应用设置中填入百度云 OCR API Key 和 Secret Key
