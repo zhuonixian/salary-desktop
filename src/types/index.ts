@@ -220,3 +220,99 @@ export interface OperationLog {
   operator: string;
   created_at: string;
 }
+
+// ==================== 发票相关 ====================
+
+export type InvoiceStatus = 'normal' | 'void';
+
+export interface InvoiceExpenseType {
+  id: number;
+  code: string;
+  name: string;
+  sort_order: number;
+  enabled: number;
+  remark?: string;
+}
+
+export interface InvoiceExpenseTypeInput {
+  id?: number;
+  code?: string;
+  name?: string;
+  sort_order?: number;
+  enabled?: number;
+  remark?: string;
+}
+
+export interface Invoice {
+  id: number;
+  invoice_code?: string;
+  invoice_number?: string;
+  invoice_type?: string;
+  issue_date?: string;
+  check_code?: string;
+  amount: number;
+  tax_amount: number;
+  total_amount: number;
+  seller_name?: string;
+  seller_tax_id?: string;
+  buyer_name?: string;
+  buyer_tax_id?: string;
+  expense_type_code?: string;
+  employee_id?: number;
+  belong_month?: string;
+  status: InvoiceStatus;
+  remark?: string;
+  image_path?: string;
+  raw_ocr_json?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface InvoiceInput {
+  invoice_code?: string;
+  invoice_number?: string;
+  invoice_type?: string;
+  issue_date?: string;
+  check_code?: string;
+  amount?: number;
+  tax_amount?: number;
+  total_amount?: number;
+  seller_name?: string;
+  seller_tax_id?: string;
+  buyer_name?: string;
+  buyer_tax_id?: string;
+  expense_type_code?: string;
+  employee_id?: number;
+  belong_month?: string;
+  remark?: string;
+  image_path?: string;
+  raw_ocr_json?: string;
+}
+
+export interface InvoiceOcrPreview {
+  invoice_code?: string;
+  invoice_number?: string;
+  invoice_type?: string;
+  issue_date?: string;
+  check_code?: string;
+  amount: number;
+  tax_amount: number;
+  total_amount: number;
+  seller_name?: string;
+  seller_tax_id?: string;
+  buyer_name?: string;
+  buyer_tax_id?: string;
+  raw_ocr_json: string;
+  warnings: string[];
+  is_duplicate: boolean;
+  duplicate_invoice_id?: number;
+}
+
+export interface InvoiceQuery {
+  belong_month?: string;
+  employee_id?: number;
+  expense_type_code?: string;
+  invoice_type?: string;
+  keyword?: string;
+  status?: InvoiceStatus;
+}

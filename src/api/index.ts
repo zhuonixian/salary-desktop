@@ -16,6 +16,12 @@ import type {
   ImportResult,
   DashboardSummary,
   EmployeeStatus,
+  InvoiceExpenseType,
+  InvoiceExpenseTypeInput,
+  Invoice,
+  InvoiceInput,
+  InvoiceOcrPreview,
+  InvoiceQuery,
 } from '@/types';
 
 type BackendDashboardSummary = {
@@ -544,4 +550,42 @@ export async function ocrRecognizePunchCard(
     },
   );
   return { batch_id: result.batch_id, records: result.records, raw_text: result.raw_text ?? '' };
+}
+
+// ==================== 发票管理 ====================
+
+export async function getInvoiceExpenseTypes(): Promise<InvoiceExpenseType[]> {
+  return invoke<InvoiceExpenseType[]>('get_invoice_expense_types');
+}
+
+export async function saveInvoiceExpenseType(data: InvoiceExpenseTypeInput): Promise<InvoiceExpenseType> {
+  return invoke<InvoiceExpenseType>('save_invoice_expense_type', { data });
+}
+
+export async function deleteInvoiceExpenseType(id: number): Promise<void> {
+  await invoke('delete_invoice_expense_type', { id });
+}
+
+export async function ocrInvoice(filePath: string): Promise<InvoiceOcrPreview> {
+  return invoke<InvoiceOcrPreview>('ocr_invoice', { imagePath: filePath });
+}
+
+export async function saveInvoice(data: InvoiceInput): Promise<Invoice> {
+  return invoke<Invoice>('save_invoice', { data });
+}
+
+export async function updateInvoice(id: number, data: InvoiceInput): Promise<boolean> {
+  return invoke<boolean>('update_invoice', { id, data });
+}
+
+export async function deleteInvoice(id: number): Promise<void> {
+  await invoke('delete_invoice', { id });
+}
+
+export async function queryInvoices(query: InvoiceQuery): Promise<Invoice[]> {
+  return invoke<Invoice[]>('query_invoices', { query });
+}
+
+export async function exportInvoiceList(query: InvoiceQuery, savePath: string): Promise<void> {
+  await invoke('export_invoice_list', { query, path: savePath });
 }
