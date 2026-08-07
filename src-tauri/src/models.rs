@@ -234,3 +234,103 @@ pub struct OperationLog {
     pub detail: Option<String>,
     pub created_at: Option<String>,
 }
+
+// ==================== Invoice ====================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvoiceExpenseType {
+    pub id: i64,
+    pub code: String,
+    pub name: String,
+    pub sort_order: i32,
+    pub enabled: i32,
+    pub remark: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvoiceExpenseTypeInput {
+    pub id: Option<i64>,
+    pub code: Option<String>,
+    pub name: Option<String>,
+    pub sort_order: Option<i32>,
+    pub enabled: Option<i32>,
+    pub remark: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Invoice {
+    pub id: i64,
+    pub invoice_code: Option<String>,
+    pub invoice_number: Option<String>,
+    pub invoice_type: Option<String>,
+    pub issue_date: Option<String>,
+    pub check_code: Option<String>,
+    pub amount: f64,
+    pub tax_amount: f64,
+    pub total_amount: f64,
+    pub seller_name: Option<String>,
+    pub seller_tax_id: Option<String>,
+    pub buyer_name: Option<String>,
+    pub buyer_tax_id: Option<String>,
+    pub expense_type_code: Option<String>,
+    pub employee_id: Option<i64>,
+    pub belong_month: Option<String>,
+    pub status: Option<String>,
+    pub remark: Option<String>,
+    pub image_path: Option<String>,
+    pub raw_ocr_json: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvoiceInput {
+    pub invoice_code: Option<String>,
+    pub invoice_number: Option<String>,
+    pub invoice_type: Option<String>,
+    pub issue_date: Option<String>,
+    pub check_code: Option<String>,
+    pub amount: Option<f64>,
+    pub tax_amount: Option<f64>,
+    pub total_amount: Option<f64>,
+    pub seller_name: Option<String>,
+    pub seller_tax_id: Option<String>,
+    pub buyer_name: Option<String>,
+    pub buyer_tax_id: Option<String>,
+    pub expense_type_code: Option<String>,
+    pub employee_id: Option<i64>,
+    pub belong_month: Option<String>,
+    pub remark: Option<String>,
+    pub image_path: Option<String>,
+    pub raw_ocr_json: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvoiceOcrPreview {
+    pub invoice_code: Option<String>,
+    pub invoice_number: Option<String>,
+    pub invoice_type: Option<String>,
+    pub issue_date: Option<String>,
+    pub check_code: Option<String>,
+    pub amount: f64,
+    pub tax_amount: f64,
+    pub total_amount: f64,
+    pub seller_name: Option<String>,
+    pub seller_tax_id: Option<String>,
+    pub buyer_name: Option<String>,
+    pub buyer_tax_id: Option<String>,
+    pub raw_ocr_json: String,
+    pub warnings: Vec<String>,
+    pub is_duplicate: bool,
+    pub duplicate_invoice_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct InvoiceQuery {
+    pub belong_month: Option<String>,
+    pub employee_id: Option<i64>,
+    pub expense_type_code: Option<String>,
+    pub invoice_type: Option<String>,
+    pub keyword: Option<String>,
+    pub status: Option<String>,
+}
