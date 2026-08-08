@@ -156,8 +156,13 @@ fn calculate_single_employee(
     let other_allowance = 0.0;
 
     // Gross salary
-    let gross_salary = base_salary + position_salary + performance_salary
-        + overtime_salary + meal_allowance + transport_allowance + other_allowance;
+    let gross_salary = base_salary
+        + position_salary
+        + performance_salary
+        + overtime_salary
+        + meal_allowance
+        + transport_allowance
+        + other_allowance;
 
     // Social security and housing fund
     let social_security_rate = rules.get("social_security_rate").copied().unwrap_or(0.105);

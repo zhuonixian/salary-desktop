@@ -13,53 +13,92 @@ use crate::salary;
 // ==================== Employee Commands ====================
 
 #[tauri::command]
-pub fn get_employees(state: tauri::State<'_, Mutex<Connection>>) -> Result<Vec<Employee>, AppError> {
+pub fn get_employees(
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<Employee>, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     db::get_employees(&conn)
 }
 
 #[tauri::command]
-pub fn get_employee(id: i64, state: tauri::State<'_, Mutex<Connection>>) -> Result<Employee, AppError> {
+pub fn get_employee(
+    id: i64,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Employee, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     db::get_employee(&conn, id)
 }
 
 #[tauri::command]
-pub fn create_employee(data: EmployeeInput, state: tauri::State<'_, Mutex<Connection>>) -> Result<Employee, AppError> {
+pub fn create_employee(
+    data: EmployeeInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Employee, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     let emp = db::create_employee(&conn, &data)?;
-    db::log_operation(&conn, "create_employee", &format!("新增员工: {} ({})", emp.name, emp.employee_no), "system", None)?;
+    db::log_operation(
+        &conn,
+        "create_employee",
+        &format!("新增员工: {} ({})", emp.name, emp.employee_no),
+        "system",
+        None,
+    )?;
     Ok(emp)
 }
 
 #[tauri::command]
-pub fn update_employee(id: i64, data: EmployeeInput, state: tauri::State<'_, Mutex<Connection>>) -> Result<bool, AppError> {
+pub fn update_employee(
+    id: i64,
+    data: EmployeeInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     let result = db::update_employee(&conn, id, &data)?;
     if result {
-        db::log_operation(&conn, "update_employee", &format!("更新员工ID={id}"), "system", None)?;
+        db::log_operation(
+            &conn,
+            "update_employee",
+            &format!("更新员工ID={id}"),
+            "system",
+            None,
+        )?;
     }
     Ok(result)
 }
 
 #[tauri::command]
-pub fn delete_employee(id: i64, state: tauri::State<'_, Mutex<Connection>>) -> Result<bool, AppError> {
+pub fn delete_employee(
+    id: i64,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     let result = db::delete_employee(&conn, id)?;
     if result {
-        db::log_operation(&conn, "delete_employee", &format!("删除员工ID={id}"), "system", None)?;
+        db::log_operation(
+            &conn,
+            "delete_employee",
+            &format!("删除员工ID={id}"),
+            "system",
+            None,
+        )?;
     }
     Ok(result)
 }
 
 #[tauri::command]
-pub fn search_employees(keyword: String, state: tauri::State<'_, Mutex<Connection>>) -> Result<Vec<Employee>, AppError> {
+pub fn search_employees(
+    keyword: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<Employee>, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     db::search_employees(&conn, &keyword)
 }
 
 #[tauri::command]
-pub fn import_employees_excel(path: String, state: tauri::State<'_, Mutex<Connection>>) -> Result<ImportResult, AppError> {
+pub fn import_employees_excel(
+    path: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<ImportResult, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     let employees = excel::read_employee_excel(&path)?;
 
@@ -124,13 +163,20 @@ pub fn export_employee_import_template(path: String) -> Result<bool, AppError> {
 // ==================== Attendance Commands ====================
 
 #[tauri::command]
-pub fn get_attendance_records(month: String, state: tauri::State<'_, Mutex<Connection>>) -> Result<Vec<AttendanceRecord>, AppError> {
+pub fn get_attendance_records(
+    month: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<AttendanceRecord>, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     db::get_attendance_records(&conn, &month)
 }
 
 #[tauri::command]
-pub fn import_attendance_excel(path: String, month: String, state: tauri::State<'_, Mutex<Connection>>) -> Result<ImportResult, AppError> {
+pub fn import_attendance_excel(
+    path: String,
+    month: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<ImportResult, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     let records = excel::read_attendance_excel(&path, &month)?;
 
@@ -191,7 +237,10 @@ pub fn export_attendance_import_template(path: String) -> Result<bool, AppError>
 }
 
 #[tauri::command]
-pub fn save_attendance_records(records: Vec<AttendanceRecordInput>, state: tauri::State<'_, Mutex<Connection>>) -> Result<bool, AppError> {
+pub fn save_attendance_records(
+    records: Vec<AttendanceRecordInput>,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     for rec in &records {
         db::upsert_attendance_record(&conn, rec)?;
@@ -200,7 +249,11 @@ pub fn save_attendance_records(records: Vec<AttendanceRecordInput>, state: tauri
 }
 
 #[tauri::command]
-pub fn update_attendance_record(id: i64, data: AttendanceRecordInput, state: tauri::State<'_, Mutex<Connection>>) -> Result<bool, AppError> {
+pub fn update_attendance_record(
+    id: i64,
+    data: AttendanceRecordInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     db::update_attendance_record(&conn, id, &data)
 }
@@ -208,17 +261,29 @@ pub fn update_attendance_record(id: i64, data: AttendanceRecordInput, state: tau
 // ==================== Salary Rules Commands ====================
 
 #[tauri::command]
-pub fn get_salary_rules(state: tauri::State<'_, Mutex<Connection>>) -> Result<Vec<SalaryRule>, AppError> {
+pub fn get_salary_rules(
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<SalaryRule>, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     db::get_salary_rules(&conn)
 }
 
 #[tauri::command]
-pub fn update_salary_rule(id: i64, rule_value: f64, state: tauri::State<'_, Mutex<Connection>>) -> Result<bool, AppError> {
+pub fn update_salary_rule(
+    id: i64,
+    rule_value: f64,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     let result = db::update_salary_rule(&conn, id, rule_value)?;
     if result {
-        db::log_operation(&conn, "update_salary_rule", &format!("更新工资规则ID={id}, 值={rule_value}"), "system", None)?;
+        db::log_operation(
+            &conn,
+            "update_salary_rule",
+            &format!("更新工资规则ID={id}, 值={rule_value}"),
+            "system",
+            None,
+        )?;
     }
     Ok(result)
 }
@@ -230,11 +295,21 @@ pub fn get_tax_rules(state: tauri::State<'_, Mutex<Connection>>) -> Result<Vec<T
 }
 
 #[tauri::command]
-pub fn update_tax_rule(id: i64, data: TaxRuleInput, state: tauri::State<'_, Mutex<Connection>>) -> Result<bool, AppError> {
+pub fn update_tax_rule(
+    id: i64,
+    data: TaxRuleInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     let result = db::update_tax_rule(&conn, id, &data)?;
     if result {
-        db::log_operation(&conn, "update_tax_rule", &format!("更新税率规则ID={id}"), "system", None)?;
+        db::log_operation(
+            &conn,
+            "update_tax_rule",
+            &format!("更新税率规则ID={id}"),
+            "system",
+            None,
+        )?;
     }
     Ok(result)
 }
@@ -242,45 +317,77 @@ pub fn update_tax_rule(id: i64, data: TaxRuleInput, state: tauri::State<'_, Mute
 // ==================== Salary Calculation Commands ====================
 
 #[tauri::command]
-pub fn calculate_salary(month: String, state: tauri::State<'_, Mutex<Connection>>) -> Result<Vec<SalaryResult>, AppError> {
+pub fn calculate_salary(
+    month: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<SalaryResult>, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     salary::calculate_monthly_salary(&month, &conn)
 }
 
 #[tauri::command]
-pub fn get_salary_results(month: String, state: tauri::State<'_, Mutex<Connection>>) -> Result<Vec<SalaryResult>, AppError> {
+pub fn get_salary_results(
+    month: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<SalaryResult>, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     db::get_salary_results(&conn, &month)
 }
 
 #[tauri::command]
-pub fn update_salary_result(id: i64, data: SalaryResultUpdate, state: tauri::State<'_, Mutex<Connection>>) -> Result<bool, AppError> {
+pub fn update_salary_result(
+    id: i64,
+    data: SalaryResultUpdate,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     db::update_salary_result(&conn, id, &data)
 }
 
 #[tauri::command]
-pub fn lock_salary_results(month: String, state: tauri::State<'_, Mutex<Connection>>) -> Result<bool, AppError> {
+pub fn lock_salary_results(
+    month: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     let result = db::lock_salary_results(&conn, &month)?;
     if result {
-        db::log_operation(&conn, "lock_salary", &format!("锁定{month}工资"), "system", None)?;
+        db::log_operation(
+            &conn,
+            "lock_salary",
+            &format!("锁定{month}工资"),
+            "system",
+            None,
+        )?;
     }
     Ok(result)
 }
 
 #[tauri::command]
-pub fn review_salary_results(month: String, state: tauri::State<'_, Mutex<Connection>>) -> Result<bool, AppError> {
+pub fn review_salary_results(
+    month: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     let result = db::review_salary_results(&conn, &month)?;
     if result {
-        db::log_operation(&conn, "review_salary", &format!("复核{month}工资"), "system", None)?;
+        db::log_operation(
+            &conn,
+            "review_salary",
+            &format!("复核{month}工资"),
+            "system",
+            None,
+        )?;
     }
     Ok(result)
 }
 
 #[tauri::command]
-pub fn recalculate_employee(month: String, employee_no: String, state: tauri::State<'_, Mutex<Connection>>) -> Result<SalaryResult, AppError> {
+pub fn recalculate_employee(
+    month: String,
+    employee_no: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<SalaryResult, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     salary::recalculate_single(&month, &employee_no, &conn)
 }
@@ -288,7 +395,13 @@ pub fn recalculate_employee(month: String, employee_no: String, state: tauri::St
 // ==================== OCR Commands ====================
 
 #[tauri::command]
-pub fn ocr_recognize(image_path: String, month: String, mode: Option<String>, app: tauri::AppHandle, state: tauri::State<'_, Mutex<Connection>>) -> Result<OcrResult, AppError> {
+pub fn ocr_recognize(
+    image_path: String,
+    month: String,
+    mode: Option<String>,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<OcrResult, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     let resource_dir = app.path().resource_dir().ok();
     let mode = mode.as_deref().unwrap_or("local");
@@ -296,13 +409,20 @@ pub fn ocr_recognize(image_path: String, month: String, mode: Option<String>, ap
 }
 
 #[tauri::command]
-pub fn get_ocr_batches(month: String, state: tauri::State<'_, Mutex<Connection>>) -> Result<Vec<OcrBatch>, AppError> {
+pub fn get_ocr_batches(
+    month: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<OcrBatch>, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     db::get_ocr_batches(&conn, &month)
 }
 
 #[tauri::command]
-pub fn confirm_ocr_results(batch_id: i64, records: Vec<AttendanceRecordInput>, state: tauri::State<'_, Mutex<Connection>>) -> Result<bool, AppError> {
+pub fn confirm_ocr_results(
+    batch_id: i64,
+    records: Vec<AttendanceRecordInput>,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     ocr::confirm_ocr_results(batch_id, &records, &conn)
 }
@@ -310,25 +430,49 @@ pub fn confirm_ocr_results(batch_id: i64, records: Vec<AttendanceRecordInput>, s
 // ==================== Export Commands ====================
 
 #[tauri::command]
-pub fn export_salary_detail(month: String, path: String, state: tauri::State<'_, Mutex<Connection>>) -> Result<bool, AppError> {
+pub fn export_salary_detail(
+    month: String,
+    path: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     let results = db::get_salary_results(&conn, &month)?;
     excel::export_salary_excel(&results, &path)?;
-    db::log_operation(&conn, "export", &format!("导出{month}工资明细到{path}"), "system", None)?;
+    db::log_operation(
+        &conn,
+        "export",
+        &format!("导出{month}工资明细到{path}"),
+        "system",
+        None,
+    )?;
     Ok(true)
 }
 
 #[tauri::command]
-pub fn export_bank_payment_file(month: String, path: String, state: tauri::State<'_, Mutex<Connection>>) -> Result<bool, AppError> {
+pub fn export_bank_payment_file(
+    month: String,
+    path: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     let results = db::get_salary_results(&conn, &month)?;
     excel::export_bank_payment(&results, &path)?;
-    db::log_operation(&conn, "export", &format!("导出{month}银行代发到{path}"), "system", None)?;
+    db::log_operation(
+        &conn,
+        "export",
+        &format!("导出{month}银行代发到{path}"),
+        "system",
+        None,
+    )?;
     Ok(true)
 }
 
 #[tauri::command]
-pub fn export_salary_slips(month: String, dir: String, state: tauri::State<'_, Mutex<Connection>>) -> Result<bool, AppError> {
+pub fn export_salary_slips(
+    month: String,
+    dir: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     let results = db::get_salary_results(&conn, &month)?;
 
@@ -350,18 +494,31 @@ pub fn export_salary_slips(month: String, dir: String, state: tauri::State<'_, M
 }
 
 #[tauri::command]
-pub fn export_attendance_summary_file(month: String, path: String, state: tauri::State<'_, Mutex<Connection>>) -> Result<bool, AppError> {
+pub fn export_attendance_summary_file(
+    month: String,
+    path: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     let records = db::get_attendance_records(&conn, &month)?;
     excel::export_attendance_summary(&records, &path)?;
-    db::log_operation(&conn, "export", &format!("导出{month}考勤汇总到{path}"), "system", None)?;
+    db::log_operation(
+        &conn,
+        "export",
+        &format!("导出{month}考勤汇总到{path}"),
+        "system",
+        None,
+    )?;
     Ok(true)
 }
 
 // ==================== Dashboard Command ====================
 
 #[tauri::command]
-pub fn get_dashboard_summary(month: String, state: tauri::State<'_, Mutex<Connection>>) -> Result<DashboardSummary, AppError> {
+pub fn get_dashboard_summary(
+    month: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<DashboardSummary, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     db::get_dashboard_summary(&conn, &month)
 }
@@ -369,13 +526,18 @@ pub fn get_dashboard_summary(month: String, state: tauri::State<'_, Mutex<Connec
 // ==================== OCR Settings Commands ====================
 
 #[tauri::command]
-pub fn get_ocr_settings(state: tauri::State<'_, Mutex<Connection>>) -> Result<OcrSettings, AppError> {
+pub fn get_ocr_settings(
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<OcrSettings, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     ocr::get_ocr_settings(&conn)
 }
 
 #[tauri::command]
-pub fn save_ocr_settings(data: OcrSettingsInput, state: tauri::State<'_, Mutex<Connection>>) -> Result<bool, AppError> {
+pub fn save_ocr_settings(
+    data: OcrSettingsInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     ocr::save_ocr_settings(&conn, &data)
 }
@@ -417,74 +579,130 @@ pub fn ocr_recognize_punch_card(
 // ==================== Invoice Commands ====================
 
 #[tauri::command]
-pub fn get_invoice_expense_types(state: tauri::State<'_, Mutex<Connection>>) -> Result<Vec<InvoiceExpenseType>, AppError> {
+pub fn get_invoice_expense_types(
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<InvoiceExpenseType>, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     db::get_invoice_expense_types(&conn)
 }
 
 #[tauri::command]
-pub fn save_invoice_expense_type(data: InvoiceExpenseTypeInput, state: tauri::State<'_, Mutex<Connection>>) -> Result<InvoiceExpenseType, AppError> {
+pub fn save_invoice_expense_type(
+    data: InvoiceExpenseTypeInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<InvoiceExpenseType, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     if let Some(id) = data.id {
         let result = db::update_invoice_expense_type(&conn, id, &data)?;
-        db::log_operation(&conn, "update_expense_type", &format!("更新费用类型: {}", result.name), "system", None)?;
+        db::log_operation(
+            &conn,
+            "update_expense_type",
+            &format!("更新费用类型: {}", result.name),
+            "system",
+            None,
+        )?;
         Ok(result)
     } else {
         let result = db::insert_invoice_expense_type(&conn, &data)?;
-        db::log_operation(&conn, "create_expense_type", &format!("新增费用类型: {}", result.name), "system", None)?;
+        db::log_operation(
+            &conn,
+            "create_expense_type",
+            &format!("新增费用类型: {}", result.name),
+            "system",
+            None,
+        )?;
         Ok(result)
     }
 }
 
 #[tauri::command]
-pub fn delete_invoice_expense_type(id: i64, state: tauri::State<'_, Mutex<Connection>>) -> Result<bool, AppError> {
+pub fn delete_invoice_expense_type(
+    id: i64,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     let result = db::delete_invoice_expense_type(&conn, id)?;
     if result {
-        db::log_operation(&conn, "delete_expense_type", &format!("删除费用类型ID={id}"), "system", None)?;
+        db::log_operation(
+            &conn,
+            "delete_expense_type",
+            &format!("删除费用类型ID={id}"),
+            "system",
+            None,
+        )?;
     }
     Ok(result)
 }
 
 #[tauri::command]
-pub fn ocr_invoice(image_path: String, app: tauri::AppHandle, state: tauri::State<'_, Mutex<Connection>>) -> Result<InvoiceOcrPreview, AppError> {
-    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
-    crate::invoice::ocr_invoice(&image_path, &conn)
+pub fn ocr_invoice(
+    image_path: String,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<InvoiceOcrPreview, AppError> {
+    crate::invoice::ocr_invoice(&image_path, state.inner())
 }
 
 #[tauri::command]
-pub fn save_invoice(data: InvoiceInput, app: tauri::AppHandle, state: tauri::State<'_, Mutex<Connection>>) -> Result<Invoice, AppError> {
-    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
-    let app_data_dir = app.path().app_data_dir()
+pub fn save_invoice(
+    data: InvoiceInput,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Invoice, AppError> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
         .map_err(|e| AppError::General(format!("获取app_data_dir失败: {e}")))?;
-    crate::invoice::save_invoice(&data, &conn, &app_data_dir)
+    crate::invoice::save_invoice_with_mutex(&data, state.inner(), &app_data_dir)
 }
 
 #[tauri::command]
-pub fn update_invoice(id: i64, data: InvoiceInput, app: tauri::AppHandle, state: tauri::State<'_, Mutex<Connection>>) -> Result<bool, AppError> {
-    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
-    let app_data_dir = app.path().app_data_dir()
+pub fn update_invoice(
+    id: i64,
+    data: InvoiceInput,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
         .map_err(|e| AppError::General(format!("获取app_data_dir失败: {e}")))?;
-    crate::invoice::update_invoice(id, &data, &conn, &app_data_dir)
+    crate::invoice::update_invoice_with_mutex(id, &data, state.inner(), &app_data_dir)
 }
 
 #[tauri::command]
-pub fn delete_invoice(id: i64, state: tauri::State<'_, Mutex<Connection>>) -> Result<bool, AppError> {
+pub fn delete_invoice(
+    id: i64,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     crate::invoice::delete_invoice(id, &conn)
 }
 
 #[tauri::command]
-pub fn query_invoices(query: InvoiceQuery, state: tauri::State<'_, Mutex<Connection>>) -> Result<Vec<Invoice>, AppError> {
+pub fn query_invoices(
+    query: InvoiceQuery,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<Invoice>, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     db::query_invoices(&conn, &query)
 }
 
 #[tauri::command]
-pub fn export_invoice_list(query: InvoiceQuery, path: String, state: tauri::State<'_, Mutex<Connection>>) -> Result<bool, AppError> {
+pub fn export_invoice_list(
+    query: InvoiceQuery,
+    path: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     let invoices = db::query_invoices(&conn, &query)?;
     excel::export_invoice_list(&invoices, &path)?;
-    db::log_operation(&conn, "export_invoices", &format!("导出发票清单: {}条到{}", invoices.len(), path), "system", None)?;
+    db::log_operation(
+        &conn,
+        "export_invoices",
+        &format!("导出发票清单: {}条到{}", invoices.len(), path),
+        "system",
+        None,
+    )?;
     Ok(true)
 }

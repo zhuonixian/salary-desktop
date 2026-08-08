@@ -61,8 +61,8 @@ pub fn ocr_recognize(
 
 fn ocr_recognize_online(image_path: &str, month: &str, conn: &Connection) -> AppResult<OcrResult> {
     // Read and encode image
-    let image_data = std::fs::read(image_path)
-        .map_err(|e| AppError::Ocr(format!("读取图片失败: {e}")))?;
+    let image_data =
+        std::fs::read(image_path).map_err(|e| AppError::Ocr(format!("读取图片失败: {e}")))?;
     let image_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &image_data);
 
     // Get access token
@@ -87,13 +87,15 @@ fn ocr_recognize_online(image_path: &str, month: &str, conn: &Connection) -> App
 
     if let Some(code) = body.error_code {
         let msg = body.error_msg.unwrap_or_default();
-        return Err(AppError::Ocr(format!(
-            "百度OCR错误({code}): {msg}"
-        )));
+        return Err(AppError::Ocr(format!("百度OCR错误({code}): {msg}")));
     }
 
     let words = body.words_result.unwrap_or_default();
-    let raw_text = words.iter().map(|w| w.words.as_str()).collect::<Vec<_>>().join("\n");
+    let raw_text = words
+        .iter()
+        .map(|w| w.words.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
 
     // Parse into attendance records
     let records = parse_online_text_to_records(&raw_text);
@@ -142,12 +144,10 @@ pub(crate) fn get_baidu_access_token(conn: &Connection) -> AppResult<String> {
     }
 
     // Fetch new token
-    let api_key = get_setting(conn, "baidu_api_key")?.ok_or_else(|| {
-        AppError::Ocr("请先在设置中配置百度 OCR API Key".to_string())
-    })?;
-    let secret_key = get_setting(conn, "baidu_secret_key")?.ok_or_else(|| {
-        AppError::Ocr("请先在设置中配置百度 OCR Secret Key".to_string())
-    })?;
+    let api_key = get_setting(conn, "baidu_api_key")?
+        .ok_or_else(|| AppError::Ocr("请先在设置中配置百度 OCR API Key".to_string()))?;
+    let secret_key = get_setting(conn, "baidu_secret_key")?
+        .ok_or_else(|| AppError::Ocr("请先在设置中配置百度 OCR Secret Key".to_string()))?;
 
     let url = format!(
         "https://aip.baidubce.com/oauth/2.0/token?grant_type=client_credentials&client_id={api_key}&client_secret={secret_key}"
@@ -166,9 +166,9 @@ pub(crate) fn get_baidu_access_token(conn: &Connection) -> AppResult<String> {
         return Err(AppError::Ocr(format!("百度Token获取失败: {err}")));
     }
 
-    let token = token_resp.access_token.ok_or_else(|| {
-        AppError::Ocr("百度Token响应中无access_token".to_string())
-    })?;
+    let token = token_resp
+        .access_token
+        .ok_or_else(|| AppError::Ocr("百度Token响应中无access_token".to_string()))?;
 
     // Cache token (expires_in is in seconds, typically 2592000 = 30 days)
     let expires_in = token_resp.expires_in.unwrap_or(2592000);
@@ -183,7 +183,11 @@ pub(crate) fn get_baidu_access_token(conn: &Connection) -> AppResult<String> {
 /// Parse raw OCR text (line-separated words) into attendance records.
 /// Tries to detect a table structure with column headers.
 fn parse_online_text_to_records(raw_text: &str) -> Vec<AttendanceRecordInput> {
-    let lines: Vec<&str> = raw_text.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+    let lines: Vec<&str> = raw_text
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
     if lines.is_empty() {
         return Vec::new();
     }
@@ -192,14 +196,20 @@ fn parse_online_text_to_records(raw_text: &str) -> Vec<AttendanceRecordInput> {
     let header_keywords: &[(&[&str], &str)] = &[
         (&["工号", "编号", "员工编号", "employee_no"], "employee_no"),
         (&["姓名", "名字", "name"], "name"),
-        (&["应出勤", "应出勤天数", "应到", "expected"], "expected_days"),
+        (
+            &["应出勤", "应出勤天数", "应到", "expected"],
+            "expected_days",
+        ),
         (&["实出勤", "实出勤天数", "实到", "actual"], "actual_days"),
         (&["迟到", "迟到次数", "late"], "late_count"),
         (&["早退", "早退次数", "early"], "early_leave_count"),
         (&["事假", "事假天数", "personal"], "personal_leave_days"),
         (&["病假", "病假天数", "sick"], "sick_leave_days"),
         (&["旷工", "旷工天数", "absent"], "absent_days"),
-        (&["加班", "加班时长", "加班小时", "overtime"], "overtime_hours"),
+        (
+            &["加班", "加班时长", "加班小时", "overtime"],
+            "overtime_hours",
+        ),
     ];
 
     // Find header line
@@ -259,14 +269,30 @@ fn parse_online_text_to_records(raw_text: &str) -> Vec<AttendanceRecordInput> {
             if cells.len() >= 2 {
                 record.employee_no = cells[0].to_string();
                 record.name = Some(cells[1].to_string());
-                if let Some(v) = parse_f64(cells.get(2)) { record.expected_days = Some(v); }
-                if let Some(v) = parse_f64(cells.get(3)) { record.actual_days = Some(v); }
-                if let Some(v) = parse_i32(cells.get(4)) { record.late_count = Some(v); }
-                if let Some(v) = parse_i32(cells.get(5)) { record.early_leave_count = Some(v); }
-                if let Some(v) = parse_f64(cells.get(6)) { record.personal_leave_days = Some(v); }
-                if let Some(v) = parse_f64(cells.get(7)) { record.sick_leave_days = Some(v); }
-                if let Some(v) = parse_f64(cells.get(8)) { record.absent_days = Some(v); }
-                if let Some(v) = parse_f64(cells.get(9)) { record.overtime_hours = Some(v); }
+                if let Some(v) = parse_f64(cells.get(2)) {
+                    record.expected_days = Some(v);
+                }
+                if let Some(v) = parse_f64(cells.get(3)) {
+                    record.actual_days = Some(v);
+                }
+                if let Some(v) = parse_i32(cells.get(4)) {
+                    record.late_count = Some(v);
+                }
+                if let Some(v) = parse_i32(cells.get(5)) {
+                    record.early_leave_count = Some(v);
+                }
+                if let Some(v) = parse_f64(cells.get(6)) {
+                    record.personal_leave_days = Some(v);
+                }
+                if let Some(v) = parse_f64(cells.get(7)) {
+                    record.sick_leave_days = Some(v);
+                }
+                if let Some(v) = parse_f64(cells.get(8)) {
+                    record.absent_days = Some(v);
+                }
+                if let Some(v) = parse_f64(cells.get(9)) {
+                    record.overtime_hours = Some(v);
+                }
             }
         } else {
             // Use header mapping
@@ -301,7 +327,8 @@ fn parse_f64(s: Option<impl AsRef<str>>) -> Option<f64> {
 }
 
 fn parse_i32(s: Option<impl AsRef<str>>) -> Option<i32> {
-    s.and_then(|v| v.as_ref().replace('．', ".").parse::<f64>().ok()).map(|v| v as i32)
+    s.and_then(|v| v.as_ref().replace('．', ".").parse::<f64>().ok())
+        .map(|v| v as i32)
 }
 
 // ==================== Local OCR (Python PaddleOCR) ====================
@@ -401,13 +428,20 @@ fn find_ocr_script(resource_dir: Option<&std::path::Path>) -> AppResult<String> 
         }
     }
 
-    let tried: Vec<String> = candidates.iter().map(|p| p.to_string_lossy().to_string()).collect();
+    let tried: Vec<String> = candidates
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
     let resource_info = match resource_dir {
         Some(r) => format!("resource_dir={}", r.display()),
         None => "resource_dir=None".to_string(),
     };
-    let cwd = std::env::current_dir().map(|d| d.display().to_string()).unwrap_or_default();
-    let exe = std::env::current_exe().map(|d| d.display().to_string()).unwrap_or_default();
+    let cwd = std::env::current_dir()
+        .map(|d| d.display().to_string())
+        .unwrap_or_default();
+    let exe = std::env::current_exe()
+        .map(|d| d.display().to_string())
+        .unwrap_or_default();
 
     Err(AppError::Ocr(format!(
         "OCR脚本未找到。{resource_info}, cwd={cwd}, exe={exe}\n已尝试路径: {}",
@@ -457,7 +491,11 @@ fn extract_ocr_error(raw: &str) -> Option<String> {
     }
     serde_json::from_str::<Value>(trimmed)
         .ok()
-        .and_then(|json| json.get("error").and_then(Value::as_str).map(str::to_string))
+        .and_then(|json| {
+            json.get("error")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
         .or_else(|| Some(trimmed.to_string()))
 }
 
@@ -471,7 +509,10 @@ fn parse_ocr_output(raw: &str) -> AppResult<(Vec<AttendanceRecordInput>, String)
             return Err(AppError::Ocr(error.to_string()));
         }
 
-        if let Some(arr) = json.as_array().or_else(|| json.get("rows").and_then(Value::as_array)) {
+        if let Some(arr) = json
+            .as_array()
+            .or_else(|| json.get("rows").and_then(Value::as_array))
+        {
             let records = arr.iter().map(parse_attendance_record).collect();
             let raw_text = json
                 .get("raw_text")
@@ -572,17 +613,16 @@ pub fn ocr_recognize_punch_card(
     }
 
     // Read and encode image
-    let image_data = std::fs::read(image_path)
-        .map_err(|e| AppError::Ocr(format!("读取图片失败: {e}")))?;
+    let image_data =
+        std::fs::read(image_path).map_err(|e| AppError::Ocr(format!("读取图片失败: {e}")))?;
     let image_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &image_data);
 
     // Get access token
     let access_token = get_baidu_access_token(conn)?;
 
     // Call Baidu accurate OCR API (returns location data per word)
-    let url = format!(
-        "https://aip.baidubce.com/rest/2.0/ocr/v1/accurate?access_token={access_token}"
-    );
+    let url =
+        format!("https://aip.baidubce.com/rest/2.0/ocr/v1/accurate?access_token={access_token}");
 
     let client = reqwest::blocking::Client::new();
     let response = client
@@ -602,7 +642,11 @@ pub fn ocr_recognize_punch_card(
     }
 
     let words = body.words_result.unwrap_or_default();
-    let raw_text = words.iter().map(|w| w.words.as_str()).collect::<Vec<_>>().join("\n");
+    let raw_text = words
+        .iter()
+        .map(|w| w.words.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
 
     // Parse punch card using position data
     let records = parse_punch_card_ocr(&words, month)?;
@@ -611,7 +655,10 @@ pub fn ocr_recognize_punch_card(
     let parsed_json = serde_json::to_string(&records).unwrap_or_default();
     let batch = OcrBatch {
         id: 0,
-        batch_name: Some(format!("打卡表-{}", chrono::Utc::now().format("%Y%m%d%H%M%S"))),
+        batch_name: Some(format!(
+            "打卡表-{}",
+            chrono::Utc::now().format("%Y%m%d%H%M%S")
+        )),
         salary_month: Some(month.to_string()),
         image_path: Some(image_path.to_string()),
         raw_text: Some(raw_text.clone()),
@@ -642,10 +689,7 @@ pub fn ocr_recognize_punch_card(
 /// 2. For each employee, determine their Y-range (from their name to the next employee's name)
 /// 3. Count ALL check marks (√) within that Y-range and to the RIGHT of the name column
 /// 4. Merge everything into one attendance record per employee
-fn parse_punch_card_ocr(
-    words: &[BaiduWord],
-    month: &str,
-) -> AppResult<Vec<AttendanceRecordInput>> {
+fn parse_punch_card_ocr(words: &[BaiduWord], month: &str) -> AppResult<Vec<AttendanceRecordInput>> {
     if words.is_empty() {
         return Err(AppError::Ocr("打卡表OCR结果为空".to_string()));
     }
@@ -654,13 +698,17 @@ fn parse_punch_card_ocr(
     let weekdays = compute_workdays(month, days_in_month);
 
     // Step 1: Find all words with location data, sort by Y then X
-    let mut located: Vec<&BaiduWord> = words.iter()
-        .filter(|w| w.location.is_some())
-        .collect();
+    let mut located: Vec<&BaiduWord> = words.iter().filter(|w| w.location.is_some()).collect();
     located.sort_by(|a, b| {
         let ya = a.location.as_ref().unwrap().top;
         let yb = b.location.as_ref().unwrap().top;
-        ya.cmp(&yb).then(a.location.as_ref().unwrap().left.cmp(&b.location.as_ref().unwrap().left))
+        ya.cmp(&yb).then(
+            a.location
+                .as_ref()
+                .unwrap()
+                .left
+                .cmp(&b.location.as_ref().unwrap().left),
+        )
     });
 
     // Step 2: Find name column boundary (right edge of the name area)
@@ -670,13 +718,22 @@ fn parse_punch_card_ocr(
     let anchors = find_employee_anchors(&located, name_col_max_x);
 
     if anchors.is_empty() {
-        let sample: Vec<String> = words.iter().take(20).map(|w| {
-            let loc = w.location.as_ref().map(|l| format!("[{},{}]", l.left, l.top)).unwrap_or_default();
-            format!("{}{loc}", w.words)
-        }).collect();
+        let sample: Vec<String> = words
+            .iter()
+            .take(20)
+            .map(|w| {
+                let loc = w
+                    .location
+                    .as_ref()
+                    .map(|l| format!("[{},{}]", l.left, l.top))
+                    .unwrap_or_default();
+                format!("{}{loc}", w.words)
+            })
+            .collect();
         return Err(AppError::Ocr(format!(
             "未能从打卡表中识别出员工记录。OCR返回{}个文字，前20个: {}",
-            words.len(), sample.join("; ")
+            words.len(),
+            sample.join("; ")
         )));
     }
 
@@ -689,7 +746,10 @@ fn parse_punch_card_ocr(
         let y_end = if idx + 1 < anchors.len() {
             anchors[idx + 1].y.saturating_sub(10) as u32
         } else {
-            located.last().map(|w| w.location.as_ref().unwrap().top + 50).unwrap_or(y_start + 200)
+            located
+                .last()
+                .map(|w| w.location.as_ref().unwrap().top + 50)
+                .unwrap_or(y_start + 200)
         };
 
         let mut total_checks: f64 = 0.0;
@@ -724,7 +784,11 @@ fn parse_punch_card_ocr(
             overtime_hours: None,
             source_type: Some("punch_card".to_string()),
             ocr_batch_id: None,
-            remark: if total_checks > 0.0 { Some(format!("出勤{:.0}天", total_checks)) } else { None },
+            remark: if total_checks > 0.0 {
+                Some(format!("出勤{:.0}天", total_checks))
+            } else {
+                None
+            },
         });
     }
 
@@ -744,9 +808,13 @@ fn find_name_col_max(located: &[&BaiduWord]) -> u32 {
         let text = w.words.trim();
         let loc = w.location.as_ref().unwrap();
         // Look for Chinese characters (names) that are NOT check marks
-        if !text.is_empty() && !text.chars().all(|c| c.is_ascii_digit() || c == '.') && !is_check_mark(text) {
+        if !text.is_empty()
+            && !text.chars().all(|c| c.is_ascii_digit() || c == '.')
+            && !is_check_mark(text)
+        {
             let right = loc.left + loc.width + 30; // add margin
-            if right > max_x && right < 500 { // reasonable name column boundary
+            if right > max_x && right < 500 {
+                // reasonable name column boundary
                 max_x = right;
             }
         }
@@ -780,7 +848,10 @@ fn find_employee_anchors(located: &[&BaiduWord], name_col_max_x: u32) -> Vec<Emp
         sorted.sort_by_key(|w| w.location.as_ref().unwrap().left);
 
         // First word should be a sequence number (1-100)
-        let first = sorted.first().map(|w| w.words.trim().to_string()).unwrap_or_default();
+        let first = sorted
+            .first()
+            .map(|w| w.words.trim().to_string())
+            .unwrap_or_default();
         let seq: Option<u32> = first.parse().ok();
         if seq.is_none() || seq.unwrap() == 0 || seq.unwrap() > 100 {
             continue;
@@ -794,11 +865,16 @@ fn find_employee_anchors(located: &[&BaiduWord], name_col_max_x: u32) -> Vec<Emp
         for w in sorted.iter().skip(1) {
             let text = w.words.trim();
             let x = w.location.as_ref().unwrap().left;
-            if x > name_col_max_x { break; }
-            if text.is_empty() { continue; }
+            if x > name_col_max_x {
+                break;
+            }
+            if text.is_empty() {
+                continue;
+            }
             if text.chars().all(|c| c.is_ascii_digit()) && employee_no.is_none() {
                 employee_no = Some(text.to_string());
-            } else if !text.chars().all(|c| c.is_ascii_digit() || c == '.') && !is_check_mark(text) {
+            } else if !text.chars().all(|c| c.is_ascii_digit() || c == '.') && !is_check_mark(text)
+            {
                 if name.is_empty() {
                     name = text.to_string();
                     y_center = w.location.as_ref().unwrap().top;
@@ -807,7 +883,11 @@ fn find_employee_anchors(located: &[&BaiduWord], name_col_max_x: u32) -> Vec<Emp
         }
 
         if !name.is_empty() {
-            anchors.push(EmployeeAnchor { name, employee_no, y: y_center });
+            anchors.push(EmployeeAnchor {
+                name,
+                employee_no,
+                y: y_center,
+            });
         }
     }
 
@@ -816,20 +896,41 @@ fn find_employee_anchors(located: &[&BaiduWord], name_col_max_x: u32) -> Vec<Emp
 
 fn is_check_mark(text: &str) -> bool {
     let t = text.trim();
-    t == "√" || t == "✓" || t == "✔" || t == "✗" || t == "签" || t == "V" || t == "v"
-        || t.contains("签") || t.contains("√") || t.contains("✓")
-        || (t.len() == 1 && t.chars().next().map(|c| c as u32).map(|c| c == 0x2713 || c == 0x2714 || c == 0x221A).unwrap_or(false))
+    t == "√"
+        || t == "✓"
+        || t == "✔"
+        || t == "✗"
+        || t == "签"
+        || t == "V"
+        || t == "v"
+        || t.contains("签")
+        || t.contains("√")
+        || t.contains("✓")
+        || (t.len() == 1
+            && t.chars()
+                .next()
+                .map(|c| c as u32)
+                .map(|c| c == 0x2713 || c == 0x2714 || c == 0x221A)
+                .unwrap_or(false))
 }
 
 fn get_days_in_month(month: &str) -> u32 {
     let parts: Vec<&str> = month.split('-').collect();
-    if parts.len() != 2 { return 31; }
+    if parts.len() != 2 {
+        return 31;
+    }
     let year: u32 = parts[0].parse().unwrap_or(2026);
     let mon: u32 = parts[1].parse().unwrap_or(1);
     match mon {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
-        2 => if (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0) { 29 } else { 28 },
+        2 => {
+            if (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0) {
+                29
+            } else {
+                28
+            }
+        }
         _ => 31,
     }
 }
@@ -844,7 +945,8 @@ fn compute_workdays(month: &str, days_in_month: u32) -> Vec<u32> {
     for day in 1..=days_in_month {
         if let Some(date) = chrono::NaiveDate::from_ymd_opt(year, mon, day) {
             let weekday = date.weekday().num_days_from_monday(); // 0=Mon, 6=Sun
-            if weekday < 5 { // Mon-Fri
+            if weekday < 5 {
+                // Mon-Fri
                 workdays.push(day);
             }
         }

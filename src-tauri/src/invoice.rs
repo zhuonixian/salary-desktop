@@ -1,13 +1,13 @@
 use rusqlite::Connection;
 use serde::Deserialize;
+use std::sync::Mutex;
 
 use crate::db;
 use crate::errors::{AppError, AppResult};
 use crate::models::*;
 use crate::ocr;
 
-const BAIDU_VAT_INVOICE_URL: &str =
-    "https://aip.baidubce.com/rest/2.0/ocr/v1/vat_invoice";
+const BAIDU_VAT_INVOICE_URL: &str = "https://aip.baidubce.com/rest/2.0/ocr/v1/vat_invoice";
 
 // ==================== Baidu Response Types ====================
 
@@ -23,35 +23,107 @@ pub(crate) struct BaiduVatInvoiceResponse {
     extra: serde_json::Value,
 }
 
+pub trait InvoiceOcrDbOps {
+    fn get_baidu_access_token(&self) -> AppResult<String>;
+    fn clear_baidu_access_token(&self) -> AppResult<()>;
+    fn find_invoice_by_dedup_key(
+        &self,
+        code: Option<&str>,
+        number: &str,
+    ) -> AppResult<Option<Invoice>>;
+}
+
+impl InvoiceOcrDbOps for Connection {
+    fn get_baidu_access_token(&self) -> AppResult<String> {
+        ocr::get_baidu_access_token(self)
+    }
+
+    fn clear_baidu_access_token(&self) -> AppResult<()> {
+        db::set_setting(self, "baidu_access_token", "")?;
+        db::set_setting(self, "baidu_token_expires_at", "")?;
+        Ok(())
+    }
+
+    fn find_invoice_by_dedup_key(
+        &self,
+        code: Option<&str>,
+        number: &str,
+    ) -> AppResult<Option<Invoice>> {
+        db::find_invoice_by_dedup_key(self, code, number)
+    }
+}
+
+impl InvoiceOcrDbOps for Mutex<Connection> {
+    fn get_baidu_access_token(&self) -> AppResult<String> {
+        let conn = self.lock().map_err(|e| AppError::General(e.to_string()))?;
+        ocr::get_baidu_access_token(&conn)
+    }
+
+    fn clear_baidu_access_token(&self) -> AppResult<()> {
+        let conn = self.lock().map_err(|e| AppError::General(e.to_string()))?;
+        db::set_setting(&conn, "baidu_access_token", "")?;
+        db::set_setting(&conn, "baidu_token_expires_at", "")?;
+        Ok(())
+    }
+
+    fn find_invoice_by_dedup_key(
+        &self,
+        code: Option<&str>,
+        number: &str,
+    ) -> AppResult<Option<Invoice>> {
+        let conn = self.lock().map_err(|e| AppError::General(e.to_string()))?;
+        db::find_invoice_by_dedup_key(&conn, code, number)
+    }
+}
+
+enum InvoiceOcrInnerError {
+    TokenInvalid(AppError),
+    Other(AppError),
+}
+
+impl From<AppError> for InvoiceOcrInnerError {
+    fn from(error: AppError) -> Self {
+        Self::Other(error)
+    }
+}
+
 // ==================== OCR Entry ====================
 
 /// 识别发票。PDF 直接走百度的 `pdf_file` 参数（不依赖系统 poppler），
 /// 图片走 `image` 参数。token 失效（错误码 110）自动清缓存重试一次。
-pub fn ocr_invoice(image_path: &str, conn: &Connection) -> AppResult<InvoiceOcrPreview> {
-    match ocr_invoice_inner(image_path, conn) {
+pub fn ocr_invoice<D: InvoiceOcrDbOps + ?Sized>(
+    image_path: &str,
+    db_ops: &D,
+) -> AppResult<InvoiceOcrPreview> {
+    match ocr_invoice_inner(image_path, db_ops) {
         Ok(preview) => Ok(preview),
-        Err(e) => {
-            let msg = e.to_string();
+        Err(InvoiceOcrInnerError::TokenInvalid(e)) => {
             // 110 = Access token invalid or no longer valid
             // 通常发生在用户重置 secret 后旧 token 还在 DB 缓存里
-            if msg.contains("(110)") || msg.contains("Access token invalid") {
-                db::set_setting(conn, "baidu_access_token", "")?;
-                db::set_setting(conn, "baidu_token_expires_at", "")?;
-                ocr_invoice_inner(image_path, conn)
-            } else {
-                Err(e)
-            }
+            db_ops.clear_baidu_access_token()?;
+            ocr_invoice_inner(image_path, db_ops)
+                .map_err(|retry_error| retry_error.into_app_error())
+        }
+        Err(InvoiceOcrInnerError::Other(e)) => Err(e),
+    }
+}
+
+impl InvoiceOcrInnerError {
+    fn into_app_error(self) -> AppError {
+        match self {
+            Self::TokenInvalid(error) | Self::Other(error) => error,
         }
     }
 }
 
-fn ocr_invoice_inner(image_path: &str, conn: &Connection) -> AppResult<InvoiceOcrPreview> {
+fn ocr_invoice_inner<D: InvoiceOcrDbOps + ?Sized>(
+    image_path: &str,
+    db_ops: &D,
+) -> Result<InvoiceOcrPreview, InvoiceOcrInnerError> {
     let file_data = std::fs::read(image_path).map_err(AppError::Io)?;
-    let file_b64 = base64::Engine::encode(
-        &base64::engine::general_purpose::STANDARD, &file_data,
-    );
+    let file_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &file_data);
 
-    let token = ocr::get_baidu_access_token(conn)?;
+    let token = db_ops.get_baidu_access_token()?;
     let url = format!("{BAIDU_VAT_INVOICE_URL}?access_token={token}");
 
     // PDF 用 pdf_file + pdf_file_num=1；图片用 image
@@ -70,15 +142,22 @@ fn ocr_invoice_inner(image_path: &str, conn: &Connection) -> AppResult<InvoiceOc
         .send()
         .map_err(|e| AppError::Network(format!("百度发票OCR请求失败: {e}")))?;
 
-    let raw_text = response.text()
+    let raw_text = response
+        .text()
         .map_err(|e| AppError::Network(format!("读取响应失败: {e}")))?;
 
     let parsed: BaiduVatInvoiceResponse = serde_json::from_str(&raw_text)
         .map_err(|e| AppError::Ocr(format!("百度发票OCR响应解析失败: {e}")))?;
 
     if let Some(code) = parsed.error_code {
+        let is_token_invalid = is_baidu_token_invalid(&parsed);
         let msg = parsed.error_msg.unwrap_or_default();
-        return Err(AppError::Ocr(translate_baidu_error(code, &msg)));
+        let error = AppError::Ocr(translate_baidu_error(code, &msg));
+        return if is_token_invalid {
+            Err(InvoiceOcrInnerError::TokenInvalid(error))
+        } else {
+            Err(InvoiceOcrInnerError::Other(error))
+        };
     }
 
     let mut preview = map_baidu_response(&parsed, &raw_text);
@@ -86,7 +165,7 @@ fn ocr_invoice_inner(image_path: &str, conn: &Connection) -> AppResult<InvoiceOc
     // 查重（code 可空，支持全电票）
     if let Some(n) = preview.invoice_number.as_ref() {
         let code_ref = preview.invoice_code.as_deref();
-        if let Some(existing) = db::find_invoice_by_dedup_key(conn, code_ref, n)? {
+        if let Some(existing) = db_ops.find_invoice_by_dedup_key(code_ref, n)? {
             preview.is_duplicate = true;
             preview.duplicate_invoice_id = Some(existing.id);
             preview.warnings.push(format!(
@@ -96,7 +175,9 @@ fn ocr_invoice_inner(image_path: &str, conn: &Connection) -> AppResult<InvoiceOc
             ));
         }
     } else {
-        preview.warnings.push("未能识别发票号码，需手工补全".to_string());
+        preview
+            .warnings
+            .push("未能识别发票号码，需手工补全".to_string());
     }
 
     Ok(preview)
@@ -114,6 +195,10 @@ fn translate_baidu_error(code: i32, msg: &str) -> String {
     }
 }
 
+fn is_baidu_token_invalid(resp: &BaiduVatInvoiceResponse) -> bool {
+    resp.error_code == Some(110)
+}
+
 fn map_baidu_response(resp: &BaiduVatInvoiceResponse, raw_text: &str) -> InvoiceOcrPreview {
     let words = &resp.words_result;
     let extra = &resp.extra;
@@ -125,12 +210,9 @@ fn map_baidu_response(resp: &BaiduVatInvoiceResponse, raw_text: &str) -> Invoice
             .or_else(|| pick_str(words, extra, "InvoiceTypeLog")),
         issue_date: pick_str(words, extra, "IssueDate"),
         check_code: pick_str(words, extra, "CheckCode"),
-        amount: parse_amount(&pick_str(words, extra, "TotalAmount"))
-            .unwrap_or(0.0),
-        tax_amount: parse_amount(&pick_str(words, extra, "TotalTax"))
-            .unwrap_or(0.0),
-        total_amount: parse_amount(&pick_str(words, extra, "AmountInFiguers"))
-            .unwrap_or(0.0),
+        amount: parse_amount(&pick_str(words, extra, "TotalAmount")).unwrap_or(0.0),
+        tax_amount: parse_amount(&pick_str(words, extra, "TotalTax")).unwrap_or(0.0),
+        total_amount: parse_amount(&pick_str(words, extra, "AmountInFiguers")).unwrap_or(0.0),
         seller_name: pick_str(words, extra, "SellerName"),
         seller_tax_id: pick_str(words, extra, "SellerRegisterNum"),
         buyer_name: pick_str(words, extra, "PurchaserName"),
@@ -149,7 +231,9 @@ fn pick_str(words: &serde_json::Value, extra: &serde_json::Value, key: &str) -> 
             return Some(w.trim().to_string()).filter(|s| !s.is_empty());
         }
     }
-    extra.get(key).and_then(|v| v.as_str())
+    extra
+        .get(key)
+        .and_then(|v| v.as_str())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 }
@@ -157,7 +241,8 @@ fn pick_str(words: &serde_json::Value, extra: &serde_json::Value, key: &str) -> 
 /// 解析金额：去千分位逗号、去 ¥/￥/$ 符号、去「元」、解析为 f64
 fn parse_amount(s: &Option<String>) -> Option<f64> {
     let s = s.as_ref()?;
-    let cleaned: String = s.chars()
+    let cleaned: String = s
+        .chars()
         .filter(|c| c.is_ascii_digit() || *c == '.' || *c == '-')
         .collect();
     cleaned.parse::<f64>().ok()
@@ -171,7 +256,7 @@ pub fn save_invoice(
     app_data_dir: &std::path::Path,
 ) -> AppResult<Invoice> {
     // 二次查重（发票号码必填；发票代码可空，支持全电票）
-    let number = input.invoice_number.as_deref().unwrap_or("");
+    let number = input.invoice_number.as_deref().unwrap_or("").trim();
     if number.is_empty() {
         return Err(AppError::InvalidParam("发票号码必填".into()));
     }
@@ -186,9 +271,11 @@ pub fn save_invoice(
 
     // 复制原图到应用目录
     let target_path = match input.image_path.as_deref() {
-        Some(src) if !src.is_empty() => {
-            Some(copy_image_to_app_dir(src, input.belong_month.as_deref(), app_data_dir)?)
-        }
+        Some(src) if !src.is_empty() => Some(copy_image_to_app_dir(
+            src,
+            input.belong_month.as_deref(),
+            app_data_dir,
+        )?),
         _ => None,
     };
 
@@ -196,6 +283,55 @@ pub fn save_invoice(
 
     db::log_operation(
         conn,
+        "save_invoice",
+        &format!(
+            "录入发票：代码{} 号码{} 价税合计{:.2}",
+            input.invoice_code.as_deref().unwrap_or(""),
+            input.invoice_number.as_deref().unwrap_or(""),
+            input.total_amount.unwrap_or(0.0)
+        ),
+        "system",
+        None,
+    )?;
+
+    Ok(invoice)
+}
+
+pub fn save_invoice_with_mutex(
+    input: &InvoiceInput,
+    state: &Mutex<Connection>,
+    app_data_dir: &std::path::Path,
+) -> AppResult<Invoice> {
+    let number = input.invoice_number.as_deref().unwrap_or("").trim();
+    if number.is_empty() {
+        return Err(AppError::InvalidParam("发票号码必填".into()));
+    }
+    let code_ref = input.invoice_code.as_deref();
+    {
+        let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+        if let Some(existing) = db::find_invoice_by_dedup_key(&conn, code_ref, number)? {
+            let code_disp = code_ref.unwrap_or("");
+            return Err(AppError::General(format!(
+                "发票已存在：代码{code_disp} 号码{number}，记录ID={}",
+                existing.id
+            )));
+        }
+    }
+
+    let target_path = match input.image_path.as_deref() {
+        Some(src) if !src.is_empty() => Some(copy_image_to_app_dir(
+            src,
+            input.belong_month.as_deref(),
+            app_data_dir,
+        )?),
+        _ => None,
+    };
+
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let invoice = db::insert_invoice(&conn, input, target_path.as_deref().unwrap_or(""))?;
+
+    db::log_operation(
+        &conn,
         "save_invoice",
         &format!(
             "录入发票：代码{} 号码{} 价税合计{:.2}",
@@ -222,7 +358,10 @@ pub fn update_invoice(
             // 用户换图，复制新图
             let copied = copy_image_to_app_dir(
                 new_src,
-                input.belong_month.as_deref().or(existing.belong_month.as_deref()),
+                input
+                    .belong_month
+                    .as_deref()
+                    .or(existing.belong_month.as_deref()),
                 app_data_dir,
             )?;
             Some(copied)
@@ -238,6 +377,49 @@ pub fn update_invoice(
     if result {
         db::log_operation(
             conn,
+            "update_invoice",
+            &format!("更新发票ID={id}"),
+            "system",
+            None,
+        )?;
+    }
+
+    Ok(result)
+}
+
+pub fn update_invoice_with_mutex(
+    id: i64,
+    input: &InvoiceInput,
+    state: &Mutex<Connection>,
+    app_data_dir: &std::path::Path,
+) -> AppResult<bool> {
+    let existing = {
+        let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+        db::get_invoice(&conn, id)?
+    };
+    let new_image_path = if let Some(new_src) = input.image_path.as_deref() {
+        if !new_src.is_empty() && new_src != existing.image_path.as_deref().unwrap_or("") {
+            Some(copy_image_to_app_dir(
+                new_src,
+                input
+                    .belong_month
+                    .as_deref()
+                    .or(existing.belong_month.as_deref()),
+                app_data_dir,
+            )?)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let result = db::update_invoice(&conn, id, input, new_image_path.as_deref())?;
+
+    if result {
+        db::log_operation(
+            &conn,
             "update_invoice",
             &format!("更新发票ID={id}"),
             "system",
@@ -270,15 +452,27 @@ pub(crate) fn copy_image_to_app_dir(
 ) -> AppResult<String> {
     let raw_month = belong_month.unwrap_or("unclassified");
     // Sanitize: reject path separators and parent traversal
-    let sanitized: String = raw_month.chars()
+    let sanitized: String = raw_month
+        .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .collect();
-    let month = if sanitized.is_empty() { "unclassified" } else { sanitized.as_str() };
+    let month = if sanitized.is_empty() {
+        "unclassified"
+    } else {
+        sanitized.as_str()
+    };
 
     let src_path = std::path::Path::new(src);
-    let filename = src_path.file_name()
+    let raw_filename = src_path
+        .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "invoice.bin".to_string());
+    let sanitized_filename = sanitize_invoice_filename(&raw_filename);
+    let filename = if sanitized_filename.is_empty() {
+        "invoice.bin"
+    } else {
+        sanitized_filename.as_str()
+    };
 
     let timestamp = chrono::Utc::now().format("%Y%m%d%H%M%S");
     let target_name = format!("{timestamp}_{filename}");
@@ -290,6 +484,18 @@ pub(crate) fn copy_image_to_app_dir(
     std::fs::copy(src_path, &target_path)?;
 
     Ok(target_path.to_string_lossy().to_string())
+}
+
+fn sanitize_invoice_filename(raw: &str) -> String {
+    raw.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(*c, '.' | '-' | '_') || is_han_char(*c))
+        .collect()
+}
+
+fn is_han_char(c: char) -> bool {
+    ('\u{3400}'..='\u{4DBF}').contains(&c)
+        || ('\u{4E00}'..='\u{9FFF}').contains(&c)
+        || ('\u{F900}'..='\u{FAFF}').contains(&c)
 }
 
 // ==================== Unit Tests ====================
@@ -317,8 +523,14 @@ mod tests {
         };
         BaiduVatInvoiceResponse {
             words_result,
-            error_code: json_value.get("error_code").and_then(|v| v.as_i64()).map(|v| v as i32),
-            error_msg: json_value.get("error_msg").and_then(|v| v.as_str()).map(String::from),
+            error_code: json_value
+                .get("error_code")
+                .and_then(|v| v.as_i64())
+                .map(|v| v as i32),
+            error_msg: json_value
+                .get("error_msg")
+                .and_then(|v| v.as_str())
+                .map(String::from),
             extra,
         }
     }
@@ -380,6 +592,21 @@ mod tests {
         assert!(translate_baidu_error(216201, "").contains("图片"));
         assert!(translate_baidu_error(999, "raw msg").contains("raw msg"));
     }
+
+    #[test]
+    fn test_baidu_token_invalid_uses_error_code() {
+        let token_invalid = make_response(json!({
+            "error_code": 110,
+            "error_msg": "anything"
+        }));
+        assert!(is_baidu_token_invalid(&token_invalid));
+
+        let same_message_different_code = make_response(json!({
+            "error_code": 111,
+            "error_msg": "Access token invalid"
+        }));
+        assert!(!is_baidu_token_invalid(&same_message_different_code));
+    }
 }
 
 #[cfg(test)]
@@ -429,9 +656,13 @@ mod business_tests {
             invoice_type: Some("普通发票".into()),
             issue_date: Some("2026-08-01".into()),
             check_code: None,
-            amount: Some(100.0), tax_amount: Some(6.0), total_amount: Some(106.0),
-            seller_name: Some("销售方".into()), seller_tax_id: Some("91X".into()),
-            buyer_name: Some("购买方".into()), buyer_tax_id: Some("92X".into()),
+            amount: Some(100.0),
+            tax_amount: Some(6.0),
+            total_amount: Some(106.0),
+            seller_name: Some("销售方".into()),
+            seller_tax_id: Some("91X".into()),
+            buyer_name: Some("购买方".into()),
+            buyer_tax_id: Some("92X".into()),
             expense_type_code: Some("office".into()),
             employee_id: Some(1),
             belong_month: Some("2026-08".into()),
@@ -459,14 +690,21 @@ mod business_tests {
         let mut input = sample_input();
         input.invoice_code = None;
         let result = save_invoice(&input, &conn, &std::env::temp_dir());
-        assert!(result.is_ok(), "missing code should be allowed for full-electronic invoices");
+        assert!(
+            result.is_ok(),
+            "missing code should be allowed for full-electronic invoices"
+        );
 
         // 但 number 缺失要被拒绝
         let mut no_number = sample_input();
         no_number.invoice_number = None;
         let result = save_invoice(&no_number, &conn, &std::env::temp_dir());
         let err = result.unwrap_err();
-        assert!(matches!(err, AppError::InvalidParam(_)), "expected InvalidParam for missing number, got {:?}", err);
+        assert!(
+            matches!(err, AppError::InvalidParam(_)),
+            "expected InvalidParam for missing number, got {:?}",
+            err
+        );
     }
 
     #[test]
@@ -474,12 +712,38 @@ mod business_tests {
         // 两条全电票（无 code）同号应被拦截
         let conn = setup_db();
         let tmp = std::env::temp_dir();
-        let mut a = sample_input(); a.invoice_code = None; a.invoice_number = Some("FULL001".into());
-        let mut b = sample_input(); b.invoice_code = None; b.invoice_number = Some("FULL001".into());
+        let mut a = sample_input();
+        a.invoice_code = None;
+        a.invoice_number = Some("FULL001".into());
+        let mut b = sample_input();
+        b.invoice_code = None;
+        b.invoice_number = Some("FULL001".into());
         save_invoice(&a, &conn, &tmp).unwrap();
         let result = save_invoice(&b, &conn, &tmp);
-        assert!(result.is_err(), "duplicate full-electronic (no code) should be blocked");
+        assert!(
+            result.is_err(),
+            "duplicate full-electronic (no code) should be blocked"
+        );
         assert!(result.unwrap_err().to_string().contains("发票已存在"));
+    }
+
+    #[test]
+    fn test_save_invoice_normalized_code_number_collide() {
+        let conn = setup_db();
+        let tmp = std::env::temp_dir();
+        let mut a = sample_input();
+        a.invoice_code = Some(" ABC123 ".into());
+        a.invoice_number = Some(" 12345678 ".into());
+        let mut b = sample_input();
+        b.invoice_code = Some("abc123".into());
+        b.invoice_number = Some("12345678".into());
+
+        save_invoice(&a, &conn, &tmp).unwrap();
+        let result = save_invoice(&b, &conn, &tmp);
+        assert!(
+            result.is_err(),
+            "trimmed/lowercased dedup keys should collide"
+        );
     }
 
     #[test]
@@ -487,8 +751,12 @@ mod business_tests {
         let conn = setup_db();
         let tmp = std::env::temp_dir();
         // Insert two invoices with different codes
-        let mut a = sample_input(); a.invoice_code = Some("AAA".into()); a.invoice_number = Some("001".into());
-        let mut b = sample_input(); b.invoice_code = Some("BBB".into()); b.invoice_number = Some("002".into());
+        let mut a = sample_input();
+        a.invoice_code = Some("AAA".into());
+        a.invoice_number = Some("001".into());
+        let mut b = sample_input();
+        b.invoice_code = Some("BBB".into());
+        b.invoice_number = Some("002".into());
         let inv_a = save_invoice(&a, &conn, &tmp).unwrap();
         let _inv_b = save_invoice(&b, &conn, &tmp).unwrap();
 
@@ -497,17 +765,23 @@ mod business_tests {
         collision_input.invoice_code = Some("BBB".into());
         collision_input.invoice_number = Some("002".into());
         let result = update_invoice(inv_a.id, &collision_input, &conn, &tmp);
-        assert!(result.is_err(), "updating to collide with another record should fail");
+        assert!(
+            result.is_err(),
+            "updating to collide with another record should fail"
+        );
     }
 
     #[test]
     fn test_save_invoice_logs_operation() {
         let conn = setup_db();
         save_invoice(&sample_input(), &conn, &std::env::temp_dir()).unwrap();
-        let log_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM operation_logs WHERE operation_type = 'save_invoice'",
-            [], |r| r.get(0)
-        ).unwrap();
+        let log_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM operation_logs WHERE operation_type = 'save_invoice'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(log_count, 1);
     }
 
@@ -520,7 +794,8 @@ mod business_tests {
             src.to_str().unwrap(),
             Some("2026-08"),
             &tmp.join("app_data"),
-        ).unwrap();
+        )
+        .unwrap();
         assert!(dest.contains("invoices/2026-08/"));
         let content = std::fs::read_to_string(&dest).unwrap();
         assert_eq!(content, "hello");
@@ -531,11 +806,30 @@ mod business_tests {
         let tmp = std::env::temp_dir();
         let src = tmp.join("test_invoice_src2.txt");
         std::fs::write(&src, b"hello").unwrap();
+        let dest =
+            copy_image_to_app_dir(src.to_str().unwrap(), None, &tmp.join("app_data2")).unwrap();
+        assert!(dest.contains("invoices/unclassified/"));
+    }
+
+    #[test]
+    fn test_copy_image_to_app_dir_sanitizes_filename() {
+        let tmp = std::env::temp_dir();
+        let src = tmp.join("测/..\\bad\nname?.PDF".replace('/', ""));
+        std::fs::write(&src, b"hello").unwrap();
         let dest = copy_image_to_app_dir(
             src.to_str().unwrap(),
-            None,
-            &tmp.join("app_data2"),
-        ).unwrap();
-        assert!(dest.contains("invoices/unclassified/"));
+            Some("2026-08"),
+            &tmp.join("app_data3"),
+        )
+        .unwrap();
+        let filename = std::path::Path::new(&dest)
+            .file_name()
+            .unwrap()
+            .to_string_lossy();
+        assert!(filename.contains("测"));
+        assert!(filename.ends_with("_测..badname.PDF"));
+        assert!(!filename.contains('\\'));
+        assert!(!filename.contains('\n'));
+        assert!(!filename.contains('?'));
     }
 }

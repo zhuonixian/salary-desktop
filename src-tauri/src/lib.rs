@@ -13,7 +13,11 @@ use tauri::Manager;
 
 fn diag(msg: &str) {
     let tmp_log = std::env::temp_dir().join("salary-desktop-startup.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&tmp_log) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&tmp_log)
+    {
         let _ = writeln!(f, "[{}] {}", chrono::Utc::now().format("%H:%M:%S"), msg);
     }
 }
@@ -36,7 +40,9 @@ pub fn run() {
         tauri_plugin_log::Builder::default()
             .level(log::LevelFilter::Info)
             .targets([
-                tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir { file_name: None }),
+                tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                    file_name: None,
+                }),
                 tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
             ])
             .build(),

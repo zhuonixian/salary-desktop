@@ -5,7 +5,11 @@ use std::io::Write;
 
 fn diag(msg: &str) {
     let tmp_log = std::env::temp_dir().join("salary-desktop-startup.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&tmp_log) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&tmp_log)
+    {
         let _ = writeln!(f, "[{}] {}", chrono::Utc::now().format("%H:%M:%S"), msg);
     }
 }

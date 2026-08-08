@@ -47,11 +47,16 @@ pub fn read_employee_excel(path: &str) -> AppResult<Vec<Employee>> {
     let col_bankname = get_col("开户行", &headers).or_else(|| get_col("bank_name", &headers));
     let col_hire = get_col("入职日期", &headers).or_else(|| get_col("hire_date", &headers));
     let col_base = get_col("基本工资", &headers).or_else(|| get_col("base_salary", &headers));
-    let col_pos_salary = get_col("岗位工资", &headers).or_else(|| get_col("position_salary", &headers));
-    let col_perf = get_col("绩效工资", &headers).or_else(|| get_col("performance_salary", &headers));
-    let col_social = get_col("社保基数", &headers).or_else(|| get_col("social_security_base", &headers));
-    let col_housing = get_col("公积金基数", &headers).or_else(|| get_col("housing_fund_base", &headers));
-    let col_special = get_col("专项附加扣除", &headers).or_else(|| get_col("special_deduction", &headers));
+    let col_pos_salary =
+        get_col("岗位工资", &headers).or_else(|| get_col("position_salary", &headers));
+    let col_perf =
+        get_col("绩效工资", &headers).or_else(|| get_col("performance_salary", &headers));
+    let col_social =
+        get_col("社保基数", &headers).or_else(|| get_col("social_security_base", &headers));
+    let col_housing =
+        get_col("公积金基数", &headers).or_else(|| get_col("housing_fund_base", &headers));
+    let col_special =
+        get_col("专项附加扣除", &headers).or_else(|| get_col("special_deduction", &headers));
     let col_remark = get_col("备注", &headers).or_else(|| get_col("remark", &headers));
 
     if col_no.is_none() || col_name.is_none() {
@@ -64,19 +69,21 @@ pub fn read_employee_excel(path: &str) -> AppResult<Vec<Employee>> {
         let get_string = |col: Option<usize>| -> Option<String> {
             col.and_then(|i| row.get(i)).map(|c| {
                 let s = c.to_string();
-                if s.is_empty() { String::new() } else { s }
+                if s.is_empty() {
+                    String::new()
+                } else {
+                    s
+                }
             })
         };
 
         let get_f64 = |col: Option<usize>| -> f64 {
             col.and_then(|i| row.get(i))
-                .map(|c| {
-                    match c {
-                        Data::Float(f) => *f,
-                        Data::Int(i) => *i as f64,
-                        Data::String(s) => s.parse::<f64>().unwrap_or(0.0),
-                        _ => 0.0,
-                    }
+                .map(|c| match c {
+                    Data::Float(f) => *f,
+                    Data::Int(i) => *i as f64,
+                    Data::String(s) => s.parse::<f64>().unwrap_or(0.0),
+                    _ => 0.0,
                 })
                 .unwrap_or(0.0)
         };
@@ -146,14 +153,18 @@ pub fn read_attendance_excel(path: &str, month: &str) -> AppResult<Vec<Attendanc
 
     let col_no = get_col("工号", &headers).or_else(|| get_col("employee_no", &headers));
     let col_name = get_col("姓名", &headers).or_else(|| get_col("name", &headers));
-    let col_expected = get_col("应出勤天数", &headers).or_else(|| get_col("expected_days", &headers));
+    let col_expected =
+        get_col("应出勤天数", &headers).or_else(|| get_col("expected_days", &headers));
     let col_actual = get_col("实出勤天数", &headers).or_else(|| get_col("actual_days", &headers));
     let col_late = get_col("迟到次数", &headers).or_else(|| get_col("late_count", &headers));
-    let col_early = get_col("早退次数", &headers).or_else(|| get_col("early_leave_count", &headers));
-    let col_personal = get_col("事假天数", &headers).or_else(|| get_col("personal_leave_days", &headers));
+    let col_early =
+        get_col("早退次数", &headers).or_else(|| get_col("early_leave_count", &headers));
+    let col_personal =
+        get_col("事假天数", &headers).or_else(|| get_col("personal_leave_days", &headers));
     let col_sick = get_col("病假天数", &headers).or_else(|| get_col("sick_leave_days", &headers));
     let col_absent = get_col("旷工天数", &headers).or_else(|| get_col("absent_days", &headers));
-    let col_overtime = get_col("加班小时", &headers).or_else(|| get_col("overtime_hours", &headers));
+    let col_overtime =
+        get_col("加班小时", &headers).or_else(|| get_col("overtime_hours", &headers));
     let col_remark = get_col("备注", &headers).or_else(|| get_col("remark", &headers));
 
     if col_no.is_none() {
@@ -166,26 +177,26 @@ pub fn read_attendance_excel(path: &str, month: &str) -> AppResult<Vec<Attendanc
         let get_string = |col: Option<usize>| -> Option<String> {
             col.and_then(|i| row.get(i)).map(|c| {
                 let s = c.to_string();
-                if s.is_empty() { String::new() } else { s }
+                if s.is_empty() {
+                    String::new()
+                } else {
+                    s
+                }
             })
         };
 
         let get_f64 = |col: Option<usize>| -> f64 {
             col.and_then(|i| row.get(i))
-                .map(|c| {
-                    match c {
-                        Data::Float(f) => *f,
-                        Data::Int(i) => *i as f64,
-                        Data::String(s) => s.parse::<f64>().unwrap_or(0.0),
-                        _ => 0.0,
-                    }
+                .map(|c| match c {
+                    Data::Float(f) => *f,
+                    Data::Int(i) => *i as f64,
+                    Data::String(s) => s.parse::<f64>().unwrap_or(0.0),
+                    _ => 0.0,
                 })
                 .unwrap_or(0.0)
         };
 
-        let get_i32 = |col: Option<usize>| -> i32 {
-            get_f64(col) as i32
-        };
+        let get_i32 = |col: Option<usize>| -> i32 { get_f64(col) as i32 };
 
         let employee_no = get_string(col_no).unwrap_or_default();
         if employee_no.trim().is_empty() {
@@ -264,9 +275,22 @@ pub fn export_employee_template(path: &str) -> AppResult<()> {
     worksheet.set_name("员工导入模板")?;
 
     let headers = vec![
-        "工号", "姓名", "部门", "职位", "身份证号", "手机号", "银行账号", "开户行",
-        "入职日期", "基本工资", "岗位工资", "绩效工资", "社保基数", "公积金基数",
-        "专项附加扣除", "备注",
+        "工号",
+        "姓名",
+        "部门",
+        "职位",
+        "身份证号",
+        "手机号",
+        "银行账号",
+        "开户行",
+        "入职日期",
+        "基本工资",
+        "岗位工资",
+        "绩效工资",
+        "社保基数",
+        "公积金基数",
+        "专项附加扣除",
+        "备注",
     ];
     write_header_row(worksheet, &headers, 0)?;
 
@@ -289,7 +313,9 @@ pub fn export_employee_template(path: &str) -> AppResult<()> {
     worksheet.write_number_with_format(1, 14, 0.0, &money_fmt)?;
     worksheet.write_string_with_format(1, 15, "示例行，可删除", &cell_fmt)?;
 
-    let widths = [12, 10, 12, 12, 20, 14, 22, 18, 12, 12, 12, 12, 12, 12, 14, 20];
+    let widths = [
+        12, 10, 12, 12, 20, 14, 22, 18, 12, 12, 12, 12, 12, 12, 14, 20,
+    ];
     for (col, w) in widths.iter().enumerate() {
         worksheet.set_column_width(col as u16, *w)?;
     }
@@ -304,8 +330,17 @@ pub fn export_attendance_template(path: &str) -> AppResult<()> {
     worksheet.set_name("考勤导入模板")?;
 
     let headers = vec![
-        "工号", "姓名", "应出勤天数", "实出勤天数", "迟到次数", "早退次数",
-        "事假天数", "病假天数", "旷工天数", "加班小时", "备注",
+        "工号",
+        "姓名",
+        "应出勤天数",
+        "实出勤天数",
+        "迟到次数",
+        "早退次数",
+        "事假天数",
+        "病假天数",
+        "旷工天数",
+        "加班小时",
+        "备注",
     ];
     write_header_row(worksheet, &headers, 0)?;
 
@@ -343,10 +378,26 @@ pub fn export_salary_excel(results: &[SalaryResult], path: &str) -> AppResult<()
     worksheet.set_name("工资明细")?;
 
     let headers = vec![
-        "序号", "工号", "姓名", "部门", "基本工资", "岗位工资", "绩效工资",
-        "加班工资", "餐补", "交通补助", "其他补助", "应发合计",
-        "社保个人", "公积金个人", "考勤扣款", "个人所得税", "其他扣款", "实发工资",
-        "状态", "备注",
+        "序号",
+        "工号",
+        "姓名",
+        "部门",
+        "基本工资",
+        "岗位工资",
+        "绩效工资",
+        "加班工资",
+        "餐补",
+        "交通补助",
+        "其他补助",
+        "应发合计",
+        "社保个人",
+        "公积金个人",
+        "考勤扣款",
+        "个人所得税",
+        "其他扣款",
+        "实发工资",
+        "状态",
+        "备注",
     ];
 
     write_header_row(worksheet, &headers, 0)?;
@@ -359,7 +410,12 @@ pub fn export_salary_excel(results: &[SalaryResult], path: &str) -> AppResult<()
         worksheet.write_number_with_format(row, 0, (i + 1) as f64, &cell_fmt)?;
         worksheet.write_string_with_format(row, 1, &r.employee_no, &cell_fmt)?;
         worksheet.write_string_with_format(row, 2, r.name.as_deref().unwrap_or(""), &cell_fmt)?;
-        worksheet.write_string_with_format(row, 3, r.department.as_deref().unwrap_or(""), &cell_fmt)?;
+        worksheet.write_string_with_format(
+            row,
+            3,
+            r.department.as_deref().unwrap_or(""),
+            &cell_fmt,
+        )?;
         worksheet.write_number_with_format(row, 4, r.base_salary, &money_fmt)?;
         worksheet.write_number_with_format(row, 5, r.position_salary, &money_fmt)?;
         worksheet.write_number_with_format(row, 6, r.performance_salary, &money_fmt)?;
@@ -375,41 +431,56 @@ pub fn export_salary_excel(results: &[SalaryResult], path: &str) -> AppResult<()
         worksheet.write_number_with_format(row, 16, r.other_deduction, &money_fmt)?;
         worksheet.write_number_with_format(row, 17, r.net_salary, &money_fmt)?;
         worksheet.write_string_with_format(row, 18, &r.status, &cell_fmt)?;
-        worksheet.write_string_with_format(row, 19, r.remark.as_deref().unwrap_or(""), &cell_fmt)?;
+        worksheet.write_string_with_format(
+            row,
+            19,
+            r.remark.as_deref().unwrap_or(""),
+            &cell_fmt,
+        )?;
     }
 
     // Summary row
     if !results.is_empty() {
         let summary_row = (results.len() + 1) as u32;
-        let bold_fmt = Format::new().set_bold().set_border(rust_xlsxwriter::FormatBorder::Thin);
+        let bold_fmt = Format::new()
+            .set_bold()
+            .set_border(rust_xlsxwriter::FormatBorder::Thin);
         worksheet.write_string_with_format(summary_row, 0, "合计", &bold_fmt)?;
         let sum_col = |col: u16| -> f64 {
-            results.iter().map(|r| match col {
-                4 => r.base_salary,
-                5 => r.position_salary,
-                6 => r.performance_salary,
-                7 => r.overtime_salary,
-                8 => r.meal_allowance,
-                9 => r.transport_allowance,
-                10 => r.other_allowance,
-                11 => r.gross_salary,
-                12 => r.social_security_personal,
-                13 => r.housing_fund_personal,
-                14 => r.attendance_deduction,
-                15 => r.tax_amount,
-                16 => r.other_deduction,
-                17 => r.net_salary,
-                _ => 0.0,
-            }).sum()
+            results
+                .iter()
+                .map(|r| match col {
+                    4 => r.base_salary,
+                    5 => r.position_salary,
+                    6 => r.performance_salary,
+                    7 => r.overtime_salary,
+                    8 => r.meal_allowance,
+                    9 => r.transport_allowance,
+                    10 => r.other_allowance,
+                    11 => r.gross_salary,
+                    12 => r.social_security_personal,
+                    13 => r.housing_fund_personal,
+                    14 => r.attendance_deduction,
+                    15 => r.tax_amount,
+                    16 => r.other_deduction,
+                    17 => r.net_salary,
+                    _ => 0.0,
+                })
+                .sum()
         };
         for col in [4u16, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17] {
-            let sum_money_fmt = Format::new().set_bold().set_border(rust_xlsxwriter::FormatBorder::Thin).set_num_format("#,##0.00");
+            let sum_money_fmt = Format::new()
+                .set_bold()
+                .set_border(rust_xlsxwriter::FormatBorder::Thin)
+                .set_num_format("#,##0.00");
             worksheet.write_number_with_format(summary_row, col, sum_col(col), &sum_money_fmt)?;
         }
     }
 
     // Set column widths
-    let widths = [6, 12, 10, 12, 12, 12, 12, 12, 10, 10, 10, 12, 12, 12, 12, 12, 12, 12, 8, 20];
+    let widths = [
+        6, 12, 10, 12, 12, 12, 12, 12, 10, 10, 10, 12, 12, 12, 12, 12, 12, 12, 8, 20,
+    ];
     for (col, w) in widths.iter().enumerate() {
         worksheet.set_column_width(col as u16, *w)?;
     }
@@ -426,7 +497,13 @@ pub fn export_bank_payment(results: &[SalaryResult], path: &str) -> AppResult<()
     worksheet.set_name("银行代发")?;
 
     let headers = vec![
-        "序号", "姓名", "银行账号", "开户行", "实发金额", "工号", "备注",
+        "序号",
+        "姓名",
+        "银行账号",
+        "开户行",
+        "实发金额",
+        "工号",
+        "备注",
     ];
 
     write_header_row(worksheet, &headers, 0)?;
@@ -469,8 +546,7 @@ pub fn export_salary_slip(result: &SalaryResult, path: &str) -> AppResult<()> {
         .set_bold()
         .set_border(rust_xlsxwriter::FormatBorder::Thin)
         .set_background_color("#D9E2F3");
-    let value_fmt = Format::new()
-        .set_border(rust_xlsxwriter::FormatBorder::Thin);
+    let value_fmt = Format::new().set_border(rust_xlsxwriter::FormatBorder::Thin);
     let money_fmt = Format::new()
         .set_border(rust_xlsxwriter::FormatBorder::Thin)
         .set_num_format("#,##0.00");
@@ -488,27 +564,111 @@ pub fn export_salary_slip(result: &SalaryResult, path: &str) -> AppResult<()> {
     }
 
     let rows = vec![
-        SlipRow { label: "工号", value: result.employee_no.clone(), is_money: false },
-        SlipRow { label: "姓名", value: name_str.to_string(), is_money: false },
-        SlipRow { label: "部门", value: dept_str.to_string(), is_money: false },
-        SlipRow { label: "", value: String::new(), is_money: false },
-        SlipRow { label: "基本工资", value: format!("{:.2}", result.base_salary), is_money: true },
-        SlipRow { label: "岗位工资", value: format!("{:.2}", result.position_salary), is_money: true },
-        SlipRow { label: "绩效工资", value: format!("{:.2}", result.performance_salary), is_money: true },
-        SlipRow { label: "加班工资", value: format!("{:.2}", result.overtime_salary), is_money: true },
-        SlipRow { label: "餐补", value: format!("{:.2}", result.meal_allowance), is_money: true },
-        SlipRow { label: "交通补助", value: format!("{:.2}", result.transport_allowance), is_money: true },
-        SlipRow { label: "其他补助", value: format!("{:.2}", result.other_allowance), is_money: true },
-        SlipRow { label: "", value: String::new(), is_money: false },
-        SlipRow { label: "应发合计", value: format!("{:.2}", result.gross_salary), is_money: true },
-        SlipRow { label: "", value: String::new(), is_money: false },
-        SlipRow { label: "社保个人扣款", value: format!("{:.2}", result.social_security_personal), is_money: true },
-        SlipRow { label: "公积金个人扣款", value: format!("{:.2}", result.housing_fund_personal), is_money: true },
-        SlipRow { label: "考勤扣款", value: format!("{:.2}", result.attendance_deduction), is_money: true },
-        SlipRow { label: "个人所得税", value: format!("{:.2}", result.tax_amount), is_money: true },
-        SlipRow { label: "其他扣款", value: format!("{:.2}", result.other_deduction), is_money: true },
-        SlipRow { label: "", value: String::new(), is_money: false },
-        SlipRow { label: "实发工资", value: format!("{:.2}", result.net_salary), is_money: true },
+        SlipRow {
+            label: "工号",
+            value: result.employee_no.clone(),
+            is_money: false,
+        },
+        SlipRow {
+            label: "姓名",
+            value: name_str.to_string(),
+            is_money: false,
+        },
+        SlipRow {
+            label: "部门",
+            value: dept_str.to_string(),
+            is_money: false,
+        },
+        SlipRow {
+            label: "",
+            value: String::new(),
+            is_money: false,
+        },
+        SlipRow {
+            label: "基本工资",
+            value: format!("{:.2}", result.base_salary),
+            is_money: true,
+        },
+        SlipRow {
+            label: "岗位工资",
+            value: format!("{:.2}", result.position_salary),
+            is_money: true,
+        },
+        SlipRow {
+            label: "绩效工资",
+            value: format!("{:.2}", result.performance_salary),
+            is_money: true,
+        },
+        SlipRow {
+            label: "加班工资",
+            value: format!("{:.2}", result.overtime_salary),
+            is_money: true,
+        },
+        SlipRow {
+            label: "餐补",
+            value: format!("{:.2}", result.meal_allowance),
+            is_money: true,
+        },
+        SlipRow {
+            label: "交通补助",
+            value: format!("{:.2}", result.transport_allowance),
+            is_money: true,
+        },
+        SlipRow {
+            label: "其他补助",
+            value: format!("{:.2}", result.other_allowance),
+            is_money: true,
+        },
+        SlipRow {
+            label: "",
+            value: String::new(),
+            is_money: false,
+        },
+        SlipRow {
+            label: "应发合计",
+            value: format!("{:.2}", result.gross_salary),
+            is_money: true,
+        },
+        SlipRow {
+            label: "",
+            value: String::new(),
+            is_money: false,
+        },
+        SlipRow {
+            label: "社保个人扣款",
+            value: format!("{:.2}", result.social_security_personal),
+            is_money: true,
+        },
+        SlipRow {
+            label: "公积金个人扣款",
+            value: format!("{:.2}", result.housing_fund_personal),
+            is_money: true,
+        },
+        SlipRow {
+            label: "考勤扣款",
+            value: format!("{:.2}", result.attendance_deduction),
+            is_money: true,
+        },
+        SlipRow {
+            label: "个人所得税",
+            value: format!("{:.2}", result.tax_amount),
+            is_money: true,
+        },
+        SlipRow {
+            label: "其他扣款",
+            value: format!("{:.2}", result.other_deduction),
+            is_money: true,
+        },
+        SlipRow {
+            label: "",
+            value: String::new(),
+            is_money: false,
+        },
+        SlipRow {
+            label: "实发工资",
+            value: format!("{:.2}", result.net_salary),
+            is_money: true,
+        },
     ];
 
     for (i, row_data) in rows.iter().enumerate() {
@@ -540,9 +700,20 @@ pub fn export_attendance_summary(records: &[AttendanceRecord], path: &str) -> Ap
     worksheet.set_name("考勤汇总")?;
 
     let headers = vec![
-        "序号", "工号", "姓名", "月份", "应出勤天数", "实出勤天数",
-        "迟到次数", "早退次数", "事假天数", "病假天数", "旷工天数",
-        "加班小时", "数据来源", "备注",
+        "序号",
+        "工号",
+        "姓名",
+        "月份",
+        "应出勤天数",
+        "实出勤天数",
+        "迟到次数",
+        "早退次数",
+        "事假天数",
+        "病假天数",
+        "旷工天数",
+        "加班小时",
+        "数据来源",
+        "备注",
     ];
 
     write_header_row(worksheet, &headers, 0)?;
@@ -567,8 +738,18 @@ pub fn export_attendance_summary(records: &[AttendanceRecord], path: &str) -> Ap
         worksheet.write_number_with_format(row, 9, r.sick_leave_days, &num_fmt)?;
         worksheet.write_number_with_format(row, 10, r.absent_days, &num_fmt)?;
         worksheet.write_number_with_format(row, 11, r.overtime_hours, &num_fmt)?;
-        worksheet.write_string_with_format(row, 12, r.source_type.as_deref().unwrap_or(""), &cell_fmt)?;
-        worksheet.write_string_with_format(row, 13, r.remark.as_deref().unwrap_or(""), &cell_fmt)?;
+        worksheet.write_string_with_format(
+            row,
+            12,
+            r.source_type.as_deref().unwrap_or(""),
+            &cell_fmt,
+        )?;
+        worksheet.write_string_with_format(
+            row,
+            13,
+            r.remark.as_deref().unwrap_or(""),
+            &cell_fmt,
+        )?;
     }
 
     let widths = [6, 12, 10, 10, 12, 12, 10, 10, 10, 10, 10, 10, 12, 20];
@@ -585,10 +766,10 @@ pub fn export_attendance_summary(records: &[AttendanceRecord], path: &str) -> Ap
 /// 2026 Chinese public holidays (month, day ranges)
 pub const HOLIDAYS_2026: &[(u32, u32, u32, &str)] = &[
     (1, 1, 1, "元旦"),
-    (2, 17, 19, "春节"),  // Spring Festival approx
+    (2, 17, 19, "春节"), // Spring Festival approx
     (4, 4, 6, "清明"),
     (5, 1, 3, "劳动节"),
-    (5, 31, 6, "端午"),   // spans month boundary
+    (5, 31, 6, "端午"), // spans month boundary
     (9, 25, 27, "中秋"),
     (10, 1, 7, "国庆"),
 ];
@@ -616,16 +797,31 @@ pub fn export_punch_card_template(
     let mut workbook = Workbook::new();
     let ws = workbook.add_worksheet();
 
-    let title_fmt = Format::new().set_bold().set_font_size(14).set_align(rust_xlsxwriter::FormatAlign::Center);
+    let title_fmt = Format::new()
+        .set_bold()
+        .set_font_size(14)
+        .set_align(rust_xlsxwriter::FormatAlign::Center);
     let info_fmt = Format::new().set_font_size(10);
-    let header_fmt = Format::new().set_bold().set_font_size(9).set_background_color("D9E1F2").set_align(rust_xlsxwriter::FormatAlign::Center);
-    let cell_fmt = Format::new().set_font_size(9).set_align(rust_xlsxwriter::FormatAlign::Center);
-    let holiday_fmt = Format::new().set_font_size(7).set_font_color("FF0000").set_align(rust_xlsxwriter::FormatAlign::Center);
+    let header_fmt = Format::new()
+        .set_bold()
+        .set_font_size(9)
+        .set_background_color("D9E1F2")
+        .set_align(rust_xlsxwriter::FormatAlign::Center);
+    let cell_fmt = Format::new()
+        .set_font_size(9)
+        .set_align(rust_xlsxwriter::FormatAlign::Center);
+    let holiday_fmt = Format::new()
+        .set_font_size(7)
+        .set_font_color("FF0000")
+        .set_align(rust_xlsxwriter::FormatAlign::Center);
 
     let days_in_month = get_days_in_month(month);
     let month_parts: Vec<&str> = month.split('-').collect();
     let mon: u32 = month_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
-    let year: u32 = month_parts.first().and_then(|s| s.parse().ok()).unwrap_or(2026);
+    let year: u32 = month_parts
+        .first()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2026);
 
     // Display month name (e.g., "2026年5月")
     let month_label = format!("{}年{}月", year, mon);
@@ -638,7 +834,14 @@ pub fn export_punch_card_template(
     let remark_col: u16 = summary_col_day + 3;
 
     // Row 0: Title (merged across all columns)
-    ws.merge_range(0, 0, 0, remark_col, &format!("{}员工考勤汇总表", month_label), &title_fmt)?;
+    ws.merge_range(
+        0,
+        0,
+        0,
+        remark_col,
+        &format!("{}员工考勤汇总表", month_label),
+        &title_fmt,
+    )?;
 
     // Row 1: Department info
     ws.write_string_with_format(1, 0, &format!("部门: {}", _department), &info_fmt)?;
@@ -653,9 +856,30 @@ pub fn export_punch_card_template(
     }
 
     // Summary headers (merged row 2-3)
-    ws.merge_range(2, summary_col_day, 3, summary_col_day, "白班合计", &header_fmt)?;
-    ws.merge_range(2, summary_col_night, 3, summary_col_night, "夜班合计", &header_fmt)?;
-    ws.merge_range(2, summary_col_total, 3, summary_col_total, "合计", &header_fmt)?;
+    ws.merge_range(
+        2,
+        summary_col_day,
+        3,
+        summary_col_day,
+        "白班合计",
+        &header_fmt,
+    )?;
+    ws.merge_range(
+        2,
+        summary_col_night,
+        3,
+        summary_col_night,
+        "夜班合计",
+        &header_fmt,
+    )?;
+    ws.merge_range(
+        2,
+        summary_col_total,
+        3,
+        summary_col_total,
+        "合计",
+        &header_fmt,
+    )?;
     ws.merge_range(2, remark_col, 3, remark_col, "备注", &header_fmt)?;
 
     // Row 3: Shift sub-headers (白/夜 per day)
@@ -693,11 +917,23 @@ pub fn export_punch_card_template(
         let night_col_letter_start = col_letter(day_col_start + 1);
         let night_col_letter_end = col_letter(day_col_start + ((days_in_month - 1) * 2 + 1) as u16);
 
-        ws.write_string_with_format(day_row, summary_col_day, &format!("=COUNTIF({day_col_letter_start}{day_row}:{day_col_letter_end}{day_row},\"√\")"), &cell_fmt)?;
+        ws.write_string_with_format(
+            day_row,
+            summary_col_day,
+            &format!(
+                "=COUNTIF({day_col_letter_start}{day_row}:{day_col_letter_end}{day_row},\"√\")"
+            ),
+            &cell_fmt,
+        )?;
         ws.write_string_with_format(night_row, summary_col_night, &format!("=COUNTIF({night_col_letter_start}{night_row}:{night_col_letter_end}{night_row},\"√\")"), &cell_fmt)?;
         let day_total_col = col_letter(summary_col_day);
         let night_total_col = col_letter(summary_col_night);
-        ws.write_string_with_format(day_row, summary_col_total, &format!("={day_total_col}{day_row}+{night_total_col}{night_row}"), &cell_fmt)?;
+        ws.write_string_with_format(
+            day_row,
+            summary_col_total,
+            &format!("={day_total_col}{day_row}+{night_total_col}{night_row}"),
+            &cell_fmt,
+        )?;
 
         // Remark (merged 2 rows)
         ws.merge_range(day_row, remark_col, night_row, remark_col, "", &cell_fmt)?;
@@ -706,7 +942,12 @@ pub fn export_punch_card_template(
     // Bottom legend row
     let legend_row = (4 + employees.len() * 2 + 1) as u32;
     ws.write_string_with_format(legend_row, 0, "标注:", &info_fmt)?;
-    ws.write_string_with_format(legend_row, 1, "√=出勤  休=公休  S(+时数)=事假  病=病假", &info_fmt)?;
+    ws.write_string_with_format(
+        legend_row,
+        1,
+        "√=出勤  休=公休  S(+时数)=事假  病=病假",
+        &info_fmt,
+    )?;
 
     // Signature area
     let sign_row = legend_row + 1;
@@ -715,8 +956,8 @@ pub fn export_punch_card_template(
     ws.write_string_with_format(sign_row, 10, "日期:", &info_fmt)?;
 
     // Column widths
-    ws.set_column_width(0, 5)?;    // 序号
-    ws.set_column_width(1, 10)?;   // 姓名
+    ws.set_column_width(0, 5)?; // 序号
+    ws.set_column_width(1, 10)?; // 姓名
     for day in 0..days_in_month * 2 {
         ws.set_column_width(day_col_start + day as u16, 4)?;
     }
@@ -738,7 +979,9 @@ fn col_letter(col: u16) -> String {
     let mut c = col;
     loop {
         result.insert(0, (b'A' + (c % 26) as u8) as char);
-        if c < 26 { break; }
+        if c < 26 {
+            break;
+        }
         c = c / 26 - 1;
     }
     result
@@ -746,13 +989,21 @@ fn col_letter(col: u16) -> String {
 
 fn get_days_in_month(month: &str) -> u32 {
     let parts: Vec<&str> = month.split('-').collect();
-    if parts.len() != 2 { return 31; }
+    if parts.len() != 2 {
+        return 31;
+    }
     let year: u32 = parts[0].parse().unwrap_or(2026);
     let mon: u32 = parts[1].parse().unwrap_or(1);
     match mon {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
-        2 => if (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0) { 29 } else { 28 },
+        2 => {
+            if (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0) {
+                29
+            } else {
+                28
+            }
+        }
         _ => 31,
     }
 }
@@ -772,10 +1023,23 @@ pub fn export_invoice_list(invoices: &[Invoice], path: &str) -> AppResult<bool> 
         .set_border(FormatBorder::Thin);
 
     let headers = [
-        "归属月份", "报销人ID", "发票类型", "发票代码", "发票号码",
-        "开票日期", "金额", "税额", "价税合计",
-        "销售方", "销售方税号", "购买方", "购买方税号",
-        "费用类型", "状态", "备注", "录入时间",
+        "归属月份",
+        "报销人ID",
+        "发票类型",
+        "发票代码",
+        "发票号码",
+        "开票日期",
+        "金额",
+        "税额",
+        "价税合计",
+        "销售方",
+        "销售方税号",
+        "购买方",
+        "购买方税号",
+        "费用类型",
+        "状态",
+        "备注",
+        "录入时间",
     ];
     for (col, h) in headers.iter().enumerate() {
         worksheet.write_with_format(0, col as u16, *h, &header_fmt)?;
