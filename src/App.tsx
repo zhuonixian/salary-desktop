@@ -13,6 +13,9 @@ import {
   MenuUnfoldOutlined,
   FormOutlined,
   FileTextOutlined,
+  AuditOutlined,
+  CheckSquareOutlined,
+  WalletOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import type { Dayjs } from 'dayjs';
@@ -26,6 +29,9 @@ import SalaryRules from '@/pages/SalaryRules';
 import SalaryCalculate from '@/pages/SalaryCalculate';
 import ExportCenter from '@/pages/ExportCenter';
 import PunchCard from '@/pages/PunchCard';
+import MonthClose from '@/pages/MonthClose';
+import OperationLogs from '@/pages/OperationLogs';
+import Reimbursements from '@/pages/Reimbursements';
 
 const { Sider, Header, Content } = Layout;
 
@@ -36,9 +42,12 @@ const menuItems = [
   { key: '/punch-card', label: '打卡表管理', icon: <FormOutlined /> },
   { key: '/ocr', label: 'OCR识别中心', icon: <ScanOutlined /> },
   { key: '/invoices', label: '发票管理', icon: <FileTextOutlined /> },
+  { key: '/reimbursements', label: '报销管理', icon: <WalletOutlined /> },
+  { key: '/month-close', label: '月结工作台', icon: <CheckSquareOutlined /> },
   { key: '/rules', label: '规则配置', icon: <SettingOutlined /> },
   { key: '/salary', label: '工资计算', icon: <CalculatorOutlined /> },
   { key: '/export', label: '导出中心', icon: <ExportOutlined /> },
+  { key: '/logs', label: '操作日志', icon: <AuditOutlined /> },
 ];
 
 const AppLayout: React.FC = () => {
@@ -100,9 +109,12 @@ const AppLayout: React.FC = () => {
             <Route path="/punch-card" element={<PunchCard />} />
             <Route path="/ocr" element={<OcrCenter />} />
             <Route path="/invoices" element={<Invoices />} />
+            <Route path="/reimbursements" element={<Reimbursements />} />
+            <Route path="/month-close" element={<MonthClose />} />
             <Route path="/rules" element={<SalaryRules />} />
             <Route path="/salary" element={<SalaryCalculate />} />
             <Route path="/export" element={<ExportCenter />} />
+            <Route path="/logs" element={<OperationLogs />} />
           </Routes>
         </Content>
       </div>

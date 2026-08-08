@@ -188,3 +188,36 @@ INSERT OR IGNORE INTO invoice_expense_types (code, name, sort_order) VALUES
   ('accommodation', '住宿费', 5),
   ('communication', '通讯费', 6),
   ('other', '其他', 99);
+
+-- 报销单主表
+CREATE TABLE IF NOT EXISTS reimbursement_claims (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  claim_no TEXT UNIQUE NOT NULL,
+  employee_id INTEGER,
+  belong_month TEXT NOT NULL,
+  title TEXT NOT NULL,
+  total_amount REAL DEFAULT 0,
+  invoice_count INTEGER DEFAULT 0,
+  status TEXT DEFAULT 'draft',
+  payment_status TEXT DEFAULT 'unpaid',
+  payment_date TEXT,
+  remark TEXT,
+  created_at TEXT,
+  updated_at TEXT,
+  FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE SET NULL
+);
+
+-- 报销单与发票关联
+CREATE TABLE IF NOT EXISTS reimbursement_claim_invoices (
+  claim_id INTEGER NOT NULL,
+  invoice_id INTEGER NOT NULL,
+  created_at TEXT,
+  PRIMARY KEY (claim_id, invoice_id),
+  FOREIGN KEY (claim_id) REFERENCES reimbursement_claims(id) ON DELETE CASCADE,
+  FOREIGN KEY (invoice_id) REFERENCES invoices(id) ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS idx_reimbursement_claims_month ON reimbursement_claims(belong_month);
+CREATE INDEX IF NOT EXISTS idx_reimbursement_claims_employee ON reimbursement_claims(employee_id);
+CREATE INDEX IF NOT EXISTS idx_reimbursement_claims_status ON reimbursement_claims(status, payment_status);
+CREATE INDEX IF NOT EXISTS idx_reimbursement_claim_invoices_invoice ON reimbursement_claim_invoices(invoice_id);

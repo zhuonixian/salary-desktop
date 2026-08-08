@@ -214,11 +214,58 @@ export interface DashboardSummary {
 
 export interface OperationLog {
   id: number;
-  operation: string;
-  module: string;
-  detail: string;
-  operator: string;
+  operation_type: string;
+  description?: string;
+  operator?: string;
+  detail?: string;
   created_at: string;
+}
+
+export interface OperationLogQuery {
+  operation_type?: string;
+  keyword?: string;
+  start_date?: string;
+  end_date?: string;
+  limit?: number;
+}
+
+// ==================== 月结工作台 ====================
+
+export interface MonthCloseSummary {
+  month: string;
+  active_employee_count: number;
+  attendance_count: number;
+  missing_attendance_count: number;
+  abnormal_attendance_count: number;
+  salary_count: number;
+  reviewed_count: number;
+  locked_count: number;
+  missing_bank_count: number;
+  invoice_count: number;
+  uncategorized_invoice_count: number;
+  reimbursement_count: number;
+  pending_reimbursement_count: number;
+  unpaid_reimbursement_count: number;
+  total_salary_cost: number;
+  total_invoice_amount: number;
+  approved_reimbursement_amount: number;
+  paid_reimbursement_amount: number;
+}
+
+export type MonthCloseCheckStatus = 'ok' | 'warning' | 'blocking';
+
+export interface MonthCloseCheckItem {
+  key: string;
+  title: string;
+  status: MonthCloseCheckStatus;
+  count: number;
+  description: string;
+  action_route?: string;
+}
+
+export interface MonthCloseWorkbench {
+  summary: MonthCloseSummary;
+  checks: MonthCloseCheckItem[];
 }
 
 // ==================== 发票相关 ====================
@@ -315,4 +362,57 @@ export interface InvoiceQuery {
   invoice_type?: string;
   keyword?: string;
   status?: InvoiceStatus;
+}
+
+// ==================== 报销相关 ====================
+
+export type ReimbursementStatus = 'draft' | 'submitted' | 'approved' | 'rejected' | 'void';
+export type PaymentStatus = 'unpaid' | 'paid';
+
+export interface ReimbursementClaim {
+  id: number;
+  claim_no: string;
+  employee_id?: number;
+  employee_name?: string;
+  department?: string;
+  belong_month: string;
+  title: string;
+  total_amount: number;
+  invoice_count: number;
+  status: ReimbursementStatus;
+  payment_status: PaymentStatus;
+  payment_date?: string;
+  remark?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface ReimbursementClaimInput {
+  id?: number;
+  employee_id?: number;
+  belong_month: string;
+  title: string;
+  invoice_ids: number[];
+  status?: ReimbursementStatus;
+  payment_status?: PaymentStatus;
+  payment_date?: string;
+  remark?: string;
+}
+
+export interface ReimbursementQuery {
+  belong_month?: string;
+  employee_id?: number;
+  status?: ReimbursementStatus;
+  payment_status?: PaymentStatus;
+  keyword?: string;
+}
+
+export interface ReimbursementInvoice {
+  claim_id: number;
+  invoice_id: number;
+  invoice_number?: string;
+  seller_name?: string;
+  expense_type_code?: string;
+  total_amount: number;
+  issue_date?: string;
 }

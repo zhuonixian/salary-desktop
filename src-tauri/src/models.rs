@@ -235,6 +235,55 @@ pub struct OperationLog {
     pub created_at: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OperationLogQuery {
+    pub operation_type: Option<String>,
+    pub keyword: Option<String>,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub limit: Option<i64>,
+}
+
+// ==================== Month Close ====================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonthCloseSummary {
+    pub month: String,
+    pub active_employee_count: i32,
+    pub attendance_count: i32,
+    pub missing_attendance_count: i32,
+    pub abnormal_attendance_count: i32,
+    pub salary_count: i32,
+    pub reviewed_count: i32,
+    pub locked_count: i32,
+    pub missing_bank_count: i32,
+    pub invoice_count: i32,
+    pub uncategorized_invoice_count: i32,
+    pub reimbursement_count: i32,
+    pub pending_reimbursement_count: i32,
+    pub unpaid_reimbursement_count: i32,
+    pub total_salary_cost: f64,
+    pub total_invoice_amount: f64,
+    pub approved_reimbursement_amount: f64,
+    pub paid_reimbursement_amount: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonthCloseCheckItem {
+    pub key: String,
+    pub title: String,
+    pub status: String,
+    pub count: i32,
+    pub description: String,
+    pub action_route: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonthCloseWorkbench {
+    pub summary: MonthCloseSummary,
+    pub checks: Vec<MonthCloseCheckItem>,
+}
+
 // ==================== Invoice ====================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -333,4 +382,58 @@ pub struct InvoiceQuery {
     pub invoice_type: Option<String>,
     pub keyword: Option<String>,
     pub status: Option<String>,
+}
+
+// ==================== Reimbursement ====================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReimbursementClaim {
+    pub id: i64,
+    pub claim_no: String,
+    pub employee_id: Option<i64>,
+    pub employee_name: Option<String>,
+    pub department: Option<String>,
+    pub belong_month: String,
+    pub title: String,
+    pub total_amount: f64,
+    pub invoice_count: i32,
+    pub status: String,
+    pub payment_status: String,
+    pub payment_date: Option<String>,
+    pub remark: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReimbursementClaimInput {
+    pub id: Option<i64>,
+    pub employee_id: Option<i64>,
+    pub belong_month: String,
+    pub title: String,
+    pub invoice_ids: Vec<i64>,
+    pub status: Option<String>,
+    pub payment_status: Option<String>,
+    pub payment_date: Option<String>,
+    pub remark: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ReimbursementQuery {
+    pub belong_month: Option<String>,
+    pub employee_id: Option<i64>,
+    pub status: Option<String>,
+    pub payment_status: Option<String>,
+    pub keyword: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReimbursementInvoice {
+    pub claim_id: i64,
+    pub invoice_id: i64,
+    pub invoice_number: Option<String>,
+    pub seller_name: Option<String>,
+    pub expense_type_code: Option<String>,
+    pub total_amount: f64,
+    pub issue_date: Option<String>,
 }

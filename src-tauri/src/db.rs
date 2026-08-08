@@ -194,6 +194,37 @@ fn create_tables(conn: &Connection) -> AppResult<()> {
         CREATE INDEX IF NOT EXISTS idx_invoices_employee ON invoices(employee_id);
         CREATE INDEX IF NOT EXISTS idx_invoices_month ON invoices(belong_month);
         CREATE INDEX IF NOT EXISTS idx_invoices_expense_type ON invoices(expense_type_code);
+
+        CREATE TABLE IF NOT EXISTS reimbursement_claims (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            claim_no TEXT UNIQUE NOT NULL,
+            employee_id INTEGER,
+            belong_month TEXT NOT NULL,
+            title TEXT NOT NULL,
+            total_amount REAL DEFAULT 0,
+            invoice_count INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'draft',
+            payment_status TEXT DEFAULT 'unpaid',
+            payment_date TEXT,
+            remark TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS reimbursement_claim_invoices (
+            claim_id INTEGER NOT NULL,
+            invoice_id INTEGER NOT NULL,
+            created_at TEXT,
+            PRIMARY KEY (claim_id, invoice_id),
+            FOREIGN KEY (claim_id) REFERENCES reimbursement_claims(id) ON DELETE CASCADE,
+            FOREIGN KEY (invoice_id) REFERENCES invoices(id) ON DELETE RESTRICT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_reimbursement_claims_month ON reimbursement_claims(belong_month);
+        CREATE INDEX IF NOT EXISTS idx_reimbursement_claims_employee ON reimbursement_claims(employee_id);
+        CREATE INDEX IF NOT EXISTS idx_reimbursement_claims_status ON reimbursement_claims(status, payment_status);
+        CREATE INDEX IF NOT EXISTS idx_reimbursement_claim_invoices_invoice ON reimbursement_claim_invoices(invoice_id);
         ",
     )?;
 
@@ -917,6 +948,63 @@ pub fn log_operation(
     Ok(())
 }
 
+pub fn query_operation_logs(
+    conn: &Connection,
+    q: &OperationLogQuery,
+) -> AppResult<Vec<OperationLog>> {
+    let mut where_clauses: Vec<String> = Vec::new();
+    let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let mut idx = 1;
+
+    if let Some(op_type) = q.operation_type.as_ref().filter(|v| !v.trim().is_empty()) {
+        where_clauses.push(format!("operation_type = ?{idx}"));
+        params_vec.push(Box::new(op_type.clone()));
+        idx += 1;
+    }
+    if let Some(keyword) = q.keyword.as_ref().filter(|v| !v.trim().is_empty()) {
+        where_clauses.push(format!(
+            "(operation_type LIKE ?{idx} OR description LIKE ?{idx} OR detail LIKE ?{idx} OR operator LIKE ?{idx})"
+        ));
+        params_vec.push(Box::new(format!("%{keyword}%")));
+        idx += 1;
+    }
+    if let Some(start_date) = q.start_date.as_ref().filter(|v| !v.trim().is_empty()) {
+        where_clauses.push(format!("created_at >= ?{idx}"));
+        params_vec.push(Box::new(start_date.clone()));
+        idx += 1;
+    }
+    if let Some(end_date) = q.end_date.as_ref().filter(|v| !v.trim().is_empty()) {
+        where_clauses.push(format!("created_at <= ?{idx}"));
+        params_vec.push(Box::new(end_date.clone()));
+    }
+
+    let where_sql = if where_clauses.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", where_clauses.join(" AND "))
+    };
+    let limit = q.limit.unwrap_or(200).clamp(20, 1000);
+    let sql = format!(
+        "SELECT id, operation_type, description, operator, detail, created_at \
+         FROM operation_logs {where_sql} ORDER BY id DESC LIMIT {limit}"
+    );
+
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+        params_vec.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_refs.as_slice(), |row| {
+        Ok(OperationLog {
+            id: row.get(0)?,
+            operation_type: row.get(1)?,
+            description: row.get(2)?,
+            operator: row.get(3)?,
+            detail: row.get(4)?,
+            created_at: row.get(5)?,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
 // ==================== Dashboard ====================
 
 pub fn get_dashboard_summary(conn: &Connection, month: &str) -> AppResult<DashboardSummary> {
@@ -989,6 +1077,292 @@ pub fn get_dashboard_summary(conn: &Connection, month: &str) -> AppResult<Dashbo
         total_tax,
         attendance_count: attendance_count as i32,
     })
+}
+
+pub fn get_month_close_workbench(conn: &Connection, month: &str) -> AppResult<MonthCloseWorkbench> {
+    let active_employee_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM employees WHERE status = 'active'",
+        [],
+        |row| row.get(0),
+    )?;
+    let attendance_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM attendance_records WHERE salary_month = ?1",
+        params![month],
+        |row| row.get(0),
+    )?;
+    let missing_attendance_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM employees e
+         WHERE e.status = 'active'
+           AND NOT EXISTS (
+             SELECT 1 FROM attendance_records a
+             WHERE a.salary_month = ?1 AND a.employee_no = e.employee_no
+           )",
+        params![month],
+        |row| row.get(0),
+    )?;
+    let abnormal_attendance_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM attendance_records
+         WHERE salary_month = ?1
+           AND (actual_days < expected_days OR late_count > 0 OR early_leave_count > 0 OR absent_days > 0)",
+        params![month],
+        |row| row.get(0),
+    )?;
+    let salary_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM salary_monthly_results WHERE salary_month = ?1",
+        params![month],
+        |row| row.get(0),
+    )?;
+    let reviewed_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM salary_monthly_results
+         WHERE salary_month = ?1 AND (status IN ('reviewed', 'locked') OR locked = 1)",
+        params![month],
+        |row| row.get(0),
+    )?;
+    let locked_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM salary_monthly_results WHERE salary_month = ?1 AND locked = 1",
+        params![month],
+        |row| row.get(0),
+    )?;
+    let missing_bank_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM employees
+         WHERE status = 'active'
+           AND (bank_account IS NULL OR TRIM(bank_account) = '' OR bank_name IS NULL OR TRIM(bank_name) = '')",
+        [],
+        |row| row.get(0),
+    )?;
+    let invoice_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM invoices WHERE belong_month = ?1 AND status != 'void'",
+        params![month],
+        |row| row.get(0),
+    )?;
+    let uncategorized_invoice_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM invoices
+         WHERE belong_month = ?1 AND status != 'void'
+           AND (employee_id IS NULL OR expense_type_code IS NULL OR TRIM(expense_type_code) = '')",
+        params![month],
+        |row| row.get(0),
+    )?;
+    let reimbursement_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM reimbursement_claims WHERE belong_month = ?1 AND status != 'void'",
+        params![month],
+        |row| row.get(0),
+    )?;
+    let pending_reimbursement_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM reimbursement_claims
+         WHERE belong_month = ?1 AND status NOT IN ('approved', 'rejected', 'void')",
+        params![month],
+        |row| row.get(0),
+    )?;
+    let unpaid_reimbursement_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM reimbursement_claims
+         WHERE belong_month = ?1 AND status = 'approved' AND payment_status != 'paid'",
+        params![month],
+        |row| row.get(0),
+    )?;
+    let total_salary_cost: f64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(gross_salary), 0) FROM salary_monthly_results WHERE salary_month = ?1",
+            params![month],
+            |row| row.get(0),
+        )
+        .unwrap_or(0.0);
+    let total_invoice_amount: f64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(total_amount), 0) FROM invoices WHERE belong_month = ?1 AND status != 'void'",
+            params![month],
+            |row| row.get(0),
+        )
+        .unwrap_or(0.0);
+    let approved_reimbursement_amount: f64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(total_amount), 0) FROM reimbursement_claims
+             WHERE belong_month = ?1 AND status = 'approved'",
+            params![month],
+            |row| row.get(0),
+        )
+        .unwrap_or(0.0);
+    let paid_reimbursement_amount: f64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(total_amount), 0) FROM reimbursement_claims
+             WHERE belong_month = ?1 AND payment_status = 'paid'",
+            params![month],
+            |row| row.get(0),
+        )
+        .unwrap_or(0.0);
+
+    let summary = MonthCloseSummary {
+        month: month.to_string(),
+        active_employee_count: active_employee_count as i32,
+        attendance_count: attendance_count as i32,
+        missing_attendance_count: missing_attendance_count as i32,
+        abnormal_attendance_count: abnormal_attendance_count as i32,
+        salary_count: salary_count as i32,
+        reviewed_count: reviewed_count as i32,
+        locked_count: locked_count as i32,
+        missing_bank_count: missing_bank_count as i32,
+        invoice_count: invoice_count as i32,
+        uncategorized_invoice_count: uncategorized_invoice_count as i32,
+        reimbursement_count: reimbursement_count as i32,
+        pending_reimbursement_count: pending_reimbursement_count as i32,
+        unpaid_reimbursement_count: unpaid_reimbursement_count as i32,
+        total_salary_cost,
+        total_invoice_amount,
+        approved_reimbursement_amount,
+        paid_reimbursement_amount,
+    };
+    let checks = build_month_close_checks(&summary);
+    Ok(MonthCloseWorkbench { summary, checks })
+}
+
+fn build_month_close_checks(summary: &MonthCloseSummary) -> Vec<MonthCloseCheckItem> {
+    vec![
+        MonthCloseCheckItem {
+            key: "attendance_imported".to_string(),
+            title: "考勤导入完整".to_string(),
+            status: if summary.missing_attendance_count == 0 {
+                "ok"
+            } else {
+                "blocking"
+            }
+            .to_string(),
+            count: summary.missing_attendance_count,
+            description: if summary.missing_attendance_count == 0 {
+                "所有在职员工已有本月考勤记录".to_string()
+            } else {
+                format!(
+                    "{} 名在职员工缺少本月考勤记录",
+                    summary.missing_attendance_count
+                )
+            },
+            action_route: Some("/attendance".to_string()),
+        },
+        MonthCloseCheckItem {
+            key: "attendance_abnormal".to_string(),
+            title: "异常考勤复核".to_string(),
+            status: if summary.abnormal_attendance_count == 0 {
+                "ok"
+            } else {
+                "warning"
+            }
+            .to_string(),
+            count: summary.abnormal_attendance_count,
+            description: if summary.abnormal_attendance_count == 0 {
+                "未发现迟到、早退、旷工或缺勤异常".to_string()
+            } else {
+                format!("{} 条考勤记录需要复核", summary.abnormal_attendance_count)
+            },
+            action_route: Some("/attendance".to_string()),
+        },
+        MonthCloseCheckItem {
+            key: "salary_calculated".to_string(),
+            title: "工资已计算".to_string(),
+            status: if summary.salary_count >= summary.active_employee_count
+                && summary.active_employee_count > 0
+            {
+                "ok"
+            } else {
+                "blocking"
+            }
+            .to_string(),
+            count: summary
+                .active_employee_count
+                .saturating_sub(summary.salary_count),
+            description: if summary.salary_count >= summary.active_employee_count
+                && summary.active_employee_count > 0
+            {
+                "本月在职员工工资已生成".to_string()
+            } else {
+                "工资结果未覆盖全部在职员工".to_string()
+            },
+            action_route: Some("/salary".to_string()),
+        },
+        MonthCloseCheckItem {
+            key: "salary_reviewed_locked".to_string(),
+            title: "工资复核与锁定".to_string(),
+            status: if summary.locked_count >= summary.salary_count && summary.salary_count > 0 {
+                "ok"
+            } else if summary.reviewed_count >= summary.salary_count && summary.salary_count > 0 {
+                "warning"
+            } else {
+                "blocking"
+            }
+            .to_string(),
+            count: summary.salary_count.saturating_sub(summary.locked_count),
+            description: if summary.locked_count >= summary.salary_count && summary.salary_count > 0
+            {
+                "本月工资已锁定".to_string()
+            } else if summary.reviewed_count >= summary.salary_count && summary.salary_count > 0 {
+                "工资已复核，尚未全部锁定".to_string()
+            } else {
+                "工资尚未完成复核".to_string()
+            },
+            action_route: Some("/salary".to_string()),
+        },
+        MonthCloseCheckItem {
+            key: "bank_accounts".to_string(),
+            title: "银行信息完整".to_string(),
+            status: if summary.missing_bank_count == 0 {
+                "ok"
+            } else {
+                "warning"
+            }
+            .to_string(),
+            count: summary.missing_bank_count,
+            description: if summary.missing_bank_count == 0 {
+                "在职员工银行账号和开户行完整".to_string()
+            } else {
+                format!(
+                    "{} 名在职员工缺少银行账号或开户行",
+                    summary.missing_bank_count
+                )
+            },
+            action_route: Some("/employees".to_string()),
+        },
+        MonthCloseCheckItem {
+            key: "invoices_categorized".to_string(),
+            title: "发票归类完整".to_string(),
+            status: if summary.uncategorized_invoice_count == 0 {
+                "ok"
+            } else {
+                "warning"
+            }
+            .to_string(),
+            count: summary.uncategorized_invoice_count,
+            description: if summary.uncategorized_invoice_count == 0 {
+                "本月发票均已关联报销人和费用类型".to_string()
+            } else {
+                format!(
+                    "{} 张发票缺少报销人或费用类型",
+                    summary.uncategorized_invoice_count
+                )
+            },
+            action_route: Some("/invoices".to_string()),
+        },
+        MonthCloseCheckItem {
+            key: "reimbursements_paid".to_string(),
+            title: "报销审批与付款".to_string(),
+            status: if summary.pending_reimbursement_count == 0
+                && summary.unpaid_reimbursement_count == 0
+            {
+                "ok"
+            } else {
+                "warning"
+            }
+            .to_string(),
+            count: summary.pending_reimbursement_count + summary.unpaid_reimbursement_count,
+            description: if summary.pending_reimbursement_count == 0
+                && summary.unpaid_reimbursement_count == 0
+            {
+                "本月报销单已完成审批付款".to_string()
+            } else {
+                format!(
+                    "{} 张待审批，{} 张已审批未付款",
+                    summary.pending_reimbursement_count, summary.unpaid_reimbursement_count
+                )
+            },
+            action_route: Some("/reimbursements".to_string()),
+        },
+    ]
 }
 
 // ==================== App Settings ====================
@@ -1347,7 +1721,6 @@ pub fn query_invoices(conn: &Connection, q: &InvoiceQuery) -> AppResult<Vec<Invo
             "(seller_name LIKE ?{idx} OR buyer_name LIKE ?{idx} OR remark LIKE ?{idx})"
         ));
         params_vec.push(Box::new(pat));
-        idx += 1;
     }
 
     let sql = format!(
@@ -1360,6 +1733,276 @@ pub fn query_invoices(conn: &Connection, q: &InvoiceQuery) -> AppResult<Vec<Invo
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_refs.as_slice(), row_to_invoice)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
+// ==================== Reimbursements ====================
+
+fn row_to_reimbursement_claim(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReimbursementClaim> {
+    Ok(ReimbursementClaim {
+        id: row.get(0)?,
+        claim_no: row.get(1)?,
+        employee_id: row.get(2)?,
+        employee_name: row.get(3)?,
+        department: row.get(4)?,
+        belong_month: row.get(5)?,
+        title: row.get(6)?,
+        total_amount: row.get(7)?,
+        invoice_count: row.get(8)?,
+        status: row.get(9)?,
+        payment_status: row.get(10)?,
+        payment_date: row.get(11)?,
+        remark: row.get(12)?,
+        created_at: row.get(13)?,
+        updated_at: row.get(14)?,
+    })
+}
+
+pub fn query_reimbursement_claims(
+    conn: &Connection,
+    q: &ReimbursementQuery,
+) -> AppResult<Vec<ReimbursementClaim>> {
+    let mut where_clauses: Vec<String> = vec!["c.status != 'void'".to_string()];
+    let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let mut idx = 1;
+
+    if let Some(month) = q.belong_month.as_ref().filter(|v| !v.trim().is_empty()) {
+        where_clauses.push(format!("c.belong_month = ?{idx}"));
+        params_vec.push(Box::new(month.clone()));
+        idx += 1;
+    }
+    if let Some(employee_id) = q.employee_id {
+        where_clauses.push(format!("c.employee_id = ?{idx}"));
+        params_vec.push(Box::new(employee_id));
+        idx += 1;
+    }
+    if let Some(status) = q.status.as_ref().filter(|v| !v.trim().is_empty()) {
+        where_clauses.push(format!("c.status = ?{idx}"));
+        params_vec.push(Box::new(status.clone()));
+        idx += 1;
+    }
+    if let Some(payment_status) = q.payment_status.as_ref().filter(|v| !v.trim().is_empty()) {
+        where_clauses.push(format!("c.payment_status = ?{idx}"));
+        params_vec.push(Box::new(payment_status.clone()));
+        idx += 1;
+    }
+    if let Some(keyword) = q.keyword.as_ref().filter(|v| !v.trim().is_empty()) {
+        where_clauses.push(format!(
+            "(c.claim_no LIKE ?{idx} OR c.title LIKE ?{idx} OR c.remark LIKE ?{idx} OR e.name LIKE ?{idx})"
+        ));
+        params_vec.push(Box::new(format!("%{keyword}%")));
+    }
+
+    let sql = format!(
+        "SELECT c.id, c.claim_no, c.employee_id, e.name, e.department, c.belong_month,
+                c.title, c.total_amount, c.invoice_count, c.status, c.payment_status,
+                c.payment_date, c.remark, c.created_at, c.updated_at
+         FROM reimbursement_claims c
+         LEFT JOIN employees e ON e.id = c.employee_id
+         WHERE {}
+         ORDER BY c.updated_at DESC, c.id DESC",
+        where_clauses.join(" AND ")
+    );
+
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+        params_vec.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_refs.as_slice(), row_to_reimbursement_claim)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
+pub fn get_reimbursement_claim(conn: &Connection, id: i64) -> AppResult<ReimbursementClaim> {
+    conn.query_row(
+        "SELECT c.id, c.claim_no, c.employee_id, e.name, e.department, c.belong_month,
+                c.title, c.total_amount, c.invoice_count, c.status, c.payment_status,
+                c.payment_date, c.remark, c.created_at, c.updated_at
+         FROM reimbursement_claims c
+         LEFT JOIN employees e ON e.id = c.employee_id
+         WHERE c.id = ?1",
+        params![id],
+        row_to_reimbursement_claim,
+    )
+    .map_err(|e| AppError::NotFound(format!("报销单ID={id}未找到: {e}")))
+}
+
+pub fn get_reimbursement_invoices(
+    conn: &Connection,
+    claim_id: i64,
+) -> AppResult<Vec<ReimbursementInvoice>> {
+    let mut stmt = conn.prepare(
+        "SELECT ci.claim_id, i.id, i.invoice_number, i.seller_name, i.expense_type_code,
+                i.total_amount, i.issue_date
+         FROM reimbursement_claim_invoices ci
+         JOIN invoices i ON i.id = ci.invoice_id
+         WHERE ci.claim_id = ?1
+         ORDER BY i.issue_date DESC, i.id DESC",
+    )?;
+    let rows = stmt.query_map(params![claim_id], |row| {
+        Ok(ReimbursementInvoice {
+            claim_id: row.get(0)?,
+            invoice_id: row.get(1)?,
+            invoice_number: row.get(2)?,
+            seller_name: row.get(3)?,
+            expense_type_code: row.get(4)?,
+            total_amount: row.get(5)?,
+            issue_date: row.get(6)?,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
+pub fn save_reimbursement_claim(
+    conn: &Connection,
+    data: &ReimbursementClaimInput,
+) -> AppResult<ReimbursementClaim> {
+    let employee_id = data
+        .employee_id
+        .ok_or_else(|| AppError::InvalidParam("请选择报销人".into()))?;
+    let title = data.title.trim();
+    if title.is_empty() {
+        return Err(AppError::InvalidParam("报销单标题必填".into()));
+    }
+    if data.belong_month.trim().is_empty() {
+        return Err(AppError::InvalidParam("归属月份必填".into()));
+    }
+    if data.invoice_ids.is_empty() {
+        return Err(AppError::InvalidParam("至少选择一张发票".into()));
+    }
+
+    let mut total_amount = 0.0;
+    for invoice_id in &data.invoice_ids {
+        let invoice = get_invoice(conn, *invoice_id)?;
+        if invoice.status.as_deref() == Some("void") {
+            return Err(AppError::InvalidParam(format!(
+                "发票ID={invoice_id}已作废，不能报销"
+            )));
+        }
+        if invoice.employee_id != Some(employee_id) {
+            return Err(AppError::InvalidParam(format!(
+                "发票ID={invoice_id}的报销人与报销单不一致"
+            )));
+        }
+        ensure_invoice_not_claimed(conn, *invoice_id, data.id)?;
+        total_amount += invoice.total_amount;
+    }
+
+    let now = Utc::now().to_rfc3339();
+    let claim_id = if let Some(id) = data.id {
+        conn.execute(
+            "UPDATE reimbursement_claims
+             SET employee_id=?1, belong_month=?2, title=?3, total_amount=?4, invoice_count=?5,
+                 status=?6, payment_status=?7, payment_date=?8, remark=?9, updated_at=?10
+             WHERE id=?11 AND status != 'void'",
+            params![
+                employee_id,
+                data.belong_month.trim(),
+                title,
+                total_amount,
+                data.invoice_ids.len() as i32,
+                data.status.as_deref().unwrap_or("draft"),
+                data.payment_status.as_deref().unwrap_or("unpaid"),
+                data.payment_date.as_ref(),
+                data.remark.as_ref(),
+                now,
+                id
+            ],
+        )?;
+        conn.execute(
+            "DELETE FROM reimbursement_claim_invoices WHERE claim_id = ?1",
+            params![id],
+        )?;
+        id
+    } else {
+        let claim_no = generate_reimbursement_claim_no(&data.belong_month);
+        conn.execute(
+            "INSERT INTO reimbursement_claims
+             (claim_no, employee_id, belong_month, title, total_amount, invoice_count,
+              status, payment_status, payment_date, remark, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                claim_no,
+                employee_id,
+                data.belong_month.trim(),
+                title,
+                total_amount,
+                data.invoice_ids.len() as i32,
+                data.status.as_deref().unwrap_or("draft"),
+                data.payment_status.as_deref().unwrap_or("unpaid"),
+                data.payment_date.as_ref(),
+                data.remark.as_ref(),
+                now,
+                now
+            ],
+        )?;
+        conn.last_insert_rowid()
+    };
+
+    for invoice_id in &data.invoice_ids {
+        conn.execute(
+            "INSERT INTO reimbursement_claim_invoices (claim_id, invoice_id, created_at)
+             VALUES (?1, ?2, ?3)",
+            params![claim_id, invoice_id, now],
+        )?;
+    }
+
+    get_reimbursement_claim(conn, claim_id)
+}
+
+pub fn update_reimbursement_claim_status(
+    conn: &Connection,
+    id: i64,
+    status: Option<String>,
+    payment_status: Option<String>,
+    payment_date: Option<String>,
+) -> AppResult<bool> {
+    let existing = get_reimbursement_claim(conn, id)?;
+    let new_status = status.unwrap_or(existing.status);
+    let new_payment_status = payment_status.unwrap_or(existing.payment_status);
+    let now = Utc::now().to_rfc3339();
+    let updated = conn.execute(
+        "UPDATE reimbursement_claims
+         SET status=?1, payment_status=?2, payment_date=?3, updated_at=?4
+         WHERE id=?5 AND status != 'void'",
+        params![new_status, new_payment_status, payment_date, now, id],
+    )?;
+    Ok(updated > 0)
+}
+
+pub fn soft_delete_reimbursement_claim(conn: &Connection, id: i64) -> AppResult<bool> {
+    let now = Utc::now().to_rfc3339();
+    let updated = conn.execute(
+        "UPDATE reimbursement_claims SET status='void', updated_at=?1 WHERE id=?2 AND status != 'void'",
+        params![now, id],
+    )?;
+    Ok(updated > 0)
+}
+
+fn ensure_invoice_not_claimed(
+    conn: &Connection,
+    invoice_id: i64,
+    current_claim_id: Option<i64>,
+) -> AppResult<()> {
+    let result = conn.query_row(
+        "SELECT c.claim_no
+         FROM reimbursement_claim_invoices ci
+         JOIN reimbursement_claims c ON c.id = ci.claim_id
+         WHERE ci.invoice_id = ?1 AND c.status != 'void'
+           AND (?2 IS NULL OR c.id != ?2)
+         LIMIT 1",
+        params![invoice_id, current_claim_id],
+        |row| row.get::<_, String>(0),
+    );
+    match result {
+        Ok(claim_no) => Err(AppError::InvalidParam(format!(
+            "发票ID={invoice_id}已关联报销单{claim_no}"
+        ))),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(()),
+        Err(e) => Err(AppError::from(e)),
+    }
+}
+
+fn generate_reimbursement_claim_no(month: &str) -> String {
+    let month_part = month.replace('-', "");
+    format!("BX{}{}", month_part, Utc::now().timestamp_millis())
 }
 
 #[cfg(test)]

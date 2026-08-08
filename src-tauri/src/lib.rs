@@ -123,6 +123,8 @@ pub fn run() {
         commands::export_salary_slips,
         commands::export_attendance_summary_file,
         commands::get_dashboard_summary,
+        commands::get_month_close_workbench,
+        commands::query_operation_logs,
         commands::get_ocr_settings,
         commands::save_ocr_settings,
         commands::generate_punch_card_template,
@@ -136,6 +138,11 @@ pub fn run() {
         commands::delete_invoice,
         commands::query_invoices,
         commands::export_invoice_list,
+        commands::query_reimbursement_claims,
+        commands::save_reimbursement_claim,
+        commands::get_reimbursement_invoices,
+        commands::update_reimbursement_claim_status,
+        commands::delete_reimbursement_claim,
     ]);
 
     diag("calling builder.run()...");

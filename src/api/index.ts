@@ -22,6 +22,15 @@ import type {
   InvoiceInput,
   InvoiceOcrPreview,
   InvoiceQuery,
+  MonthCloseWorkbench,
+  OperationLog,
+  OperationLogQuery,
+  ReimbursementClaim,
+  ReimbursementClaimInput,
+  ReimbursementInvoice,
+  ReimbursementQuery,
+  ReimbursementStatus,
+  PaymentStatus,
 } from '@/types';
 
 type BackendDashboardSummary = {
@@ -272,6 +281,14 @@ export function normalizeDashboardSummary(raw: BackendDashboardSummary, month: s
 export async function getDashboardSummary(month: string): Promise<DashboardSummary> {
   const data = await invoke<BackendDashboardSummary>('get_dashboard_summary', { month });
   return normalizeDashboardSummary(data, month);
+}
+
+export async function getMonthCloseWorkbench(month: string): Promise<MonthCloseWorkbench> {
+  return invoke<MonthCloseWorkbench>('get_month_close_workbench', { month });
+}
+
+export async function queryOperationLogs(query: OperationLogQuery): Promise<OperationLog[]> {
+  return invoke<OperationLog[]>('query_operation_logs', { query });
 }
 
 // ==================== 员工管理 ====================
@@ -588,4 +605,36 @@ export async function queryInvoices(query: InvoiceQuery): Promise<Invoice[]> {
 
 export async function exportInvoiceList(query: InvoiceQuery, savePath: string): Promise<boolean> {
   return invoke<boolean>('export_invoice_list', { query, path: savePath });
+}
+
+// ==================== 报销管理 ====================
+
+export async function queryReimbursementClaims(query: ReimbursementQuery): Promise<ReimbursementClaim[]> {
+  return invoke<ReimbursementClaim[]>('query_reimbursement_claims', { query });
+}
+
+export async function saveReimbursementClaim(data: ReimbursementClaimInput): Promise<ReimbursementClaim> {
+  return invoke<ReimbursementClaim>('save_reimbursement_claim', { data });
+}
+
+export async function getReimbursementInvoices(claimId: number): Promise<ReimbursementInvoice[]> {
+  return invoke<ReimbursementInvoice[]>('get_reimbursement_invoices', { claimId });
+}
+
+export async function updateReimbursementClaimStatus(
+  id: number,
+  status?: ReimbursementStatus,
+  paymentStatus?: PaymentStatus,
+  paymentDate?: string,
+): Promise<boolean> {
+  return invoke<boolean>('update_reimbursement_claim_status', {
+    id,
+    status,
+    paymentStatus,
+    paymentDate,
+  });
+}
+
+export async function deleteReimbursementClaim(id: number): Promise<boolean> {
+  return invoke<boolean>('delete_reimbursement_claim', { id });
 }

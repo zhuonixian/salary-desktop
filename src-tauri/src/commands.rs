@@ -523,6 +523,24 @@ pub fn get_dashboard_summary(
     db::get_dashboard_summary(&conn, &month)
 }
 
+#[tauri::command]
+pub fn get_month_close_workbench(
+    month: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<MonthCloseWorkbench, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    db::get_month_close_workbench(&conn, &month)
+}
+
+#[tauri::command]
+pub fn query_operation_logs(
+    query: OperationLogQuery,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<OperationLog>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    db::query_operation_logs(&conn, &query)
+}
+
 // ==================== OCR Settings Commands ====================
 
 #[tauri::command]
@@ -705,4 +723,98 @@ pub fn export_invoice_list(
         None,
     )?;
     Ok(true)
+}
+
+// ==================== Reimbursement Commands ====================
+
+#[tauri::command]
+pub fn query_reimbursement_claims(
+    query: ReimbursementQuery,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<ReimbursementClaim>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    db::query_reimbursement_claims(&conn, &query)
+}
+
+#[tauri::command]
+pub fn save_reimbursement_claim(
+    data: ReimbursementClaimInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<ReimbursementClaim, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let is_update = data.id.is_some();
+    let result = db::save_reimbursement_claim(&conn, &data)?;
+    db::log_operation(
+        &conn,
+        if is_update {
+            "update_reimbursement"
+        } else {
+            "create_reimbursement"
+        },
+        &format!(
+            "{}报销单: {}，金额{:.2}",
+            if is_update { "更新" } else { "新增" },
+            result.claim_no,
+            result.total_amount
+        ),
+        "system",
+        None,
+    )?;
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn get_reimbursement_invoices(
+    claim_id: i64,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<ReimbursementInvoice>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    db::get_reimbursement_invoices(&conn, claim_id)
+}
+
+#[tauri::command]
+pub fn update_reimbursement_claim_status(
+    id: i64,
+    status: Option<String>,
+    payment_status: Option<String>,
+    payment_date: Option<String>,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let result = db::update_reimbursement_claim_status(
+        &conn,
+        id,
+        status.clone(),
+        payment_status.clone(),
+        payment_date.clone(),
+    )?;
+    if result {
+        db::log_operation(
+            &conn,
+            "update_reimbursement_status",
+            &format!("更新报销单ID={id}状态: {:?} / {:?}", status, payment_status),
+            "system",
+            None,
+        )?;
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn delete_reimbursement_claim(
+    id: i64,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let result = db::soft_delete_reimbursement_claim(&conn, id)?;
+    if result {
+        db::log_operation(
+            &conn,
+            "delete_reimbursement",
+            &format!("作废报销单ID={id}"),
+            "system",
+            None,
+        )?;
+    }
+    Ok(result)
 }
