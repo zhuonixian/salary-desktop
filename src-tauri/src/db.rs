@@ -313,6 +313,28 @@ fn insert_default_data(conn: &Connection) -> AppResult<()> {
 
 // ==================== Employee CRUD ====================
 
+pub fn employee_no_exists(
+    conn: &Connection,
+    employee_no: &str,
+    exclude_id: Option<i64>,
+) -> AppResult<bool> {
+    let employee_no = employee_no.trim();
+    let count: i64 = if let Some(id) = exclude_id {
+        conn.query_row(
+            "SELECT COUNT(*) FROM employees WHERE LOWER(TRIM(employee_no)) = LOWER(?1) AND id != ?2",
+            params![employee_no, id],
+            |row| row.get(0),
+        )?
+    } else {
+        conn.query_row(
+            "SELECT COUNT(*) FROM employees WHERE LOWER(TRIM(employee_no)) = LOWER(?1)",
+            params![employee_no],
+            |row| row.get(0),
+        )?
+    };
+    Ok(count > 0)
+}
+
 pub fn get_employees(conn: &Connection) -> AppResult<Vec<Employee>> {
     let mut stmt = conn.prepare(
         "SELECT id, employee_no, name, department, position, id_card, phone, bank_account, bank_name, hire_date, status, base_salary, position_salary, performance_salary, social_security_base, housing_fund_base, special_deduction, remark, created_at, updated_at FROM employees ORDER BY id"
@@ -381,6 +403,13 @@ pub fn get_employee(conn: &Connection, id: i64) -> AppResult<Employee> {
 
 pub fn create_employee(conn: &Connection, data: &EmployeeInput) -> AppResult<Employee> {
     let now = Utc::now().to_rfc3339();
+    let employee_no = data.employee_no.trim();
+    if employee_no.is_empty() {
+        return Err(AppError::InvalidParam("工号必填".to_string()));
+    }
+    if employee_no_exists(conn, employee_no, None)? {
+        return Err(AppError::InvalidParam(format!("工号 {employee_no} 已存在")));
+    }
     let status = data.status.clone().unwrap_or_else(|| "active".to_string());
     let base_salary = data.base_salary.unwrap_or(0.0);
     let position_salary = data.position_salary.unwrap_or(0.0);
@@ -393,7 +422,7 @@ pub fn create_employee(conn: &Connection, data: &EmployeeInput) -> AppResult<Emp
         "INSERT INTO employees (employee_no, name, department, position, id_card, phone, bank_account, bank_name, hire_date, status, base_salary, position_salary, performance_salary, social_security_base, housing_fund_base, special_deduction, remark, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         params![
-            data.employee_no, data.name, data.department, data.position,
+            employee_no, data.name, data.department, data.position,
             data.id_card, data.phone, data.bank_account, data.bank_name,
             data.hire_date, status, base_salary, position_salary,
             performance_salary, social_security_base, housing_fund_base,
@@ -409,6 +438,13 @@ pub fn update_employee(conn: &Connection, id: i64, data: &EmployeeInput) -> AppR
     let now = Utc::now().to_rfc3339();
     // First get existing employee to merge updates
     let existing = get_employee(conn, id)?;
+    let employee_no = data.employee_no.trim();
+    if employee_no.is_empty() {
+        return Err(AppError::InvalidParam("工号必填".to_string()));
+    }
+    if employee_no_exists(conn, employee_no, Some(id))? {
+        return Err(AppError::InvalidParam(format!("工号 {employee_no} 已存在")));
+    }
 
     let status = data.status.clone().unwrap_or(existing.status);
     let base_salary = data.base_salary.unwrap_or(existing.base_salary);
@@ -425,7 +461,7 @@ pub fn update_employee(conn: &Connection, id: i64, data: &EmployeeInput) -> AppR
     let updated = conn.execute(
         "UPDATE employees SET employee_no=?1, name=?2, department=?3, position=?4, id_card=?5, phone=?6, bank_account=?7, bank_name=?8, hire_date=?9, status=?10, base_salary=?11, position_salary=?12, performance_salary=?13, social_security_base=?14, housing_fund_base=?15, special_deduction=?16, remark=?17, updated_at=?18 WHERE id=?19",
         params![
-            data.employee_no, data.name, data.department, data.position,
+            employee_no, data.name, data.department, data.position,
             data.id_card, data.phone, data.bank_account, data.bank_name,
             data.hire_date, status, base_salary, position_salary,
             performance_salary, social_security_base, housing_fund_base,
@@ -527,12 +563,40 @@ pub fn upsert_attendance_record(
 
     if let Some(id) = data.id {
         conn.execute(
-            "UPDATE attendance_records SET salary_month=?1, employee_no=?2, name=?3, expected_days=?4, actual_days=?5, late_count=?6, early_leave_count=?7, personal_leave_days=?8, sick_leave_days=?9, absent_days=?10, overtime_hours=?11, source_type=?12, ocr_batch_id=?13, remark=?14, updated_at=?15 WHERE id=?16",
+            "UPDATE attendance_records
+             SET salary_month = CASE WHEN TRIM(?1) = '' THEN salary_month ELSE ?1 END,
+                 employee_no = CASE WHEN TRIM(?2) = '' THEN employee_no ELSE ?2 END,
+                 name = ?3,
+                 expected_days = ?4,
+                 actual_days = ?5,
+                 late_count = ?6,
+                 early_leave_count = ?7,
+                 personal_leave_days = ?8,
+                 sick_leave_days = ?9,
+                 absent_days = ?10,
+                 overtime_hours = ?11,
+                 source_type = COALESCE(?12, source_type),
+                 ocr_batch_id = COALESCE(?13, ocr_batch_id),
+                 remark = ?14,
+                 updated_at = ?15
+             WHERE id = ?16",
             params![
-                data.salary_month, data.employee_no, data.name, expected_days,
-                actual_days, late_count, early_leave_count, personal_leave_days,
-                sick_leave_days, absent_days, overtime_hours, data.source_type,
-                data.ocr_batch_id, data.remark, now, id
+                data.salary_month,
+                data.employee_no,
+                data.name,
+                expected_days,
+                actual_days,
+                late_count,
+                early_leave_count,
+                personal_leave_days,
+                sick_leave_days,
+                absent_days,
+                overtime_hours,
+                data.source_type,
+                data.ocr_batch_id,
+                data.remark,
+                now,
+                id
             ],
         )?;
     } else {
@@ -567,12 +631,40 @@ pub fn update_attendance_record(
     let overtime_hours = data.overtime_hours.unwrap_or(0.0);
 
     let updated = conn.execute(
-        "UPDATE attendance_records SET salary_month=?1, employee_no=?2, name=?3, expected_days=?4, actual_days=?5, late_count=?6, early_leave_count=?7, personal_leave_days=?8, sick_leave_days=?9, absent_days=?10, overtime_hours=?11, source_type=?12, ocr_batch_id=?13, remark=?14, updated_at=?15 WHERE id=?16",
+        "UPDATE attendance_records
+         SET salary_month = CASE WHEN TRIM(?1) = '' THEN salary_month ELSE ?1 END,
+             employee_no = CASE WHEN TRIM(?2) = '' THEN employee_no ELSE ?2 END,
+             name = ?3,
+             expected_days = ?4,
+             actual_days = ?5,
+             late_count = ?6,
+             early_leave_count = ?7,
+             personal_leave_days = ?8,
+             sick_leave_days = ?9,
+             absent_days = ?10,
+             overtime_hours = ?11,
+             source_type = COALESCE(?12, source_type),
+             ocr_batch_id = COALESCE(?13, ocr_batch_id),
+             remark = ?14,
+             updated_at = ?15
+         WHERE id = ?16",
         params![
-            data.salary_month, data.employee_no, data.name, expected_days,
-            actual_days, late_count, early_leave_count, personal_leave_days,
-            sick_leave_days, absent_days, overtime_hours, data.source_type,
-            data.ocr_batch_id, data.remark, now, id
+            data.salary_month,
+            data.employee_no,
+            data.name,
+            expected_days,
+            actual_days,
+            late_count,
+            early_leave_count,
+            personal_leave_days,
+            sick_leave_days,
+            absent_days,
+            overtime_hours,
+            data.source_type,
+            data.ocr_batch_id,
+            data.remark,
+            now,
+            id
         ],
     )?;
 
@@ -2861,5 +2953,84 @@ mod tests {
         assert_eq!(report.monthly_comparison[0].month, "2026-07");
         assert_eq!(report.monthly_comparison[1].month, "2026-08");
         assert_eq!(report.monthly_comparison[1].gross_salary, 18000.0);
+    }
+
+    #[test]
+    fn test_update_attendance_keeps_identity_when_input_is_blank() {
+        let conn = setup_financial_db();
+
+        let record = get_attendance_records(&conn, "2026-08")
+            .unwrap()
+            .into_iter()
+            .find(|row| row.employee_no == "E001")
+            .unwrap();
+
+        let updated = update_attendance_record(
+            &conn,
+            record.id,
+            &AttendanceRecordInput {
+                id: None,
+                salary_month: "".into(),
+                employee_no: "".into(),
+                name: record.name.clone(),
+                expected_days: Some(record.expected_days),
+                actual_days: Some(22.0),
+                late_count: Some(record.late_count),
+                early_leave_count: Some(record.early_leave_count),
+                personal_leave_days: Some(record.personal_leave_days),
+                sick_leave_days: Some(record.sick_leave_days),
+                absent_days: Some(record.absent_days),
+                overtime_hours: Some(record.overtime_hours),
+                source_type: None,
+                ocr_batch_id: None,
+                remark: record.remark.clone(),
+            },
+        )
+        .unwrap();
+
+        assert!(updated);
+
+        let records = get_attendance_records(&conn, "2026-08").unwrap();
+        let saved = records
+            .iter()
+            .find(|row| row.employee_no == "E001")
+            .unwrap();
+        assert_eq!(saved.salary_month, "2026-08");
+        assert_eq!(saved.employee_no, "E001");
+        assert_eq!(saved.actual_days, 22.0);
+    }
+
+    #[test]
+    fn test_create_employee_rejects_duplicate_employee_no() {
+        let conn = setup_financial_db();
+        let err = create_employee(
+            &conn,
+            &EmployeeInput {
+                employee_no: " e001 ".into(),
+                name: "重复工号".into(),
+                department: None,
+                position: None,
+                id_card: None,
+                phone: None,
+                bank_account: None,
+                bank_name: None,
+                hire_date: None,
+                status: Some("active".into()),
+                base_salary: Some(0.0),
+                position_salary: Some(0.0),
+                performance_salary: Some(0.0),
+                social_security_base: Some(0.0),
+                housing_fund_base: Some(0.0),
+                special_deduction: Some(0.0),
+                remark: None,
+            },
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, AppError::InvalidParam(_)),
+            "expected duplicate employee no to return InvalidParam, got {:?}",
+            err
+        );
     }
 }

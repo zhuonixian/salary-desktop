@@ -43,6 +43,7 @@ jobs:
           prerelease: false
 
   build-linux:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

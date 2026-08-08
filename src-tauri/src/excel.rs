@@ -269,7 +269,22 @@ fn write_header_row(
 
 // ==================== Import Templates ====================
 
-pub fn export_employee_template(path: &str) -> AppResult<()> {
+fn next_employee_no(employees: &[Employee]) -> String {
+    let max_no = employees
+        .iter()
+        .filter_map(|employee| {
+            let employee_no = employee.employee_no.trim();
+            let digits = employee_no
+                .strip_prefix('A')
+                .or_else(|| employee_no.strip_prefix('a'))?;
+            digits.parse::<u32>().ok()
+        })
+        .max()
+        .unwrap_or(0);
+    format!("A{:03}", max_no + 1)
+}
+
+pub fn export_employee_template(path: &str, employees: &[Employee]) -> AppResult<()> {
     let mut workbook = Workbook::new();
     let worksheet = workbook.add_worksheet();
     worksheet.set_name("员工导入模板")?;
@@ -296,7 +311,7 @@ pub fn export_employee_template(path: &str) -> AppResult<()> {
 
     let cell_fmt = make_cell_format();
     let money_fmt = make_money_format();
-    worksheet.write_string_with_format(1, 0, "E001", &cell_fmt)?;
+    worksheet.write_string_with_format(1, 0, &next_employee_no(employees), &cell_fmt)?;
     worksheet.write_string_with_format(1, 1, "张三", &cell_fmt)?;
     worksheet.write_string_with_format(1, 2, "生产部", &cell_fmt)?;
     worksheet.write_string_with_format(1, 3, "操作员", &cell_fmt)?;
@@ -311,7 +326,7 @@ pub fn export_employee_template(path: &str) -> AppResult<()> {
     worksheet.write_number_with_format(1, 12, 5000.0, &money_fmt)?;
     worksheet.write_number_with_format(1, 13, 5000.0, &money_fmt)?;
     worksheet.write_number_with_format(1, 14, 0.0, &money_fmt)?;
-    worksheet.write_string_with_format(1, 15, "示例行，可删除", &cell_fmt)?;
+    worksheet.write_string_with_format(1, 15, "示例行，可删除；工号不可重复", &cell_fmt)?;
 
     let widths = [
         12, 10, 12, 12, 20, 14, 22, 18, 12, 12, 12, 12, 12, 12, 14, 20,
@@ -324,7 +339,7 @@ pub fn export_employee_template(path: &str) -> AppResult<()> {
     Ok(())
 }
 
-pub fn export_attendance_template(path: &str) -> AppResult<()> {
+pub fn export_attendance_template(path: &str, employees: &[Employee]) -> AppResult<()> {
     let mut workbook = Workbook::new();
     let worksheet = workbook.add_worksheet();
     worksheet.set_name("考勤导入模板")?;
@@ -349,17 +364,43 @@ pub fn export_attendance_template(path: &str) -> AppResult<()> {
         .set_border(rust_xlsxwriter::FormatBorder::Thin)
         .set_align(rust_xlsxwriter::FormatAlign::Center)
         .set_num_format("0.0");
-    worksheet.write_string_with_format(1, 0, "E001", &cell_fmt)?;
-    worksheet.write_string_with_format(1, 1, "张三", &cell_fmt)?;
-    worksheet.write_number_with_format(1, 2, 22.0, &num_fmt)?;
-    worksheet.write_number_with_format(1, 3, 22.0, &num_fmt)?;
-    worksheet.write_number_with_format(1, 4, 0.0, &cell_fmt)?;
-    worksheet.write_number_with_format(1, 5, 0.0, &cell_fmt)?;
-    worksheet.write_number_with_format(1, 6, 0.0, &num_fmt)?;
-    worksheet.write_number_with_format(1, 7, 0.0, &num_fmt)?;
-    worksheet.write_number_with_format(1, 8, 0.0, &num_fmt)?;
-    worksheet.write_number_with_format(1, 9, 0.0, &num_fmt)?;
-    worksheet.write_string_with_format(1, 10, "示例行，可删除", &cell_fmt)?;
+    let active_employees: Vec<&Employee> = employees
+        .iter()
+        .filter(|employee| employee.status == "active" || employee.status == "probation")
+        .collect();
+    let template_rows: Vec<(String, String, String)> = if active_employees.is_empty() {
+        vec![(
+            "A001".to_string(),
+            "张三".to_string(),
+            "示例行，可删除".to_string(),
+        )]
+    } else {
+        active_employees
+            .iter()
+            .map(|employee| {
+                (
+                    employee.employee_no.clone(),
+                    employee.name.clone(),
+                    String::new(),
+                )
+            })
+            .collect()
+    };
+
+    for (idx, (employee_no, name, remark)) in template_rows.iter().enumerate() {
+        let row = idx as u32 + 1;
+        worksheet.write_string_with_format(row, 0, employee_no, &cell_fmt)?;
+        worksheet.write_string_with_format(row, 1, name, &cell_fmt)?;
+        worksheet.write_number_with_format(row, 2, 22.0, &num_fmt)?;
+        worksheet.write_number_with_format(row, 3, 22.0, &num_fmt)?;
+        worksheet.write_number_with_format(row, 4, 0.0, &cell_fmt)?;
+        worksheet.write_number_with_format(row, 5, 0.0, &cell_fmt)?;
+        worksheet.write_number_with_format(row, 6, 0.0, &num_fmt)?;
+        worksheet.write_number_with_format(row, 7, 0.0, &num_fmt)?;
+        worksheet.write_number_with_format(row, 8, 0.0, &num_fmt)?;
+        worksheet.write_number_with_format(row, 9, 0.0, &num_fmt)?;
+        worksheet.write_string_with_format(row, 10, remark, &cell_fmt)?;
+    }
 
     let widths = [12, 10, 12, 12, 10, 10, 10, 10, 10, 10, 20];
     for (col, w) in widths.iter().enumerate() {

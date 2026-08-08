@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Mutex;
 
 use rusqlite::Connection;
@@ -106,8 +107,21 @@ pub fn import_employees_excel(
     let mut imported = 0;
     let mut skipped = 0;
     let mut errors = Vec::new();
+    let mut seen_employee_no = HashSet::new();
 
     for emp in &employees {
+        let employee_no_key = emp.employee_no.trim().to_lowercase();
+        if !seen_employee_no.insert(employee_no_key.clone()) {
+            skipped += 1;
+            errors.push(format!("工号{}: Excel内工号重复", emp.employee_no));
+            continue;
+        }
+        if db::employee_no_exists(&conn, &emp.employee_no, None)? {
+            skipped += 1;
+            errors.push(format!("工号{}: 工号已存在", emp.employee_no));
+            continue;
+        }
+
         let input = EmployeeInput {
             employee_no: emp.employee_no.clone(),
             name: emp.name.clone(),
@@ -155,8 +169,13 @@ pub fn import_employees_excel(
 }
 
 #[tauri::command]
-pub fn export_employee_import_template(path: String) -> Result<bool, AppError> {
-    excel::export_employee_template(&path)?;
+pub fn export_employee_import_template(
+    path: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let employees = db::get_employees(&conn)?;
+    excel::export_employee_template(&path, &employees)?;
     Ok(true)
 }
 
@@ -231,8 +250,13 @@ pub fn import_attendance_excel(
 }
 
 #[tauri::command]
-pub fn export_attendance_import_template(path: String) -> Result<bool, AppError> {
-    excel::export_attendance_template(&path)?;
+pub fn export_attendance_import_template(
+    path: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let employees = db::get_employees(&conn)?;
+    excel::export_attendance_template(&path, &employees)?;
     Ok(true)
 }
 

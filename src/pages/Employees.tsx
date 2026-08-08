@@ -18,6 +18,15 @@ const statusColorMap: Record<EmployeeStatus, string> = {
   '试用': 'orange',
 };
 
+const getNextEmployeeNo = (employees: Employee[]) => {
+  const maxNo = employees.reduce((max, employee) => {
+    const match = employee.employee_no.trim().match(/^A(\d+)$/i);
+    if (!match) return max;
+    return Math.max(max, Number.parseInt(match[1], 10));
+  }, 0);
+  return `A${String(maxNo + 1).padStart(3, '0')}`;
+};
+
 const Employees: React.FC = () => {
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [loading, setLoading] = useState(false);
@@ -47,6 +56,7 @@ const Employees: React.FC = () => {
     setEditingEmployee(null);
     form.resetFields();
     form.setFieldsValue({
+      employee_no: getNextEmployeeNo(employees),
       status: '在职',
       base_salary: 0,
       position_salary: 0,
@@ -84,7 +94,11 @@ const Employees: React.FC = () => {
       if (!path) return;
       const result = await importEmployeesExcel(path as string);
       if (result.success) {
-        message.success(`导入成功：共 ${result.total} 条，成功 ${result.imported} 条，失败 ${result.failed} 条`);
+        if (result.failed > 0 || result.errors.length > 0) {
+          message.warning(`导入完成：共 ${result.total} 条，成功 ${result.imported} 条，失败 ${result.failed} 条；${result.errors.join('; ')}`);
+        } else {
+          message.success(`导入成功：共 ${result.total} 条，成功 ${result.imported} 条`);
+        }
       } else {
         message.error('导入失败: ' + result.errors.join('; '));
       }
@@ -113,17 +127,24 @@ const Employees: React.FC = () => {
   const handleSubmit = async () => {
     try {
       const values = await form.validateFields();
+      const payload = {
+        ...values,
+        employee_no: values.employee_no.trim(),
+      };
       if (editingEmployee) {
-        await updateEmployee(editingEmployee.id, values);
+        await updateEmployee(editingEmployee.id, payload);
         message.success('更新成功');
       } else {
-        await createEmployee(values);
+        await createEmployee(payload);
         message.success('新增成功');
       }
       setModalOpen(false);
       fetchData();
     } catch (e: unknown) {
       if (e instanceof Error) {
+        if (e.message.includes('工号') && e.message.includes('已存在')) {
+          form.setFields([{ name: 'employee_no', errors: [e.message] }]);
+        }
         message.error('操作失败: ' + e.message);
       }
     }
@@ -237,8 +258,31 @@ const Employees: React.FC = () => {
       >
         <Form form={form} layout="vertical" style={{ maxHeight: '60vh', overflowY: 'auto', paddingRight: 8 }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 16px' }}>
-            <Form.Item name="employee_no" label="工号" rules={[{ required: true, message: '请输入工号' }]}>
-              <Input placeholder="请输入工号" disabled={!!editingEmployee} />
+            <Form.Item
+              name="employee_no"
+              label="工号"
+              rules={[
+                { required: true, message: '请输入工号' },
+                {
+                  validator: async (_, value) => {
+                    const employeeNo = String(value ?? '').trim();
+                    if (!employeeNo) return;
+                    const duplicated = employees.some(
+                      (employee) =>
+                        employee.employee_no.trim().toLowerCase() === employeeNo.toLowerCase() &&
+                        employee.id !== editingEmployee?.id
+                    );
+                    if (duplicated) {
+                      throw new Error(`工号 ${employeeNo} 已存在`);
+                    }
+                  },
+                },
+              ]}
+            >
+              <Input
+                placeholder="请输入工号"
+                onBlur={(e) => form.setFieldValue('employee_no', e.target.value.trim())}
+              />
             </Form.Item>
             <Form.Item name="name" label="姓名" rules={[{ required: true, message: '请输入姓名' }]}>
               <Input placeholder="请输入姓名" />

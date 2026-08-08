@@ -158,10 +158,14 @@ const normalizeEmployee = (employee: BackendEmployee): Employee => ({
   updated_at: employee.updated_at ?? '',
 });
 
-const toBackendEmployeeInput = (data: Partial<EmployeeInput>) => ({
-  ...data,
-  status: toBackendEmployeeStatus(data.status),
-});
+const toBackendEmployeeInput = (data: Partial<EmployeeInput>) => {
+  const employeeNo = data.employee_no?.trim();
+  return {
+    ...data,
+    employee_no: employeeNo,
+    status: toBackendEmployeeStatus(data.status),
+  };
+};
 
 const normalizeImportResult = (raw: ImportResult & { skipped?: number }): ImportResult => ({
   success: Boolean(raw.success),
@@ -358,13 +362,17 @@ export async function createAttendanceRecord(data: AttendanceRecordInput): Promi
   return normalizeAttendanceRecord(record);
 }
 
-export async function updateAttendanceRecord(id: number, data: Partial<AttendanceRecordInput>): Promise<AttendanceRecord> {
-  const fallback = data.month ? (await getAttendanceRecords(data.month)).find((record) => record.id === id) : undefined;
+export async function updateAttendanceRecord(
+  id: number,
+  data: Partial<AttendanceRecordInput>,
+  fallback?: AttendanceRecord
+): Promise<AttendanceRecord> {
+  const existing = fallback ?? (data.month ? (await getAttendanceRecords(data.month)).find((record) => record.id === id) : undefined);
   await invoke('update_attendance_record', {
     id,
-    data: toBackendAttendanceInput(data, fallback),
+    data: toBackendAttendanceInput(data, existing),
   });
-  return fallback ? { ...fallback, ...data } : { id, ...data } as AttendanceRecord;
+  return existing ? { ...existing, ...data } : { id, ...data } as AttendanceRecord;
 }
 
 export async function deleteAttendanceRecord(id: number): Promise<void> {

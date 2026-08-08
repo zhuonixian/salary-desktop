@@ -59,7 +59,7 @@ const Attendance: React.FC = () => {
     if (!editingRecord) return;
     try {
       const values = await form.validateFields();
-      await updateAttendanceRecord(editingRecord.id, values);
+      await updateAttendanceRecord(editingRecord.id, values, editingRecord);
       message.success('更新成功');
       setModalOpen(false);
       fetchData(month.format('YYYY-MM'));
