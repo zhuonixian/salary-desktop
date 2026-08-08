@@ -8,6 +8,34 @@ import type { OperationLog, OperationLogQuery } from '@/types';
 
 const { RangePicker } = DatePicker;
 
+const operationTypeLabels: Record<string, string> = {
+  create_employee: '新增员工',
+  update_employee: '更新员工',
+  delete_employee: '删除员工',
+  import_employees: '导入员工',
+  import_attendance: '导入考勤',
+  update_salary_rule: '更新工资规则',
+  update_tax_rule: '更新个税规则',
+  calculate_salary: '计算工资',
+  review_salary: '复核工资',
+  lock_salary: '锁定工资',
+  export: '导出工资/考勤文件',
+  create_expense_type: '新增费用类型',
+  update_expense_type: '更新费用类型',
+  delete_expense_type: '删除费用类型',
+  save_invoice: '保存发票',
+  update_invoice: '更新发票',
+  delete_invoice: '作废发票',
+  export_invoices: '导出发票清单',
+  create_reimbursement: '新增报销单',
+  update_reimbursement: '更新报销单',
+  update_reimbursement_status: '更新报销状态',
+  delete_reimbursement: '作废报销单',
+};
+
+const getOperationLabel = (value?: string) =>
+  value ? operationTypeLabels[value] ?? value : '-';
+
 const OperationLogs: React.FC = () => {
   const [logs, setLogs] = useState<OperationLog[]>([]);
   const [loading, setLoading] = useState(false);
@@ -17,7 +45,7 @@ const OperationLogs: React.FC = () => {
 
   const operationOptions = useMemo(() => {
     const values = Array.from(new Set(logs.map((log) => log.operation_type))).filter(Boolean);
-    return values.map((value) => ({ value, label: value }));
+    return values.map((value) => ({ value, label: getOperationLabel(value) }));
   }, [logs]);
 
   const fetchData = useCallback(async () => {
@@ -55,7 +83,7 @@ const OperationLogs: React.FC = () => {
       dataIndex: 'operation_type',
       key: 'operation_type',
       width: 190,
-      render: (value: string) => <Tag color="blue">{value}</Tag>,
+      render: (value: string) => <Tag color="blue">{getOperationLabel(value)}</Tag>,
     },
     { title: '说明', dataIndex: 'description', key: 'description', width: 360, ellipsis: true },
     { title: '操作人', dataIndex: 'operator', key: 'operator', width: 110 },
