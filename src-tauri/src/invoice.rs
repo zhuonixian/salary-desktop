@@ -224,18 +224,55 @@ fn map_baidu_response(resp: &BaiduVatInvoiceResponse, raw_text: &str) -> Invoice
     }
 }
 
-/// 从 words_result（对象，每个字段是 {word: "..."}）或 extra（顶层字段，直接字符串）取值
+/// 取字段值。百度 vat_invoice 实测返回 words_result 是 dict，每个字段的值是
+/// **直接字符串**（如 "InvoiceNum": "26317000002652868787"），不是通用 OCR 的
+/// {"word": "..."} 对象格式。同时部分多值字段（如 CommodityName）返回数组。
+/// 为兼容三种格式，按以下顺序尝试：
+///   1. words[key].word（如果是 object，通用 OCR 格式）
+///   2. words[key] 直接字符串（vat_invoice 实际格式）
+///   3. words[key][0].word 或 words[key][0] 字符串（如果是数组）
+///   4. extra[key] 顶层字符串（顶层非 words_result 字段）
 fn pick_str(words: &serde_json::Value, extra: &serde_json::Value, key: &str) -> Option<String> {
-    if let Some(obj) = words.get(key).and_then(|v| v.as_object()) {
-        if let Some(w) = obj.get("word").and_then(|v| v.as_str()) {
-            return Some(w.trim().to_string()).filter(|s| !s.is_empty());
+    let from_words = match words.get(key) {
+        Some(serde_json::Value::Object(obj)) => obj
+            .get("word")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        Some(serde_json::Value::String(s)) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
         }
-    }
-    extra
-        .get(key)
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        Some(serde_json::Value::Array(arr)) => arr.first().and_then(|item| match item {
+            serde_json::Value::Object(obj) => obj
+                .get("word")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+            serde_json::Value::String(s) => {
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            }
+            _ => None,
+        }),
+        _ => None,
+    };
+
+    from_words.or_else(|| {
+        extra
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    })
 }
 
 /// 解析金额：去千分位逗号、去 ¥/￥/$ 符号、去「元」、解析为 f64
@@ -574,6 +611,51 @@ mod tests {
         let preview = map_baidu_response(&resp, "");
         assert!(preview.invoice_type.is_none());
         assert!((preview.amount - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_map_vat_invoice_string_format() {
+        // 百度 vat_invoice 实际返回：words_result 字段值是直接字符串，不是 {word: "..."}
+        // 这之前导致所有字段返回空，用户看到 "未能识别发票号码"
+        let resp_json = json!({
+            "words_result": {
+                "InvoiceNum": "26317000002652868787",
+                "InvoiceType": "电子发票(普通发票)",
+                "TotalAmount": "129.51",
+                "TotalTax": "3.89",
+                "AmountInFiguers": "￥133.40",
+                "SellerName": "上海路团科技有限公司",
+                "PurchaserName": "奇安信科技集团股份有限公司",
+                "InvoiceCode": "",
+            },
+            "pdf_file_size": 1,
+            "log_id": 1234567890,
+        });
+        let resp = make_response(resp_json);
+        let preview = map_baidu_response(&resp, "");
+
+        assert_eq!(preview.invoice_number.as_deref(), Some("26317000002652868787"));
+        assert_eq!(preview.invoice_type.as_deref(), Some("电子发票(普通发票)"));
+        assert!((preview.amount - 129.51).abs() < 1e-6);
+        assert!((preview.tax_amount - 3.89).abs() < 1e-6);
+        assert!((preview.total_amount - 133.40).abs() < 1e-6);
+        assert_eq!(preview.seller_name.as_deref(), Some("上海路团科技有限公司"));
+        assert_eq!(preview.buyer_name.as_deref(), Some("奇安信科技集团股份有限公司"));
+        // 空字符串视为 None
+        assert!(preview.invoice_code.is_none());
+    }
+
+    #[test]
+    fn test_map_vat_invoice_array_format() {
+        // 部分多值字段（如 CommodityName）返回数组
+        let resp_json = json!({
+            "words_result": {
+                "InvoiceNum": [{"word": "26317000002652868787"}],
+            }
+        });
+        let resp = make_response(resp_json);
+        let preview = map_baidu_response(&resp, "");
+        assert_eq!(preview.invoice_number.as_deref(), Some("26317000002652868787"));
     }
 
     #[test]
