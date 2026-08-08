@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   Button, Table, Card, Row, Col, Input, Select, DatePicker, Modal,
   message, Space, Tag, Form, Drawer, Spin, Alert, Statistic,
@@ -8,6 +8,7 @@ import {
   EditOutlined, DeleteOutlined, EyeOutlined, PlusOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
+import { convertFileSrc } from '@tauri-apps/api/core';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import {
   getInvoiceExpenseTypes, saveInvoiceExpenseType, deleteInvoiceExpenseType,
@@ -345,6 +346,12 @@ const Invoices: React.FC = () => {
     !uploadModal.form.expense_type_code ||
     (!!uploadModal.preview?.is_duplicate && !uploadModal.editingId);
 
+  const viewDrawerAssetSrc = useMemo(
+    () => (viewDrawer?.image_path ? convertFileSrc(viewDrawer.image_path) : undefined),
+    [viewDrawer?.image_path],
+  );
+  const isViewDrawerPdf = viewDrawer?.image_path?.toLowerCase().endsWith('.pdf') ?? false;
+
   return (
     <div>
       <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -590,12 +597,12 @@ const Invoices: React.FC = () => {
       >
         {viewDrawer && (
           <div>
-            {viewDrawer.image_path && (
+            {viewDrawerAssetSrc && (
               <div style={{ marginBottom: 16 }}>
-                {viewDrawer.image_path.endsWith('.pdf') ? (
-                  <iframe src={viewDrawer.image_path} style={{ width: '100%', height: 400 }} title="发票原图" />
+                {isViewDrawerPdf ? (
+                  <iframe src={viewDrawerAssetSrc} style={{ width: '100%', height: 400 }} title="发票原图" />
                 ) : (
-                  <img src={viewDrawer.image_path} alt="发票原图" style={{ width: '100%' }} />
+                  <img src={viewDrawerAssetSrc} alt="发票原图" style={{ width: '100%' }} />
                 )}
               </div>
             )}
