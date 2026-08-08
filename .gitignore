@@ -41,3 +41,6 @@ __pycache__/
 
 # Graphify output
 graphify-out/
+
+# Agent scratch
+.gstack/
