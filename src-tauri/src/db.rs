@@ -1,7 +1,8 @@
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use chrono::Utc;
+use chrono::{Datelike, NaiveDate, Utc};
 use rusqlite::{params, Connection};
 
 use crate::errors::{AppError, AppResult};
@@ -1365,6 +1366,576 @@ fn build_month_close_checks(summary: &MonthCloseSummary) -> Vec<MonthCloseCheckI
     ]
 }
 
+// ==================== Financial Analysis ====================
+
+pub fn get_financial_analysis(
+    conn: &Connection,
+    query: &FinancialAnalysisQuery,
+) -> AppResult<FinancialAnalysisReport> {
+    let months = query.months.unwrap_or(6).clamp(2, 24);
+    let trend_months = month_window(&query.month, months as usize);
+    let comparison_months = month_window(&query.month, 2);
+
+    Ok(FinancialAnalysisReport {
+        month: query.month.clone(),
+        months,
+        department_costs: get_department_cost_analysis(conn, &query.month)?,
+        expense_trends: get_expense_type_trends(conn, &trend_months)?,
+        employee_costs: get_employee_cost_views(conn, &query.month)?,
+        monthly_comparison: get_monthly_comparison(conn, &comparison_months)?,
+    })
+}
+
+fn get_department_cost_analysis(
+    conn: &Connection,
+    month: &str,
+) -> AppResult<Vec<DepartmentCostAnalysis>> {
+    let mut by_department: HashMap<String, DepartmentCostAnalysis> = HashMap::new();
+
+    {
+        let mut stmt = conn.prepare(
+            "SELECT
+                COALESCE(NULLIF(TRIM(department), ''), '未分配') AS department,
+                COUNT(DISTINCT employee_no) AS employee_count,
+                COALESCE(SUM(gross_salary), 0),
+                COALESCE(SUM(social_security_personal), 0),
+                COALESCE(SUM(housing_fund_personal), 0)
+             FROM salary_monthly_results
+             WHERE salary_month = ?1
+             GROUP BY COALESCE(NULLIF(TRIM(department), ''), '未分配')",
+        )?;
+        let rows = stmt.query_map(params![month], |row| {
+            let gross_salary: f64 = row.get(2)?;
+            let social_security: f64 = row.get(3)?;
+            let housing_fund: f64 = row.get(4)?;
+            Ok(DepartmentCostAnalysis {
+                department: row.get(0)?,
+                employee_count: row.get::<_, i64>(1)? as i32,
+                gross_salary,
+                social_security,
+                housing_fund,
+                salary_cost: gross_salary + social_security + housing_fund,
+                invoice_amount: 0.0,
+                reimbursement_amount: 0.0,
+                total_cost: gross_salary + social_security + housing_fund,
+            })
+        })?;
+        for row in rows {
+            let item = row?;
+            by_department.insert(item.department.clone(), item);
+        }
+    }
+
+    {
+        let mut stmt = conn.prepare(
+            "SELECT
+                COALESCE(NULLIF(TRIM(e.department), ''), '未分配') AS department,
+                COALESCE(SUM(i.total_amount), 0)
+             FROM invoices i
+             LEFT JOIN employees e ON e.id = i.employee_id
+             WHERE i.belong_month = ?1 AND i.status != 'void'
+             GROUP BY COALESCE(NULLIF(TRIM(e.department), ''), '未分配')",
+        )?;
+        let rows = stmt.query_map(params![month], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+        })?;
+        for row in rows {
+            let (department, amount) = row?;
+            let item = by_department
+                .entry(department.clone())
+                .or_insert_with(|| empty_department_cost(&department));
+            item.invoice_amount = amount;
+            item.total_cost = item.salary_cost + item.invoice_amount + item.reimbursement_amount;
+        }
+    }
+
+    {
+        let mut stmt = conn.prepare(
+            "SELECT
+                COALESCE(NULLIF(TRIM(e.department), ''), '未分配') AS department,
+                COALESCE(SUM(r.total_amount), 0)
+             FROM reimbursement_claims r
+             LEFT JOIN employees e ON e.id = r.employee_id
+             WHERE r.belong_month = ?1 AND r.status != 'void'
+             GROUP BY COALESCE(NULLIF(TRIM(e.department), ''), '未分配')",
+        )?;
+        let rows = stmt.query_map(params![month], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+        })?;
+        for row in rows {
+            let (department, amount) = row?;
+            let item = by_department
+                .entry(department.clone())
+                .or_insert_with(|| empty_department_cost(&department));
+            item.reimbursement_amount = amount;
+            item.total_cost = item.salary_cost + item.invoice_amount + item.reimbursement_amount;
+        }
+    }
+
+    let mut result: Vec<_> = by_department.into_values().collect();
+    result.sort_by(|a, b| {
+        b.total_cost
+            .partial_cmp(&a.total_cost)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.department.cmp(&b.department))
+    });
+    Ok(result)
+}
+
+fn empty_department_cost(department: &str) -> DepartmentCostAnalysis {
+    DepartmentCostAnalysis {
+        department: department.to_string(),
+        employee_count: 0,
+        gross_salary: 0.0,
+        social_security: 0.0,
+        housing_fund: 0.0,
+        salary_cost: 0.0,
+        invoice_amount: 0.0,
+        reimbursement_amount: 0.0,
+        total_cost: 0.0,
+    }
+}
+
+fn get_expense_type_trends(
+    conn: &Connection,
+    months: &[String],
+) -> AppResult<Vec<ExpenseTypeTrend>> {
+    let mut expense_types = get_enabled_expense_type_names(conn)?;
+    let mut seen_codes: BTreeSet<String> = expense_types.keys().cloned().collect();
+    let mut by_key: HashMap<(String, String), ExpenseTypeTrend> = HashMap::new();
+
+    for month in months {
+        for (code, name) in &expense_types {
+            by_key.insert(
+                (month.clone(), code.clone()),
+                ExpenseTypeTrend {
+                    month: month.clone(),
+                    expense_type_code: code.clone(),
+                    expense_type_name: name.clone(),
+                    invoice_count: 0,
+                    invoice_amount: 0.0,
+                    reimbursement_amount: 0.0,
+                },
+            );
+        }
+    }
+
+    if let (Some(start_month), Some(end_month)) = (months.first(), months.last()) {
+        let mut stmt = conn.prepare(
+            "SELECT
+                i.belong_month,
+                COALESCE(NULLIF(TRIM(i.expense_type_code), ''), 'uncategorized') AS code,
+                COALESCE(t.name, '未归类') AS name,
+                COUNT(*),
+                COALESCE(SUM(i.total_amount), 0)
+             FROM invoices i
+             LEFT JOIN invoice_expense_types t ON t.code = i.expense_type_code
+             WHERE i.belong_month >= ?1 AND i.belong_month <= ?2 AND i.status != 'void'
+             GROUP BY i.belong_month, COALESCE(NULLIF(TRIM(i.expense_type_code), ''), 'uncategorized'), COALESCE(t.name, '未归类')",
+        )?;
+        let rows = stmt.query_map(params![start_month, end_month], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)? as i32,
+                row.get::<_, f64>(4)?,
+            ))
+        })?;
+        for row in rows {
+            let (month, code, name, invoice_count, invoice_amount) = row?;
+            seen_codes.insert(code.clone());
+            expense_types.entry(code.clone()).or_insert(name.clone());
+            let item = by_key
+                .entry((month.clone(), code.clone()))
+                .or_insert(ExpenseTypeTrend {
+                    month,
+                    expense_type_code: code,
+                    expense_type_name: name,
+                    invoice_count: 0,
+                    invoice_amount: 0.0,
+                    reimbursement_amount: 0.0,
+                });
+            item.invoice_count = invoice_count;
+            item.invoice_amount = invoice_amount;
+        }
+
+        let mut stmt = conn.prepare(
+            "SELECT
+                r.belong_month,
+                COALESCE(NULLIF(TRIM(i.expense_type_code), ''), 'uncategorized') AS code,
+                COALESCE(t.name, '未归类') AS name,
+                COALESCE(SUM(i.total_amount), 0)
+             FROM reimbursement_claims r
+             JOIN reimbursement_claim_invoices ri ON ri.claim_id = r.id
+             JOIN invoices i ON i.id = ri.invoice_id
+             LEFT JOIN invoice_expense_types t ON t.code = i.expense_type_code
+             WHERE r.belong_month >= ?1 AND r.belong_month <= ?2
+               AND r.status != 'void'
+               AND i.status != 'void'
+             GROUP BY r.belong_month, COALESCE(NULLIF(TRIM(i.expense_type_code), ''), 'uncategorized'), COALESCE(t.name, '未归类')",
+        )?;
+        let rows = stmt.query_map(params![start_month, end_month], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, f64>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (month, code, name, reimbursement_amount) = row?;
+            seen_codes.insert(code.clone());
+            expense_types.entry(code.clone()).or_insert(name.clone());
+            let item = by_key
+                .entry((month.clone(), code.clone()))
+                .or_insert(ExpenseTypeTrend {
+                    month,
+                    expense_type_code: code,
+                    expense_type_name: name,
+                    invoice_count: 0,
+                    invoice_amount: 0.0,
+                    reimbursement_amount: 0.0,
+                });
+            item.reimbursement_amount = reimbursement_amount;
+        }
+    }
+
+    for month in months {
+        for code in seen_codes.iter() {
+            let name = expense_types
+                .get(code)
+                .cloned()
+                .unwrap_or_else(|| "未归类".to_string());
+            by_key
+                .entry((month.clone(), code.clone()))
+                .or_insert(ExpenseTypeTrend {
+                    month: month.clone(),
+                    expense_type_code: code.clone(),
+                    expense_type_name: name,
+                    invoice_count: 0,
+                    invoice_amount: 0.0,
+                    reimbursement_amount: 0.0,
+                });
+        }
+    }
+
+    let mut result: Vec<_> = by_key.into_values().collect();
+    result.sort_by(|a, b| {
+        a.month
+            .cmp(&b.month)
+            .then_with(|| a.expense_type_name.cmp(&b.expense_type_name))
+    });
+    Ok(result)
+}
+
+fn get_enabled_expense_type_names(conn: &Connection) -> AppResult<HashMap<String, String>> {
+    let mut stmt = conn.prepare(
+        "SELECT code, name FROM invoice_expense_types WHERE enabled = 1 ORDER BY sort_order, id",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut result = HashMap::new();
+    for row in rows {
+        let (code, name) = row?;
+        result.insert(code, name);
+    }
+    Ok(result)
+}
+
+fn get_employee_cost_views(conn: &Connection, month: &str) -> AppResult<Vec<EmployeeCostView>> {
+    let mut by_no: HashMap<String, EmployeeCostView> = HashMap::new();
+    let mut id_to_no: HashMap<i64, String> = HashMap::new();
+
+    {
+        let mut stmt = conn.prepare(
+            "SELECT id, employee_no, name, COALESCE(NULLIF(TRIM(department), ''), '未分配')
+             FROM employees
+             ORDER BY department, name",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (id, employee_no, name, department) = row?;
+            id_to_no.insert(id, employee_no.clone());
+            by_no.insert(
+                employee_no.clone(),
+                empty_employee_cost(Some(id), &employee_no, &name, &department),
+            );
+        }
+    }
+
+    {
+        let mut stmt = conn.prepare(
+            "SELECT
+                s.employee_no,
+                COALESCE(s.name, e.name, ''),
+                COALESCE(NULLIF(TRIM(s.department), ''), NULLIF(TRIM(e.department), ''), '未分配'),
+                e.id,
+                COALESCE(SUM(s.gross_salary), 0),
+                COALESCE(SUM(s.net_salary), 0),
+                COALESCE(SUM(s.social_security_personal), 0),
+                COALESCE(SUM(s.housing_fund_personal), 0),
+                COALESCE(SUM(s.attendance_deduction), 0)
+             FROM salary_monthly_results s
+             LEFT JOIN employees e ON e.employee_no = s.employee_no
+             WHERE s.salary_month = ?1
+             GROUP BY s.employee_no, COALESCE(s.name, e.name, ''), COALESCE(NULLIF(TRIM(s.department), ''), NULLIF(TRIM(e.department), ''), '未分配'), e.id",
+        )?;
+        let rows = stmt.query_map(params![month], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, f64>(4)?,
+                row.get::<_, f64>(5)?,
+                row.get::<_, f64>(6)?,
+                row.get::<_, f64>(7)?,
+                row.get::<_, f64>(8)?,
+            ))
+        })?;
+        for row in rows {
+            let (
+                employee_no,
+                name,
+                department,
+                employee_id,
+                gross_salary,
+                net_salary,
+                social_security,
+                housing_fund,
+                attendance_deduction,
+            ) = row?;
+            let item = by_no.entry(employee_no.clone()).or_insert_with(|| {
+                empty_employee_cost(employee_id, &employee_no, &name, &department)
+            });
+            item.name = name;
+            item.department = department;
+            item.employee_id = employee_id.or(item.employee_id);
+            item.gross_salary = gross_salary;
+            item.net_salary = net_salary;
+            item.social_security = social_security;
+            item.housing_fund = housing_fund;
+            item.attendance_deduction = attendance_deduction;
+            item.total_cost = item.gross_salary
+                + item.social_security
+                + item.housing_fund
+                + item.reimbursement_amount;
+        }
+    }
+
+    {
+        let mut stmt = conn.prepare(
+            "SELECT employee_no, COUNT(*)
+             FROM attendance_records
+             WHERE salary_month = ?1
+               AND (actual_days < expected_days OR late_count > 0 OR early_leave_count > 0 OR absent_days > 0)
+             GROUP BY employee_no",
+        )?;
+        let rows = stmt.query_map(params![month], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as i32))
+        })?;
+        for row in rows {
+            let (employee_no, count) = row?;
+            if let Some(item) = by_no.get_mut(&employee_no) {
+                item.abnormal_attendance_count = count;
+            }
+        }
+    }
+
+    {
+        let mut stmt = conn.prepare(
+            "SELECT employee_id, COALESCE(SUM(total_amount), 0)
+             FROM invoices
+             WHERE belong_month = ?1 AND status != 'void' AND employee_id IS NOT NULL
+             GROUP BY employee_id",
+        )?;
+        let rows = stmt.query_map(params![month], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?))
+        })?;
+        for row in rows {
+            let (employee_id, amount) = row?;
+            let employee_no = id_to_no
+                .get(&employee_id)
+                .cloned()
+                .unwrap_or_else(|| format!("ID-{employee_id}"));
+            let item = by_no.entry(employee_no.clone()).or_insert_with(|| {
+                empty_employee_cost(Some(employee_id), &employee_no, "未知员工", "未分配")
+            });
+            item.invoice_amount = amount;
+        }
+    }
+
+    {
+        let mut stmt = conn.prepare(
+            "SELECT employee_id, COALESCE(SUM(total_amount), 0)
+             FROM reimbursement_claims
+             WHERE belong_month = ?1 AND status != 'void' AND employee_id IS NOT NULL
+             GROUP BY employee_id",
+        )?;
+        let rows = stmt.query_map(params![month], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?))
+        })?;
+        for row in rows {
+            let (employee_id, amount) = row?;
+            let employee_no = id_to_no
+                .get(&employee_id)
+                .cloned()
+                .unwrap_or_else(|| format!("ID-{employee_id}"));
+            let item = by_no.entry(employee_no.clone()).or_insert_with(|| {
+                empty_employee_cost(Some(employee_id), &employee_no, "未知员工", "未分配")
+            });
+            item.reimbursement_amount = amount;
+            item.total_cost = item.gross_salary
+                + item.social_security
+                + item.housing_fund
+                + item.reimbursement_amount;
+        }
+    }
+
+    let mut result: Vec<_> = by_no
+        .into_values()
+        .filter(|item| {
+            item.gross_salary != 0.0
+                || item.invoice_amount != 0.0
+                || item.reimbursement_amount != 0.0
+                || item.abnormal_attendance_count != 0
+        })
+        .collect();
+    result.sort_by(|a, b| {
+        b.total_cost
+            .partial_cmp(&a.total_cost)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.department.cmp(&b.department))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    Ok(result)
+}
+
+fn empty_employee_cost(
+    employee_id: Option<i64>,
+    employee_no: &str,
+    name: &str,
+    department: &str,
+) -> EmployeeCostView {
+    EmployeeCostView {
+        employee_id,
+        employee_no: employee_no.to_string(),
+        name: name.to_string(),
+        department: department.to_string(),
+        gross_salary: 0.0,
+        net_salary: 0.0,
+        social_security: 0.0,
+        housing_fund: 0.0,
+        attendance_deduction: 0.0,
+        invoice_amount: 0.0,
+        reimbursement_amount: 0.0,
+        abnormal_attendance_count: 0,
+        total_cost: 0.0,
+    }
+}
+
+fn get_monthly_comparison(
+    conn: &Connection,
+    months: &[String],
+) -> AppResult<Vec<MonthlyComparison>> {
+    let mut result = Vec::new();
+    for month in months {
+        let gross_salary: f64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(gross_salary), 0) FROM salary_monthly_results WHERE salary_month = ?1",
+                params![month],
+                |row| row.get(0),
+            )
+            .unwrap_or(0.0);
+        let net_salary: f64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(net_salary), 0) FROM salary_monthly_results WHERE salary_month = ?1",
+                params![month],
+                |row| row.get(0),
+            )
+            .unwrap_or(0.0);
+        let deduction: f64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(attendance_deduction + tax_amount + other_deduction), 0)
+                 FROM salary_monthly_results WHERE salary_month = ?1",
+                params![month],
+                |row| row.get(0),
+            )
+            .unwrap_or(0.0);
+        let social_security: f64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(social_security_personal), 0) FROM salary_monthly_results WHERE salary_month = ?1",
+                params![month],
+                |row| row.get(0),
+            )
+            .unwrap_or(0.0);
+        let housing_fund: f64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(housing_fund_personal), 0) FROM salary_monthly_results WHERE salary_month = ?1",
+                params![month],
+                |row| row.get(0),
+            )
+            .unwrap_or(0.0);
+        let invoice_amount: f64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(total_amount), 0) FROM invoices WHERE belong_month = ?1 AND status != 'void'",
+                params![month],
+                |row| row.get(0),
+            )
+            .unwrap_or(0.0);
+        let reimbursement_amount: f64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(total_amount), 0) FROM reimbursement_claims WHERE belong_month = ?1 AND status != 'void'",
+                params![month],
+                |row| row.get(0),
+            )
+            .unwrap_or(0.0);
+        result.push(MonthlyComparison {
+            month: month.clone(),
+            gross_salary,
+            net_salary,
+            deduction,
+            social_security,
+            housing_fund,
+            invoice_amount,
+            reimbursement_amount,
+            total_cost: gross_salary + social_security + housing_fund + reimbursement_amount,
+        });
+    }
+    Ok(result)
+}
+
+fn month_window(end_month: &str, count: usize) -> Vec<String> {
+    let (mut year, mut month) = parse_month(end_month);
+    let mut result = Vec::with_capacity(count);
+    for _ in 0..count {
+        result.push(format!("{year:04}-{month:02}"));
+        if month == 1 {
+            year -= 1;
+            month = 12;
+        } else {
+            month -= 1;
+        }
+    }
+    result.reverse();
+    result
+}
+
+fn parse_month(month: &str) -> (i32, u32) {
+    let date = NaiveDate::parse_from_str(&format!("{month}-01"), "%Y-%m-%d")
+        .unwrap_or_else(|_| Utc::now().date_naive());
+    (date.year(), date.month())
+}
+
 // ==================== App Settings ====================
 
 pub fn get_setting(conn: &Connection, key: &str) -> AppResult<Option<String>> {
@@ -2064,6 +2635,53 @@ mod tests {
         }
     }
 
+    fn setup_financial_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        create_tables(&conn).unwrap();
+        insert_default_data(&conn).unwrap();
+        conn.execute_batch(
+            "
+            INSERT INTO employees
+                (id, employee_no, name, department, status, base_salary, created_at, updated_at)
+            VALUES
+                (1, 'E001', '张三', '销售部', 'active', 10000, '2026-08-01', '2026-08-01'),
+                (2, 'E002', '李四', '技术部', 'active', 8000, '2026-08-01', '2026-08-01');
+
+            INSERT INTO salary_monthly_results
+                (salary_month, employee_no, name, department, gross_salary, net_salary,
+                 social_security_personal, housing_fund_personal, attendance_deduction,
+                 tax_amount, other_deduction, status, locked, created_at, updated_at)
+            VALUES
+                ('2026-07', 'E001', '张三', '销售部', 9000, 7300, 900, 1000, 0, 600, 0, 'reviewed', 0, '2026-07-31', '2026-07-31'),
+                ('2026-08', 'E001', '张三', '销售部', 10000, 7800, 1000, 1200, 200, 800, 0, 'reviewed', 0, '2026-08-31', '2026-08-31'),
+                ('2026-08', 'E002', '李四', '技术部', 8000, 6600, 800, 900, 0, 500, 0, 'reviewed', 0, '2026-08-31', '2026-08-31');
+
+            INSERT INTO attendance_records
+                (salary_month, employee_no, name, expected_days, actual_days, late_count, early_leave_count, absent_days, created_at, updated_at)
+            VALUES
+                ('2026-08', 'E001', '张三', 22, 21, 1, 0, 0, '2026-08-31', '2026-08-31');
+
+            INSERT INTO invoices
+                (id, invoice_code, invoice_number, total_amount, expense_type_code, employee_id, belong_month, status, created_at, updated_at)
+            VALUES
+                (1, 'A', '001', 300, 'office', 1, '2026-08', 'normal', '2026-08-10', '2026-08-10'),
+                (2, 'A', '002', 500, 'travel', 2, '2026-08', 'normal', '2026-08-10', '2026-08-10'),
+                (3, 'A', '003', 100, 'office', 1, '2026-07', 'normal', '2026-07-10', '2026-07-10');
+
+            INSERT INTO reimbursement_claims
+                (id, claim_no, employee_id, belong_month, title, total_amount, invoice_count, status, payment_status, created_at, updated_at)
+            VALUES
+                (1, 'BX202608001', 1, '2026-08', '销售报销', 300, 1, 'approved', 'paid', '2026-08-15', '2026-08-15'),
+                (2, 'BX202608002', 2, '2026-08', '技术报销', 500, 1, 'approved', 'unpaid', '2026-08-15', '2026-08-15');
+
+            INSERT INTO reimbursement_claim_invoices (claim_id, invoice_id, created_at)
+            VALUES (1, 1, '2026-08-15'), (2, 2, '2026-08-15');
+            ",
+        )
+        .unwrap();
+        conn
+    }
+
     #[test]
     fn test_insert_and_find_invoice() {
         let conn = setup_db();
@@ -2194,5 +2812,54 @@ mod tests {
             .unwrap();
         let result = delete_invoice_expense_type(&conn, office_id);
         assert!(result.is_err(), "被引用的费用类型不允许删除");
+    }
+
+    #[test]
+    fn test_financial_analysis_aggregates_department_employee_and_trends() {
+        let conn = setup_financial_db();
+        let report = get_financial_analysis(
+            &conn,
+            &FinancialAnalysisQuery {
+                month: "2026-08".into(),
+                months: Some(3),
+            },
+        )
+        .unwrap();
+
+        let sales = report
+            .department_costs
+            .iter()
+            .find(|row| row.department == "销售部")
+            .unwrap();
+        assert_eq!(sales.employee_count, 1);
+        assert_eq!(sales.gross_salary, 10000.0);
+        assert_eq!(sales.social_security, 1000.0);
+        assert_eq!(sales.housing_fund, 1200.0);
+        assert_eq!(sales.invoice_amount, 300.0);
+        assert_eq!(sales.reimbursement_amount, 300.0);
+
+        let employee = report
+            .employee_costs
+            .iter()
+            .find(|row| row.employee_no == "E001")
+            .unwrap();
+        assert_eq!(employee.attendance_deduction, 200.0);
+        assert_eq!(employee.abnormal_attendance_count, 1);
+        assert_eq!(employee.invoice_amount, 300.0);
+        assert_eq!(employee.reimbursement_amount, 300.0);
+
+        let office_august = report
+            .expense_trends
+            .iter()
+            .find(|row| row.month == "2026-08" && row.expense_type_code == "office")
+            .unwrap();
+        assert_eq!(office_august.invoice_count, 1);
+        assert_eq!(office_august.invoice_amount, 300.0);
+        assert_eq!(office_august.reimbursement_amount, 300.0);
+
+        assert_eq!(report.monthly_comparison.len(), 2);
+        assert_eq!(report.monthly_comparison[0].month, "2026-07");
+        assert_eq!(report.monthly_comparison[1].month, "2026-08");
+        assert_eq!(report.monthly_comparison[1].gross_salary, 18000.0);
     }
 }

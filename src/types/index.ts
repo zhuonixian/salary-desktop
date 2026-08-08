@@ -268,6 +268,71 @@ export interface MonthCloseWorkbench {
   checks: MonthCloseCheckItem[];
 }
 
+// ==================== 财务分析 ====================
+
+export interface FinancialAnalysisQuery {
+  month: string;
+  months?: number;
+}
+
+export interface DepartmentCostAnalysis {
+  department: string;
+  employee_count: number;
+  gross_salary: number;
+  social_security: number;
+  housing_fund: number;
+  salary_cost: number;
+  invoice_amount: number;
+  reimbursement_amount: number;
+  total_cost: number;
+}
+
+export interface ExpenseTypeTrend {
+  month: string;
+  expense_type_code: string;
+  expense_type_name: string;
+  invoice_count: number;
+  invoice_amount: number;
+  reimbursement_amount: number;
+}
+
+export interface EmployeeCostView {
+  employee_id?: number;
+  employee_no: string;
+  name: string;
+  department: string;
+  gross_salary: number;
+  net_salary: number;
+  social_security: number;
+  housing_fund: number;
+  attendance_deduction: number;
+  invoice_amount: number;
+  reimbursement_amount: number;
+  abnormal_attendance_count: number;
+  total_cost: number;
+}
+
+export interface MonthlyComparison {
+  month: string;
+  gross_salary: number;
+  net_salary: number;
+  deduction: number;
+  social_security: number;
+  housing_fund: number;
+  invoice_amount: number;
+  reimbursement_amount: number;
+  total_cost: number;
+}
+
+export interface FinancialAnalysisReport {
+  month: string;
+  months: number;
+  department_costs: DepartmentCostAnalysis[];
+  expense_trends: ExpenseTypeTrend[];
+  employee_costs: EmployeeCostView[];
+  monthly_comparison: MonthlyComparison[];
+}
+
 // ==================== 发票相关 ====================
 
 export type InvoiceStatus = 'normal' | 'void';

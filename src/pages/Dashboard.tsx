@@ -7,7 +7,6 @@ import {
   WarningOutlined,
   PayCircleOutlined,
   MinusCircleOutlined,
-  DollarOutlined,
   FileTextOutlined,
   WalletOutlined,
   AuditOutlined,
@@ -165,7 +164,7 @@ const Dashboard: React.FC = () => {
     total_net_salary: 0,
   };
   const closeSummary = workbench?.summary;
-  const checks = workbench?.checks ?? [];
+  const checks = useMemo(() => workbench?.checks ?? [], [workbench?.checks]);
   const checkStatusCount = useMemo(() => ({
     ok: checks.filter((item) => item.status === 'ok').length,
     warning: checks.filter((item) => item.status === 'warning').length,

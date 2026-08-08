@@ -31,6 +31,9 @@ const operationTypeLabels: Record<string, string> = {
   update_reimbursement: '更新报销单',
   update_reimbursement_status: '更新报销状态',
   delete_reimbursement: '作废报销单',
+  export_department_cost_report: '导出部门成本表',
+  export_expense_analysis_report: '导出费用分析表',
+  export_month_close_report: '导出月结报告',
 };
 
 const getOperationLabel = (value?: string) =>

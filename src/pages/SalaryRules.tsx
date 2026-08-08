@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
-  Tabs, Form, InputNumber, Button, Table, message, Spin, Card, Space, Popconfirm,
+  Tabs, Form, InputNumber, Button, Table, message, Spin, Card, Popconfirm,
 } from 'antd';
 import { SaveOutlined, PlusOutlined, DeleteOutlined } from '@ant-design/icons';
 import { getSalaryRule, saveSalaryRule, getTaxRules, saveTaxRules } from '@/api';
@@ -16,9 +16,8 @@ const SalaryRules: React.FC = () => {
 
   // 个税税率表
   const [taxRules, setTaxRules] = useState<TaxRuleInput[]>([]);
-  const [taxEditing, setTaxEditing] = useState(false);
 
-  const fetchRule = async () => {
+  const fetchRule = useCallback(async () => {
     setLoading(true);
     try {
       const rule = await getSalaryRule();
@@ -40,9 +39,9 @@ const SalaryRules: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [ruleForm]);
 
-  const fetchTaxRules = async () => {
+  const fetchTaxRules = useCallback(async () => {
     try {
       const rules = await getTaxRules();
       setTaxRules(
@@ -58,12 +57,12 @@ const SalaryRules: React.FC = () => {
       const msg = e instanceof Error ? e.message : String(e);
       message.error('获取税率表失败: ' + msg);
     }
-  };
+  }, []);
 
   useEffect(() => {
     fetchRule();
     fetchTaxRules();
-  }, []);
+  }, [fetchRule, fetchTaxRules]);
 
   const handleSaveRule = async () => {
     setSaving(true);

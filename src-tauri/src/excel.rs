@@ -1076,3 +1076,289 @@ pub fn export_invoice_list(invoices: &[Invoice], path: &str) -> AppResult<bool> 
     workbook.save(path)?;
     Ok(true)
 }
+
+// ==================== Financial Analysis Export ====================
+
+pub fn export_department_cost_analysis(
+    rows: &[DepartmentCostAnalysis],
+    month: &str,
+    path: &str,
+) -> AppResult<bool> {
+    use rust_xlsxwriter::FormatBorder;
+
+    let mut workbook = Workbook::new();
+    let worksheet = workbook.add_worksheet();
+    worksheet.set_name("部门成本表")?;
+    let header_fmt = report_header_format();
+    let money_fmt = report_money_format();
+
+    worksheet.write_string(0, 0, format!("{month} 部门成本分析"))?;
+    let headers = [
+        "部门",
+        "人数",
+        "应发工资",
+        "社保",
+        "公积金",
+        "工资成本",
+        "发票费用",
+        "报销金额",
+        "总成本",
+    ];
+    for (col, header) in headers.iter().enumerate() {
+        worksheet.write_with_format(2, col as u16, *header, &header_fmt)?;
+    }
+    for (idx, row_data) in rows.iter().enumerate() {
+        let row = (idx + 3) as u32;
+        worksheet.write_string(row, 0, &row_data.department)?;
+        worksheet.write_number(row, 1, row_data.employee_count as f64)?;
+        worksheet.write_number_with_format(row, 2, row_data.gross_salary, &money_fmt)?;
+        worksheet.write_number_with_format(row, 3, row_data.social_security, &money_fmt)?;
+        worksheet.write_number_with_format(row, 4, row_data.housing_fund, &money_fmt)?;
+        worksheet.write_number_with_format(row, 5, row_data.salary_cost, &money_fmt)?;
+        worksheet.write_number_with_format(row, 6, row_data.invoice_amount, &money_fmt)?;
+        worksheet.write_number_with_format(row, 7, row_data.reimbursement_amount, &money_fmt)?;
+        worksheet.write_number_with_format(row, 8, row_data.total_cost, &money_fmt)?;
+    }
+    set_report_columns(worksheet, headers.len() as u16)?;
+
+    workbook.save(path)?;
+    let _ = FormatBorder::Thin;
+    Ok(true)
+}
+
+pub fn export_expense_analysis_report(
+    report: &FinancialAnalysisReport,
+    path: &str,
+) -> AppResult<bool> {
+    let mut workbook = Workbook::new();
+    let header_fmt = report_header_format();
+    let money_fmt = report_money_format();
+
+    {
+        let worksheet = workbook.add_worksheet();
+        worksheet.set_name("费用类型趋势")?;
+        worksheet.write_string(
+            0,
+            0,
+            format!("{} 最近{}个月费用类型趋势", report.month, report.months),
+        )?;
+        let headers = ["月份", "费用类型", "发票张数", "发票金额", "报销金额"];
+        for (col, header) in headers.iter().enumerate() {
+            worksheet.write_with_format(2, col as u16, *header, &header_fmt)?;
+        }
+        for (idx, row_data) in report.expense_trends.iter().enumerate() {
+            let row = (idx + 3) as u32;
+            worksheet.write_string(row, 0, &row_data.month)?;
+            worksheet.write_string(row, 1, &row_data.expense_type_name)?;
+            worksheet.write_number(row, 2, row_data.invoice_count as f64)?;
+            worksheet.write_number_with_format(row, 3, row_data.invoice_amount, &money_fmt)?;
+            worksheet.write_number_with_format(
+                row,
+                4,
+                row_data.reimbursement_amount,
+                &money_fmt,
+            )?;
+        }
+        set_report_columns(worksheet, headers.len() as u16)?;
+    }
+
+    {
+        let worksheet = workbook.add_worksheet();
+        worksheet.set_name("员工成本")?;
+        let headers = [
+            "部门",
+            "工号",
+            "姓名",
+            "应发工资",
+            "实发工资",
+            "社保",
+            "公积金",
+            "考勤扣款",
+            "发票费用",
+            "报销金额",
+            "异常考勤",
+            "总成本",
+        ];
+        for (col, header) in headers.iter().enumerate() {
+            worksheet.write_with_format(0, col as u16, *header, &header_fmt)?;
+        }
+        for (idx, row_data) in report.employee_costs.iter().enumerate() {
+            let row = (idx + 1) as u32;
+            worksheet.write_string(row, 0, &row_data.department)?;
+            worksheet.write_string(row, 1, &row_data.employee_no)?;
+            worksheet.write_string(row, 2, &row_data.name)?;
+            worksheet.write_number_with_format(row, 3, row_data.gross_salary, &money_fmt)?;
+            worksheet.write_number_with_format(row, 4, row_data.net_salary, &money_fmt)?;
+            worksheet.write_number_with_format(row, 5, row_data.social_security, &money_fmt)?;
+            worksheet.write_number_with_format(row, 6, row_data.housing_fund, &money_fmt)?;
+            worksheet.write_number_with_format(
+                row,
+                7,
+                row_data.attendance_deduction,
+                &money_fmt,
+            )?;
+            worksheet.write_number_with_format(row, 8, row_data.invoice_amount, &money_fmt)?;
+            worksheet.write_number_with_format(
+                row,
+                9,
+                row_data.reimbursement_amount,
+                &money_fmt,
+            )?;
+            worksheet.write_number(row, 10, row_data.abnormal_attendance_count as f64)?;
+            worksheet.write_number_with_format(row, 11, row_data.total_cost, &money_fmt)?;
+        }
+        set_report_columns(worksheet, headers.len() as u16)?;
+    }
+
+    workbook.save(path)?;
+    Ok(true)
+}
+
+pub fn export_month_close_report(
+    report: &FinancialAnalysisReport,
+    workbench: &MonthCloseWorkbench,
+    path: &str,
+) -> AppResult<bool> {
+    let mut workbook = Workbook::new();
+    let header_fmt = report_header_format();
+    let money_fmt = report_money_format();
+
+    {
+        let worksheet = workbook.add_worksheet();
+        worksheet.set_name("月结概览")?;
+        worksheet.write_string(0, 0, format!("{} 月结报告", report.month))?;
+        let summary = &workbench.summary;
+        let rows = [
+            ("在职员工", summary.active_employee_count as f64),
+            ("工资结果", summary.salary_count as f64),
+            ("异常考勤", summary.abnormal_attendance_count as f64),
+            ("发票张数", summary.invoice_count as f64),
+            ("报销单数", summary.reimbursement_count as f64),
+            ("工资应发合计", summary.total_salary_cost),
+            ("发票价税合计", summary.total_invoice_amount),
+            ("已批报销金额", summary.approved_reimbursement_amount),
+            ("已付款报销金额", summary.paid_reimbursement_amount),
+        ];
+        worksheet.write_with_format(2, 0, "指标", &header_fmt)?;
+        worksheet.write_with_format(2, 1, "数值", &header_fmt)?;
+        for (idx, (label, value)) in rows.iter().enumerate() {
+            let row = (idx + 3) as u32;
+            worksheet.write_string(row, 0, *label)?;
+            worksheet.write_number_with_format(row, 1, *value, &money_fmt)?;
+        }
+        worksheet.set_column_width(0, 22)?;
+        worksheet.set_column_width(1, 18)?;
+    }
+
+    {
+        let worksheet = workbook.add_worksheet();
+        worksheet.set_name("月结检查")?;
+        let headers = ["检查项", "状态", "数量", "说明"];
+        for (col, header) in headers.iter().enumerate() {
+            worksheet.write_with_format(0, col as u16, *header, &header_fmt)?;
+        }
+        for (idx, item) in workbench.checks.iter().enumerate() {
+            let row = (idx + 1) as u32;
+            worksheet.write_string(row, 0, &item.title)?;
+            worksheet.write_string(row, 1, status_text(&item.status))?;
+            worksheet.write_number(row, 2, item.count as f64)?;
+            worksheet.write_string(row, 3, &item.description)?;
+        }
+        set_report_columns(worksheet, headers.len() as u16)?;
+    }
+
+    {
+        let worksheet = workbook.add_worksheet();
+        worksheet.set_name("月度对比")?;
+        let headers = [
+            "月份",
+            "应发",
+            "实发",
+            "扣款",
+            "社保",
+            "公积金",
+            "发票",
+            "报销",
+            "总成本",
+        ];
+        for (col, header) in headers.iter().enumerate() {
+            worksheet.write_with_format(0, col as u16, *header, &header_fmt)?;
+        }
+        for (idx, row_data) in report.monthly_comparison.iter().enumerate() {
+            let row = (idx + 1) as u32;
+            worksheet.write_string(row, 0, &row_data.month)?;
+            worksheet.write_number_with_format(row, 1, row_data.gross_salary, &money_fmt)?;
+            worksheet.write_number_with_format(row, 2, row_data.net_salary, &money_fmt)?;
+            worksheet.write_number_with_format(row, 3, row_data.deduction, &money_fmt)?;
+            worksheet.write_number_with_format(row, 4, row_data.social_security, &money_fmt)?;
+            worksheet.write_number_with_format(row, 5, row_data.housing_fund, &money_fmt)?;
+            worksheet.write_number_with_format(row, 6, row_data.invoice_amount, &money_fmt)?;
+            worksheet.write_number_with_format(
+                row,
+                7,
+                row_data.reimbursement_amount,
+                &money_fmt,
+            )?;
+            worksheet.write_number_with_format(row, 8, row_data.total_cost, &money_fmt)?;
+        }
+        set_report_columns(worksheet, headers.len() as u16)?;
+    }
+
+    {
+        let worksheet = workbook.add_worksheet();
+        worksheet.set_name("部门成本")?;
+        let headers = ["部门", "人数", "工资成本", "发票费用", "报销金额", "总成本"];
+        for (col, header) in headers.iter().enumerate() {
+            worksheet.write_with_format(0, col as u16, *header, &header_fmt)?;
+        }
+        for (idx, row_data) in report.department_costs.iter().enumerate() {
+            let row = (idx + 1) as u32;
+            worksheet.write_string(row, 0, &row_data.department)?;
+            worksheet.write_number(row, 1, row_data.employee_count as f64)?;
+            worksheet.write_number_with_format(row, 2, row_data.salary_cost, &money_fmt)?;
+            worksheet.write_number_with_format(row, 3, row_data.invoice_amount, &money_fmt)?;
+            worksheet.write_number_with_format(
+                row,
+                4,
+                row_data.reimbursement_amount,
+                &money_fmt,
+            )?;
+            worksheet.write_number_with_format(row, 5, row_data.total_cost, &money_fmt)?;
+        }
+        set_report_columns(worksheet, headers.len() as u16)?;
+    }
+
+    workbook.save(path)?;
+    Ok(true)
+}
+
+fn report_header_format() -> Format {
+    use rust_xlsxwriter::FormatBorder;
+    Format::new()
+        .set_bold()
+        .set_background_color("#D9EAD3")
+        .set_border(FormatBorder::Thin)
+}
+
+fn report_money_format() -> Format {
+    Format::new().set_num_format("#,##0.00")
+}
+
+fn set_report_columns(
+    worksheet: &mut rust_xlsxwriter::Worksheet,
+    column_count: u16,
+) -> AppResult<()> {
+    for col in 0..column_count {
+        worksheet.set_column_width(col, if col == 0 { 16 } else { 14 })?;
+    }
+    Ok(())
+}
+
+fn status_text(status: &str) -> &str {
+    match status {
+        "ok" => "正常",
+        "warning" => "提醒",
+        "blocking" => "阻塞",
+        _ => status,
+    }
+}

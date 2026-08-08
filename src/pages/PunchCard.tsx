@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import {
-  Card, Button, Select, message, Table, Spin, Input, Row, Col, Divider,
+  Card, Button, message, Table, Spin, Input, Row, Col, Divider,
 } from 'antd';
 import {
   FileExcelOutlined, CameraOutlined, CheckCircleOutlined,

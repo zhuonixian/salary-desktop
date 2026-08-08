@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
   Card, Button, Table, Input, Row, Col, Divider, message, Spin, List, Tag, Radio, Modal,
 } from 'antd';
@@ -28,7 +28,7 @@ const OcrCenter: React.FC = () => {
   const [apiKey, setApiKey] = useState('');
   const [secretKey, setSecretKey] = useState('');
 
-  const fetchBatches = async () => {
+  const fetchBatches = useCallback(async () => {
     setBatchLoading(true);
     try {
       const data = await getOcrBatches(month.format('YYYY-MM'));
@@ -39,9 +39,9 @@ const OcrCenter: React.FC = () => {
     } finally {
       setBatchLoading(false);
     }
-  };
+  }, [month]);
 
-  const loadSettings = async () => {
+  const loadSettings = useCallback(async () => {
     try {
       const settings = await getOcrSettings();
       setOcrMode(settings.ocr_mode as 'local' | 'online');
@@ -50,12 +50,12 @@ const OcrCenter: React.FC = () => {
     } catch {
       // Use defaults
     }
-  };
+  }, []);
 
   useEffect(() => {
     fetchBatches();
     loadSettings();
-  }, []);
+  }, [fetchBatches, loadSettings]);
 
   const handleBrowseFile = async () => {
     try {

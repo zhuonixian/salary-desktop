@@ -533,6 +533,73 @@ pub fn get_month_close_workbench(
 }
 
 #[tauri::command]
+pub fn get_financial_analysis(
+    query: FinancialAnalysisQuery,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<FinancialAnalysisReport, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    db::get_financial_analysis(&conn, &query)
+}
+
+#[tauri::command]
+pub fn export_department_cost_report(
+    query: FinancialAnalysisQuery,
+    path: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let report = db::get_financial_analysis(&conn, &query)?;
+    excel::export_department_cost_analysis(&report.department_costs, &report.month, &path)?;
+    db::log_operation(
+        &conn,
+        "export_department_cost_report",
+        &format!("导出{}部门成本表到{}", report.month, path),
+        "system",
+        None,
+    )?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn export_expense_analysis_report(
+    query: FinancialAnalysisQuery,
+    path: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let report = db::get_financial_analysis(&conn, &query)?;
+    excel::export_expense_analysis_report(&report, &path)?;
+    db::log_operation(
+        &conn,
+        "export_expense_analysis_report",
+        &format!("导出{}费用分析表到{}", report.month, path),
+        "system",
+        None,
+    )?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn export_month_close_report(
+    query: FinancialAnalysisQuery,
+    path: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let report = db::get_financial_analysis(&conn, &query)?;
+    let workbench = db::get_month_close_workbench(&conn, &query.month)?;
+    excel::export_month_close_report(&report, &workbench, &path)?;
+    db::log_operation(
+        &conn,
+        "export_month_close_report",
+        &format!("导出{}月结报告到{}", report.month, path),
+        "system",
+        None,
+    )?;
+    Ok(true)
+}
+
+#[tauri::command]
 pub fn query_operation_logs(
     query: OperationLogQuery,
     state: tauri::State<'_, Mutex<Connection>>,

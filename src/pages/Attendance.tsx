@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
-  Table, Button, DatePicker, Modal, Form, InputNumber, Space, message, Tag,
+  Table, Button, DatePicker, Modal, Form, InputNumber, message, Tag,
 } from 'antd';
 import { ImportOutlined, EditOutlined, DownloadOutlined } from '@ant-design/icons';
 import { open, save } from '@tauri-apps/plugin-dialog';

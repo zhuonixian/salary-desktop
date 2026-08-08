@@ -284,6 +284,77 @@ pub struct MonthCloseWorkbench {
     pub checks: Vec<MonthCloseCheckItem>,
 }
 
+// ==================== Financial Analysis ====================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FinancialAnalysisQuery {
+    pub month: String,
+    pub months: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DepartmentCostAnalysis {
+    pub department: String,
+    pub employee_count: i32,
+    pub gross_salary: f64,
+    pub social_security: f64,
+    pub housing_fund: f64,
+    pub salary_cost: f64,
+    pub invoice_amount: f64,
+    pub reimbursement_amount: f64,
+    pub total_cost: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExpenseTypeTrend {
+    pub month: String,
+    pub expense_type_code: String,
+    pub expense_type_name: String,
+    pub invoice_count: i32,
+    pub invoice_amount: f64,
+    pub reimbursement_amount: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmployeeCostView {
+    pub employee_id: Option<i64>,
+    pub employee_no: String,
+    pub name: String,
+    pub department: String,
+    pub gross_salary: f64,
+    pub net_salary: f64,
+    pub social_security: f64,
+    pub housing_fund: f64,
+    pub attendance_deduction: f64,
+    pub invoice_amount: f64,
+    pub reimbursement_amount: f64,
+    pub abnormal_attendance_count: i32,
+    pub total_cost: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonthlyComparison {
+    pub month: String,
+    pub gross_salary: f64,
+    pub net_salary: f64,
+    pub deduction: f64,
+    pub social_security: f64,
+    pub housing_fund: f64,
+    pub invoice_amount: f64,
+    pub reimbursement_amount: f64,
+    pub total_cost: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FinancialAnalysisReport {
+    pub month: String,
+    pub months: i32,
+    pub department_costs: Vec<DepartmentCostAnalysis>,
+    pub expense_trends: Vec<ExpenseTypeTrend>,
+    pub employee_costs: Vec<EmployeeCostView>,
+    pub monthly_comparison: Vec<MonthlyComparison>,
+}
+
 // ==================== Invoice ====================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

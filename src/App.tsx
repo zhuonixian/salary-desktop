@@ -16,6 +16,7 @@ import {
   AuditOutlined,
   CheckSquareOutlined,
   WalletOutlined,
+  BarChartOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import type { Dayjs } from 'dayjs';
@@ -32,6 +33,7 @@ import PunchCard from '@/pages/PunchCard';
 import MonthClose from '@/pages/MonthClose';
 import OperationLogs from '@/pages/OperationLogs';
 import Reimbursements from '@/pages/Reimbursements';
+import FinancialAnalysis from '@/pages/FinancialAnalysis';
 
 const { Sider, Header, Content } = Layout;
 
@@ -44,6 +46,7 @@ const menuItems = [
   { key: '/invoices', label: '发票管理', icon: <FileTextOutlined /> },
   { key: '/reimbursements', label: '报销管理', icon: <WalletOutlined /> },
   { key: '/month-close', label: '月结工作台', icon: <CheckSquareOutlined /> },
+  { key: '/financial-analysis', label: '财务分析', icon: <BarChartOutlined /> },
   { key: '/rules', label: '规则配置', icon: <SettingOutlined /> },
   { key: '/salary', label: '工资计算', icon: <CalculatorOutlined /> },
   { key: '/export', label: '导出中心', icon: <ExportOutlined /> },
@@ -111,6 +114,7 @@ const AppLayout: React.FC = () => {
             <Route path="/invoices" element={<Invoices />} />
             <Route path="/reimbursements" element={<Reimbursements />} />
             <Route path="/month-close" element={<MonthClose />} />
+            <Route path="/financial-analysis" element={<FinancialAnalysis />} />
             <Route path="/rules" element={<SalaryRules />} />
             <Route path="/salary" element={<SalaryCalculate />} />
             <Route path="/export" element={<ExportCenter />} />

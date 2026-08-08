@@ -23,6 +23,8 @@ import type {
   InvoiceOcrPreview,
   InvoiceQuery,
   MonthCloseWorkbench,
+  FinancialAnalysisQuery,
+  FinancialAnalysisReport,
   OperationLog,
   OperationLogQuery,
   ReimbursementClaim,
@@ -285,6 +287,22 @@ export async function getDashboardSummary(month: string): Promise<DashboardSumma
 
 export async function getMonthCloseWorkbench(month: string): Promise<MonthCloseWorkbench> {
   return invoke<MonthCloseWorkbench>('get_month_close_workbench', { month });
+}
+
+export async function getFinancialAnalysis(query: FinancialAnalysisQuery): Promise<FinancialAnalysisReport> {
+  return invoke<FinancialAnalysisReport>('get_financial_analysis', { query });
+}
+
+export async function exportDepartmentCostReport(query: FinancialAnalysisQuery, savePath: string): Promise<boolean> {
+  return invoke<boolean>('export_department_cost_report', { query, path: savePath });
+}
+
+export async function exportExpenseAnalysisReport(query: FinancialAnalysisQuery, savePath: string): Promise<boolean> {
+  return invoke<boolean>('export_expense_analysis_report', { query, path: savePath });
+}
+
+export async function exportMonthCloseReport(query: FinancialAnalysisQuery, savePath: string): Promise<boolean> {
+  return invoke<boolean>('export_month_close_report', { query, path: savePath });
 }
 
 export async function queryOperationLogs(query: OperationLogQuery): Promise<OperationLog[]> {
