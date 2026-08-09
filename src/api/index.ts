@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import { invoke as tauriInvoke } from '@tauri-apps/api/core';
 import type {
   Employee,
   EmployeeInput,
@@ -120,6 +120,87 @@ type BackendSalaryResult = {
   remark?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
+};
+
+const isTauriRuntime = (): boolean =>
+  typeof window !== 'undefined' && Boolean((window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
+
+const emptyMonthCloseSummary = (month = '') => ({
+  month,
+  active_employee_count: 0,
+  attendance_count: 0,
+  missing_attendance_count: 0,
+  abnormal_attendance_count: 0,
+  salary_count: 0,
+  reviewed_count: 0,
+  locked_count: 0,
+  missing_bank_count: 0,
+  invoice_count: 0,
+  uncategorized_invoice_count: 0,
+  reimbursement_count: 0,
+  pending_reimbursement_count: 0,
+  unpaid_reimbursement_count: 0,
+  total_salary_cost: 0,
+  total_invoice_amount: 0,
+  approved_reimbursement_amount: 0,
+  paid_reimbursement_amount: 0,
+});
+
+const mockTauriResponse = (command: string, args?: Record<string, unknown>): unknown => {
+  switch (command) {
+    case 'get_dashboard_summary':
+      return {
+        employee_count: 0,
+        active_employee_count: 0,
+        calculated_count: 0,
+        locked_count: 0,
+        total_gross_salary: 0,
+        total_net_salary: 0,
+        total_social_security: 0,
+        total_housing_fund: 0,
+        total_tax: 0,
+        attendance_count: 0,
+      };
+    case 'get_month_close_workbench':
+      return { summary: emptyMonthCloseSummary(String(args?.month ?? '')), checks: [] };
+    case 'get_financial_analysis': {
+      const query = args?.query as FinancialAnalysisQuery | undefined;
+      return {
+        month: query?.month ?? '',
+        months: query?.months ?? 1,
+        department_costs: [],
+        expense_trends: [],
+        employee_costs: [],
+        monthly_comparison: [],
+      };
+    }
+    case 'get_ocr_settings':
+      return { ocr_mode: 'online', ocr_provider: 'baidu', baidu_api_key: '', baidu_secret_key: '' };
+    case 'ocr_recognize':
+    case 'ocr_recognize_punch_card':
+      return { batch_id: 0, records: [], raw_text: '' };
+    case 'create_employee':
+      return { id: Date.now(), ...(args?.data as object), created_at: '', updated_at: '' };
+    case 'save_invoice_expense_type':
+      return { id: Date.now(), code: '', name: '', sort_order: 0, enabled: 1, ...(args?.data as object) };
+    case 'save_invoice':
+      return { id: Date.now(), amount: 0, tax_amount: 0, total_amount: 0, ...(args?.data as object) };
+    case 'save_reimbursement_claim':
+      return { id: Date.now(), total_amount: 0, invoice_count: 0, ...(args?.data as object) };
+    case 'ocr_invoice':
+      return {};
+    default:
+      if (command.startsWith('get_') || command.startsWith('query_')) return [];
+      if (command.startsWith('export_') || command.startsWith('delete_') || command.startsWith('update_')) return true;
+      return true;
+  }
+};
+
+const invoke = async <T>(command: string, args?: Record<string, unknown>): Promise<T> => {
+  if (isTauriRuntime()) {
+    return tauriInvoke<T>(command, args);
+  }
+  return mockTauriResponse(command, args) as T;
 };
 
 const numberOrZero = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) ? value : 0);

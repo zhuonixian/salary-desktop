@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { HashRouter, Routes, Route, useNavigate, useLocation } from 'react-router-dom';
+import { HashRouter, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import { Layout, Menu, DatePicker } from 'antd';
 import type { MenuProps } from 'antd';
 import {
@@ -67,7 +67,6 @@ const menuItems: MenuProps['items'] = [
     icon: <CalculatorOutlined />,
     children: [
       { key: '/salary', label: '工资计算', icon: <CalculatorOutlined /> },
-      { key: '/rules', label: '系统设置', icon: <SettingOutlined /> },
     ],
   },
   {
@@ -88,6 +87,7 @@ const menuItems: MenuProps['items'] = [
       { key: '/logs', label: '操作日志', icon: <AuditOutlined /> },
     ],
   },
+  { key: '/rules', label: '系统设置', icon: <SettingOutlined /> },
 ];
 
 const menuPathToGroupKey = new Map<string, string>();
@@ -99,9 +99,7 @@ for (const item of menuItems) {
   }
 }
 
-const defaultOpenKeys = menuItems
-  .map((item) => String(item?.key ?? ''))
-  .filter(Boolean);
+const defaultOpenKeys = ['workbench'];
 
 const AppLayout: React.FC = () => {
   const [collapsed, setCollapsed] = useState(false);
@@ -112,9 +110,29 @@ const AppLayout: React.FC = () => {
 
   useEffect(() => {
     const groupKey = menuPathToGroupKey.get(location.pathname);
-    if (!groupKey || openKeys.includes(groupKey)) return;
-    setOpenKeys((keys) => [...keys, groupKey]);
-  }, [location.pathname, openKeys]);
+    if (!groupKey) return;
+    setOpenKeys((keys) => (
+      keys.includes(groupKey) ? keys : [...keys, groupKey]
+    ));
+  }, [location.pathname]);
+
+  const handleOpenChange: MenuProps['onOpenChange'] = (keys) => {
+    const nextOpenKeys = keys as string[];
+    if (collapsed) {
+      setCollapsed(false);
+      setOpenKeys((currentKeys) => {
+        const openedKey = nextOpenKeys.find((key) => !currentKeys.includes(key)) ?? nextOpenKeys[0];
+        if (!openedKey || currentKeys.includes(openedKey)) return currentKeys;
+        return [...currentKeys, openedKey];
+      });
+      return;
+    }
+    setOpenKeys(nextOpenKeys);
+  };
+
+  const handleMenuClick: MenuProps['onClick'] = ({ key }) => {
+    navigate(key);
+  };
 
   return (
     <Layout className="app-layout">
@@ -127,7 +145,16 @@ const AppLayout: React.FC = () => {
         theme="dark"
       >
         <div className={`logo ${collapsed ? 'collapsed' : ''}`}>
-          {collapsed ? '工资' : '工资核算助手'}
+          <span>{collapsed ? '工资' : '工资核算助手'}</span>
+          <button
+            type="button"
+            className="sider-trigger-btn"
+            aria-label={collapsed ? '展开菜单栏' : '折叠菜单栏'}
+            title={collapsed ? '展开菜单栏' : '折叠菜单栏'}
+            onClick={() => setCollapsed(!collapsed)}
+          >
+            {collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+          </button>
         </div>
         <Menu
           theme="dark"
@@ -135,22 +162,15 @@ const AppLayout: React.FC = () => {
           selectedKeys={[location.pathname]}
           openKeys={collapsed ? [] : openKeys}
           items={menuItems}
-          onOpenChange={(keys) => setOpenKeys(keys as string[])}
-          onClick={({ key }) => navigate(key)}
+          onOpenChange={handleOpenChange}
+          onClick={handleMenuClick}
           style={{ borderRight: 0 }}
         />
       </Sider>
 
       <div className={`app-content-wrapper ${collapsed ? 'collapsed' : ''}`}>
         <Header className="app-header">
-          <div className="app-header-left">
-            <span
-              className="trigger-btn"
-              onClick={() => setCollapsed(!collapsed)}
-            >
-              {collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
-            </span>
-          </div>
+          <div className="app-header-left" />
           <div className="app-header-right">
             <span style={{ color: '#666', fontSize: 14 }}>当前月份：</span>
             <DatePicker
@@ -178,6 +198,7 @@ const AppLayout: React.FC = () => {
             <Route path="/salary" element={<SalaryCalculate />} />
             <Route path="/export" element={<ExportCenter />} />
             <Route path="/logs" element={<OperationLogs />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </Content>
       </div>
