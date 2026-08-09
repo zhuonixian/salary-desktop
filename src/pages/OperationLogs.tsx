@@ -34,6 +34,11 @@ const operationTypeLabels: Record<string, string> = {
   export_department_cost_report: '导出部门成本表',
   export_expense_analysis_report: '导出费用分析表',
   export_month_close_report: '导出月结报告',
+  create_payment_batch: '生成付款批次',
+  export_payment_batch: '导出付款批次',
+  mark_payment_batch_paid: '标记批次付款',
+  void_payment_batch: '作废付款批次',
+  update_payment_batch_remark: '更新批次备注',
 };
 
 const getOperationLabel = (value?: string) =>

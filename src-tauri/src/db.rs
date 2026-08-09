@@ -242,6 +242,42 @@ fn create_tables(conn: &Connection) -> AppResult<()> {
             updated_at TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_month_closes_status ON month_closes(status);
+
+        CREATE TABLE IF NOT EXISTS payment_batches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_no TEXT UNIQUE NOT NULL,
+            belong_month TEXT NOT NULL,
+            batch_type TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'draft',
+            total_amount REAL DEFAULT 0,
+            item_count INTEGER DEFAULT 0,
+            payment_date TEXT,
+            remark TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS payment_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id INTEGER NOT NULL,
+            source_type TEXT NOT NULL,
+            source_id INTEGER NOT NULL,
+            employee_id INTEGER,
+            employee_no TEXT,
+            employee_name TEXT,
+            bank_name TEXT,
+            bank_account TEXT,
+            amount REAL NOT NULL,
+            status TEXT DEFAULT 'pending',
+            remark TEXT,
+            created_at TEXT,
+            FOREIGN KEY (batch_id) REFERENCES payment_batches(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_payment_batches_month ON payment_batches(belong_month, batch_type, status);
+        CREATE INDEX IF NOT EXISTS idx_payment_items_batch ON payment_items(batch_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_items_active_source
+            ON payment_items(source_type, source_id)
+            WHERE status != 'void';
         ",
     )?;
     migrate_existing_schema(conn)?;
@@ -259,6 +295,20 @@ fn migrate_existing_schema(conn: &Connection) -> AppResult<()> {
     ensure_column(conn, "month_closes", "remark", "TEXT")?;
     ensure_column(conn, "month_closes", "created_at", "TEXT")?;
     ensure_column(conn, "month_closes", "updated_at", "TEXT")?;
+    ensure_column(
+        conn,
+        "salary_monthly_results",
+        "payment_status",
+        "TEXT DEFAULT 'unpaid'",
+    )?;
+    ensure_column(conn, "salary_monthly_results", "payment_date", "TEXT")?;
+    ensure_column(
+        conn,
+        "salary_monthly_results",
+        "payment_batch_id",
+        "INTEGER",
+    )?;
+    ensure_column(conn, "reimbursement_claims", "payment_batch_id", "INTEGER")?;
     Ok(())
 }
 
@@ -932,6 +982,11 @@ pub fn save_salary_result(conn: &Connection, result: &SalaryResult) -> AppResult
 
     match existing {
         Ok(existing_id) => {
+            if active_payment_item_exists(conn, "salary_result", existing_id)? {
+                return Err(AppError::InvalidParam(
+                    "工资结果已纳入付款批次，不能重新计算或覆盖".into(),
+                ));
+            }
             conn.execute(
                 "UPDATE salary_monthly_results SET name=?1, department=?2, base_salary=?3, position_salary=?4, performance_salary=?5, overtime_salary=?6, meal_allowance=?7, transport_allowance=?8, other_allowance=?9, gross_salary=?10, social_security_personal=?11, housing_fund_personal=?12, attendance_deduction=?13, tax_amount=?14, other_deduction=?15, net_salary=?16, status=?17, remark=?18, updated_at=?19 WHERE id=?20",
                 params![
@@ -1057,6 +1112,11 @@ pub fn update_salary_result(
 ) -> AppResult<bool> {
     let month = get_salary_result_month(conn, id)?;
     ensure_month_open(conn, &month)?;
+    if active_payment_item_exists(conn, "salary_result", id)? {
+        return Err(AppError::InvalidParam(
+            "工资结果已纳入付款批次，不能直接调整".into(),
+        ));
+    }
 
     let now = Utc::now().to_rfc3339();
     let mut updates = Vec::new();
@@ -1412,6 +1472,12 @@ pub fn get_month_close_workbench(conn: &Connection, month: &str) -> AppResult<Mo
         params![month],
         |row| row.get(0),
     )?;
+    let pending_payment_batch_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM payment_batches
+         WHERE belong_month = ?1 AND status IN ('draft', 'exported')",
+        params![month],
+        |row| row.get(0),
+    )?;
     let total_salary_cost: f64 = conn
         .query_row(
             "SELECT COALESCE(SUM(gross_salary), 0) FROM salary_monthly_results WHERE salary_month = ?1",
@@ -1458,6 +1524,7 @@ pub fn get_month_close_workbench(conn: &Connection, month: &str) -> AppResult<Mo
         reimbursement_count: reimbursement_count as i32,
         pending_reimbursement_count: pending_reimbursement_count as i32,
         unpaid_reimbursement_count: unpaid_reimbursement_count as i32,
+        pending_payment_batch_count: pending_payment_batch_count as i32,
         total_salary_cost,
         total_invoice_amount,
         approved_reimbursement_amount,
@@ -1620,6 +1687,26 @@ fn build_month_close_checks(summary: &MonthCloseSummary) -> Vec<MonthCloseCheckI
             },
             action_route: Some("/reimbursements".to_string()),
         },
+        MonthCloseCheckItem {
+            key: "payment_batches_paid".to_string(),
+            title: "付款批次完成".to_string(),
+            status: if summary.pending_payment_batch_count == 0 {
+                "ok"
+            } else {
+                "blocking"
+            }
+            .to_string(),
+            count: summary.pending_payment_batch_count,
+            description: if summary.pending_payment_batch_count == 0 {
+                "本月付款批次均已完成付款或作废".to_string()
+            } else {
+                format!(
+                    "{} 个付款批次待导出或待付款",
+                    summary.pending_payment_batch_count
+                )
+            },
+            action_route: Some("/payments".to_string()),
+        },
     ]
 }
 
@@ -1757,6 +1844,506 @@ pub fn reopen_month(conn: &Connection, month: &str, reason: &str) -> AppResult<M
         params![now, reason.trim(), now, month],
     )?;
     get_month_close_record(conn, month)?.ok_or_else(|| AppError::NotFound("月结记录未找到".into()))
+}
+
+// ==================== Payment Batches ====================
+
+const PAYMENT_BATCH_TYPES: [&str; 2] = ["salary", "reimbursement"];
+
+fn validate_payment_batch_type(batch_type: &str) -> AppResult<()> {
+    if PAYMENT_BATCH_TYPES.contains(&batch_type) {
+        Ok(())
+    } else {
+        Err(AppError::InvalidParam("付款批次类型无效".into()))
+    }
+}
+
+fn payment_batch_no(month: &str, batch_type: &str) -> String {
+    let prefix = if batch_type == "salary" { "GZ" } else { "BX" };
+    format!(
+        "{}{}{}",
+        prefix,
+        month.replace('-', ""),
+        Utc::now().timestamp_millis()
+    )
+}
+
+fn row_to_payment_batch(row: &rusqlite::Row<'_>) -> rusqlite::Result<PaymentBatch> {
+    Ok(PaymentBatch {
+        id: row.get(0)?,
+        batch_no: row.get(1)?,
+        belong_month: row.get(2)?,
+        batch_type: row.get(3)?,
+        status: row.get(4)?,
+        total_amount: row.get(5)?,
+        item_count: row.get(6)?,
+        payment_date: row.get(7)?,
+        remark: row.get(8)?,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
+    })
+}
+
+fn row_to_payment_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<PaymentItem> {
+    Ok(PaymentItem {
+        id: row.get(0)?,
+        batch_id: row.get(1)?,
+        source_type: row.get(2)?,
+        source_id: row.get(3)?,
+        employee_id: row.get(4)?,
+        employee_no: row.get(5)?,
+        employee_name: row.get(6)?,
+        bank_name: row.get(7)?,
+        bank_account: row.get(8)?,
+        amount: row.get(9)?,
+        status: row.get(10)?,
+        remark: row.get(11)?,
+        created_at: row.get(12)?,
+    })
+}
+
+pub fn query_payment_batches(
+    conn: &Connection,
+    query: &PaymentBatchQuery,
+) -> AppResult<Vec<PaymentBatch>> {
+    let mut where_clauses = vec!["1=1".to_string()];
+    let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let mut idx = 1;
+
+    if let Some(month) = query.belong_month.as_ref().filter(|v| !v.trim().is_empty()) {
+        where_clauses.push(format!("belong_month = ?{idx}"));
+        params_vec.push(Box::new(month.clone()));
+        idx += 1;
+    }
+    if let Some(batch_type) = query.batch_type.as_ref().filter(|v| !v.trim().is_empty()) {
+        where_clauses.push(format!("batch_type = ?{idx}"));
+        params_vec.push(Box::new(batch_type.clone()));
+        idx += 1;
+    }
+    if let Some(status) = query.status.as_ref().filter(|v| !v.trim().is_empty()) {
+        where_clauses.push(format!("status = ?{idx}"));
+        params_vec.push(Box::new(status.clone()));
+    }
+
+    let sql = format!(
+        "SELECT id, batch_no, belong_month, batch_type, status, total_amount, item_count,
+                payment_date, remark, created_at, updated_at
+         FROM payment_batches
+         WHERE {}
+         ORDER BY created_at DESC, id DESC",
+        where_clauses.join(" AND ")
+    );
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+        params_vec.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_refs.as_slice(), row_to_payment_batch)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
+pub fn get_payment_batch(conn: &Connection, id: i64) -> AppResult<PaymentBatch> {
+    conn.query_row(
+        "SELECT id, batch_no, belong_month, batch_type, status, total_amount, item_count,
+                payment_date, remark, created_at, updated_at
+         FROM payment_batches WHERE id = ?1",
+        params![id],
+        row_to_payment_batch,
+    )
+    .map_err(|e| AppError::NotFound(format!("付款批次ID={id}未找到: {e}")))
+}
+
+pub fn get_payment_batch_detail(conn: &Connection, id: i64) -> AppResult<PaymentBatchDetail> {
+    let batch = get_payment_batch(conn, id)?;
+    let mut stmt = conn.prepare(
+        "SELECT id, batch_id, source_type, source_id, employee_id, employee_no, employee_name,
+                bank_name, bank_account, amount, status, remark, created_at
+         FROM payment_items
+         WHERE batch_id = ?1
+         ORDER BY id",
+    )?;
+    let rows = stmt.query_map(params![id], row_to_payment_item)?;
+    let items = rows.collect::<Result<Vec<_>, _>>()?;
+    Ok(PaymentBatchDetail { batch, items })
+}
+
+fn active_payment_item_exists(
+    conn: &Connection,
+    source_type: &str,
+    source_id: i64,
+) -> AppResult<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*)
+         FROM payment_items i
+         JOIN payment_batches b ON b.id = i.batch_id
+         WHERE i.source_type = ?1 AND i.source_id = ?2
+           AND i.status != 'void' AND b.status != 'void'",
+        params![source_type, source_id],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+fn selected_source_filter(source_ids: &Option<Vec<i64>>, id: i64) -> bool {
+    source_ids
+        .as_ref()
+        .map(|ids| ids.contains(&id))
+        .unwrap_or(true)
+}
+
+pub fn create_payment_batch(
+    conn: &mut Connection,
+    input: &PaymentBatchInput,
+) -> AppResult<PaymentBatchDetail> {
+    let month = input.belong_month.trim();
+    if month.is_empty() {
+        return Err(AppError::InvalidParam("付款月份必填".into()));
+    }
+    validate_payment_batch_type(&input.batch_type)?;
+    ensure_month_open(conn, month)?;
+
+    let tx = conn.unchecked_transaction()?;
+    let now = Utc::now().to_rfc3339();
+    let batch_no = payment_batch_no(month, &input.batch_type);
+
+    let candidates = if input.batch_type == "salary" {
+        collect_salary_payment_candidates(&tx, month, &input.source_ids)?
+    } else {
+        collect_reimbursement_payment_candidates(&tx, month, &input.source_ids)?
+    };
+    if candidates.is_empty() {
+        return Err(AppError::InvalidParam("没有可生成付款批次的明细".into()));
+    }
+
+    let total_amount: f64 = candidates.iter().map(|item| item.amount).sum();
+    conn_insert_payment_batch(
+        &tx,
+        &batch_no,
+        month,
+        &input.batch_type,
+        total_amount,
+        candidates.len() as i32,
+        input.remark.as_deref(),
+        &now,
+    )?;
+    let batch_id = tx.last_insert_rowid();
+
+    for item in &candidates {
+        tx.execute(
+            "INSERT INTO payment_items
+                (batch_id, source_type, source_id, employee_id, employee_no, employee_name,
+                 bank_name, bank_account, amount, status, remark, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', ?10, ?11)",
+            params![
+                batch_id,
+                item.source_type,
+                item.source_id,
+                item.employee_id,
+                item.employee_no,
+                item.employee_name,
+                item.bank_name,
+                item.bank_account,
+                item.amount,
+                item.remark,
+                now
+            ],
+        )?;
+    }
+
+    tx.commit()?;
+    get_payment_batch_detail(conn, batch_id)
+}
+
+fn conn_insert_payment_batch(
+    conn: &Connection,
+    batch_no: &str,
+    month: &str,
+    batch_type: &str,
+    total_amount: f64,
+    item_count: i32,
+    remark: Option<&str>,
+    now: &str,
+) -> AppResult<()> {
+    conn.execute(
+        "INSERT INTO payment_batches
+            (batch_no, belong_month, batch_type, status, total_amount, item_count,
+             payment_date, remark, created_at, updated_at)
+         VALUES (?1, ?2, ?3, 'draft', ?4, ?5, NULL, ?6, ?7, ?8)",
+        params![
+            batch_no,
+            month,
+            batch_type,
+            total_amount,
+            item_count,
+            remark,
+            now,
+            now
+        ],
+    )?;
+    Ok(())
+}
+
+fn collect_salary_payment_candidates(
+    conn: &Connection,
+    month: &str,
+    source_ids: &Option<Vec<i64>>,
+) -> AppResult<Vec<PaymentItem>> {
+    let mut stmt = conn.prepare(
+        "SELECT s.id, e.id, s.employee_no, COALESCE(s.name, e.name), e.bank_name, e.bank_account,
+                s.net_salary, s.remark
+         FROM salary_monthly_results s
+         LEFT JOIN employees e ON e.employee_no = s.employee_no
+         WHERE s.salary_month = ?1 AND s.locked = 1
+           AND COALESCE(s.payment_status, 'unpaid') != 'paid'
+         ORDER BY s.id",
+    )?;
+    let rows = stmt.query_map(params![month], |row| {
+        Ok(PaymentItem {
+            id: 0,
+            batch_id: 0,
+            source_type: "salary_result".into(),
+            source_id: row.get(0)?,
+            employee_id: row.get(1)?,
+            employee_no: row.get(2)?,
+            employee_name: row.get(3)?,
+            bank_name: row.get(4)?,
+            bank_account: row.get(5)?,
+            amount: row.get(6)?,
+            status: "pending".into(),
+            remark: row.get(7)?,
+            created_at: None,
+        })
+    })?;
+    let mut candidates = Vec::new();
+    for item in rows {
+        let item = item?;
+        if !selected_source_filter(source_ids, item.source_id) {
+            continue;
+        }
+        if active_payment_item_exists(conn, &item.source_type, item.source_id)? {
+            continue;
+        }
+        if item.amount <= 0.0 {
+            return Err(AppError::InvalidParam("工资付款金额必须大于0".into()));
+        }
+        if item
+            .bank_account
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
+            || item
+                .bank_name
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+        {
+            return Err(AppError::InvalidParam(format!(
+                "{} 缺少银行账号或开户行，不能生成工资付款批次",
+                item.employee_name.as_deref().unwrap_or("员工")
+            )));
+        }
+        candidates.push(item);
+    }
+    Ok(candidates)
+}
+
+fn collect_reimbursement_payment_candidates(
+    conn: &Connection,
+    month: &str,
+    source_ids: &Option<Vec<i64>>,
+) -> AppResult<Vec<PaymentItem>> {
+    let mut stmt = conn.prepare(
+        "SELECT c.id, e.id, e.employee_no, e.name, e.bank_name, e.bank_account,
+                c.total_amount, c.claim_no
+         FROM reimbursement_claims c
+         LEFT JOIN employees e ON e.id = c.employee_id
+         WHERE c.belong_month = ?1 AND c.status = 'approved'
+           AND c.payment_status != 'paid'
+         ORDER BY c.id",
+    )?;
+    let rows = stmt.query_map(params![month], |row| {
+        let claim_no: String = row.get(7)?;
+        Ok(PaymentItem {
+            id: 0,
+            batch_id: 0,
+            source_type: "reimbursement_claim".into(),
+            source_id: row.get(0)?,
+            employee_id: row.get(1)?,
+            employee_no: row.get(2)?,
+            employee_name: row.get(3)?,
+            bank_name: row.get(4)?,
+            bank_account: row.get(5)?,
+            amount: row.get(6)?,
+            status: "pending".into(),
+            remark: Some(claim_no),
+            created_at: None,
+        })
+    })?;
+    let mut candidates = Vec::new();
+    for item in rows {
+        let item = item?;
+        if !selected_source_filter(source_ids, item.source_id) {
+            continue;
+        }
+        if active_payment_item_exists(conn, &item.source_type, item.source_id)? {
+            continue;
+        }
+        if item.amount <= 0.0 {
+            return Err(AppError::InvalidParam("报销付款金额必须大于0".into()));
+        }
+        if item
+            .bank_account
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
+            || item
+                .bank_name
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+        {
+            return Err(AppError::InvalidParam(format!(
+                "{} 缺少银行账号或开户行，不能生成报销付款批次",
+                item.employee_name.as_deref().unwrap_or("报销人")
+            )));
+        }
+        candidates.push(item);
+    }
+    Ok(candidates)
+}
+
+pub fn update_payment_batch_remark(
+    conn: &Connection,
+    input: &PaymentBatchRemarkInput,
+) -> AppResult<PaymentBatch> {
+    let batch = get_payment_batch(conn, input.id)?;
+    if batch.status == "void" {
+        return Err(AppError::InvalidParam("已作废付款批次不能修改备注".into()));
+    }
+    ensure_month_open(conn, &batch.belong_month)?;
+    conn.execute(
+        "UPDATE payment_batches SET remark=?1, updated_at=?2 WHERE id=?3",
+        params![input.remark.as_ref(), Utc::now().to_rfc3339(), input.id],
+    )?;
+    get_payment_batch(conn, input.id)
+}
+
+pub fn mark_payment_batch_exported(conn: &Connection, id: i64) -> AppResult<PaymentBatch> {
+    let batch = get_payment_batch(conn, id)?;
+    ensure_month_open(conn, &batch.belong_month)?;
+    if batch.status == "void" {
+        return Err(AppError::InvalidParam("已作废付款批次不能导出".into()));
+    }
+    if batch.status == "paid" {
+        return Ok(batch);
+    }
+    conn.execute(
+        "UPDATE payment_batches SET status='exported', updated_at=?1 WHERE id=?2",
+        params![Utc::now().to_rfc3339(), id],
+    )?;
+    get_payment_batch(conn, id)
+}
+
+pub fn mark_payment_batch_paid(
+    conn: &mut Connection,
+    input: &PaymentBatchPaidInput,
+) -> AppResult<PaymentBatch> {
+    if input.payment_date.trim().is_empty() {
+        return Err(AppError::InvalidParam("付款日期必填".into()));
+    }
+    let batch = get_payment_batch(conn, input.id)?;
+    ensure_month_open(conn, &batch.belong_month)?;
+    if batch.status == "void" {
+        return Err(AppError::InvalidParam("已作废付款批次不能标记付款".into()));
+    }
+    if batch.status == "paid" {
+        return Ok(batch);
+    }
+    if batch.status != "exported" {
+        return Err(AppError::InvalidParam(
+            "付款批次必须先导出后才能标记已付款".into(),
+        ));
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    let detail = get_payment_batch_detail(&tx, input.id)?;
+    let now = Utc::now().to_rfc3339();
+    for item in &detail.items {
+        if item.source_type == "salary_result" {
+            tx.execute(
+                "UPDATE salary_monthly_results
+                 SET payment_status='paid', payment_date=?1, payment_batch_id=?2, updated_at=?3
+                 WHERE id=?4",
+                params![input.payment_date.trim(), input.id, now, item.source_id],
+            )?;
+        } else if item.source_type == "reimbursement_claim" {
+            tx.execute(
+                "UPDATE reimbursement_claims
+                 SET payment_status='paid', payment_date=?1, payment_batch_id=?2, updated_at=?3
+                 WHERE id=?4",
+                params![input.payment_date.trim(), input.id, now, item.source_id],
+            )?;
+        }
+    }
+    tx.execute(
+        "UPDATE payment_items SET status='paid' WHERE batch_id=?1 AND status != 'void'",
+        params![input.id],
+    )?;
+    tx.execute(
+        "UPDATE payment_batches SET status='paid', payment_date=?1, updated_at=?2 WHERE id=?3",
+        params![input.payment_date.trim(), now, input.id],
+    )?;
+    tx.commit()?;
+    get_payment_batch(conn, input.id)
+}
+
+pub fn void_payment_batch(
+    conn: &mut Connection,
+    input: &PaymentBatchVoidInput,
+) -> AppResult<PaymentBatch> {
+    if input.reason.trim().is_empty() {
+        return Err(AppError::InvalidParam("作废原因必填".into()));
+    }
+    let batch = get_payment_batch(conn, input.id)?;
+    ensure_month_open(conn, &batch.belong_month)?;
+    if batch.status == "void" {
+        return Ok(batch);
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    let now = Utc::now().to_rfc3339();
+    if batch.status != "paid" {
+        let detail = get_payment_batch_detail(&tx, input.id)?;
+        for item in &detail.items {
+            if item.source_type == "salary_result" {
+                tx.execute(
+                    "UPDATE salary_monthly_results
+                     SET payment_batch_id=NULL
+                     WHERE id=?1 AND COALESCE(payment_status, 'unpaid') != 'paid'",
+                    params![item.source_id],
+                )?;
+            } else if item.source_type == "reimbursement_claim" {
+                tx.execute(
+                    "UPDATE reimbursement_claims
+                     SET payment_batch_id=NULL
+                     WHERE id=?1 AND payment_status != 'paid'",
+                    params![item.source_id],
+                )?;
+            }
+        }
+    }
+    tx.execute(
+        "UPDATE payment_items SET status='void' WHERE batch_id=?1",
+        params![input.id],
+    )?;
+    tx.execute(
+        "UPDATE payment_batches SET status='void', remark=?1, updated_at=?2 WHERE id=?3",
+        params![input.reason.trim(), now, input.id],
+    )?;
+    tx.commit()?;
+    get_payment_batch(conn, input.id)
 }
 
 // ==================== Financial Analysis ====================
@@ -2842,6 +3429,11 @@ pub fn save_reimbursement_claim(
     if let Some(id) = data.id {
         let old_month = get_reimbursement_claim_month(conn, id)?;
         ensure_month_open(conn, &old_month)?;
+        if active_payment_item_exists(conn, "reimbursement_claim", id)? {
+            return Err(AppError::InvalidParam(
+                "报销单已纳入付款批次，不能直接编辑".into(),
+            ));
+        }
     }
     let employee_id = data
         .employee_id
@@ -2948,6 +3540,11 @@ pub fn update_reimbursement_claim_status(
 ) -> AppResult<bool> {
     let existing = get_reimbursement_claim(conn, id)?;
     ensure_month_open(conn, &existing.belong_month)?;
+    if payment_status.is_some() && active_payment_item_exists(conn, "reimbursement_claim", id)? {
+        return Err(AppError::InvalidParam(
+            "报销单已纳入付款批次，请在付款批次中处理付款状态".into(),
+        ));
+    }
     let new_status = status.unwrap_or(existing.status);
     let new_payment_status = payment_status.unwrap_or(existing.payment_status);
     let now = Utc::now().to_rfc3339();
@@ -2963,6 +3560,11 @@ pub fn update_reimbursement_claim_status(
 pub fn soft_delete_reimbursement_claim(conn: &Connection, id: i64) -> AppResult<bool> {
     let old_month = get_reimbursement_claim_month(conn, id)?;
     ensure_month_open(conn, &old_month)?;
+    if active_payment_item_exists(conn, "reimbursement_claim", id)? {
+        return Err(AppError::InvalidParam(
+            "报销单已纳入付款批次，不能直接作废".into(),
+        ));
+    }
     let now = Utc::now().to_rfc3339();
     let updated = conn.execute(
         "UPDATE reimbursement_claims SET status='void', updated_at=?1 WHERE id=?2 AND status != 'void'",
@@ -3379,6 +3981,16 @@ mod tests {
         .unwrap();
     }
 
+    fn fill_employee_bank_info(conn: &Connection) {
+        conn.execute_batch(
+            "
+            UPDATE employees SET bank_account='62220001', bank_name='测试银行' WHERE employee_no='E001';
+            UPDATE employees SET bank_account='62220002', bank_name='测试银行' WHERE employee_no='E002';
+            ",
+        )
+        .unwrap();
+    }
+
     #[test]
     fn test_close_month_rejects_blocking_checks() {
         let conn = setup_financial_db();
@@ -3561,6 +4173,194 @@ mod tests {
             },
         )
         .is_ok());
+    }
+
+    #[test]
+    fn test_create_salary_payment_batch_prevents_duplicates_and_void_releases_sources() {
+        let mut conn = setup_financial_db();
+        fill_employee_bank_info(&conn);
+        lock_salary_results(&conn, "2026-08").unwrap();
+
+        let detail = create_payment_batch(
+            &mut conn,
+            &PaymentBatchInput {
+                belong_month: "2026-08".into(),
+                batch_type: "salary".into(),
+                source_ids: None,
+                remark: Some("工资代发".into()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(detail.batch.batch_type, "salary");
+        assert_eq!(detail.batch.status, "draft");
+        assert_eq!(detail.batch.item_count, 2);
+        assert_eq!(detail.batch.total_amount, 14400.0);
+        assert!(detail.items.iter().all(|item| item
+            .bank_account
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("6222")));
+
+        let duplicate = create_payment_batch(
+            &mut conn,
+            &PaymentBatchInput {
+                belong_month: "2026-08".into(),
+                batch_type: "salary".into(),
+                source_ids: None,
+                remark: None,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(duplicate, AppError::InvalidParam(_)));
+
+        let voided = void_payment_batch(
+            &mut conn,
+            &PaymentBatchVoidInput {
+                id: detail.batch.id,
+                reason: "测试作废".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(voided.status, "void");
+
+        let recreated = create_payment_batch(
+            &mut conn,
+            &PaymentBatchInput {
+                belong_month: "2026-08".into(),
+                batch_type: "salary".into(),
+                source_ids: None,
+                remark: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(recreated.batch.item_count, 2);
+    }
+
+    #[test]
+    fn test_reimbursement_payment_batch_paid_syncs_claim_and_blocks_direct_payment() {
+        let mut conn = setup_financial_db();
+        fill_employee_bank_info(&conn);
+
+        let detail = create_payment_batch(
+            &mut conn,
+            &PaymentBatchInput {
+                belong_month: "2026-08".into(),
+                batch_type: "reimbursement".into(),
+                source_ids: Some(vec![2]),
+                remark: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(detail.batch.item_count, 1);
+        assert_eq!(detail.batch.total_amount, 500.0);
+
+        let direct_payment_err = update_reimbursement_claim_status(
+            &conn,
+            2,
+            None,
+            Some("paid".into()),
+            Some("2026-08-31".into()),
+        )
+        .unwrap_err();
+        assert!(matches!(direct_payment_err, AppError::InvalidParam(_)));
+
+        let direct_void_err = soft_delete_reimbursement_claim(&conn, 2).unwrap_err();
+        assert!(matches!(direct_void_err, AppError::InvalidParam(_)));
+
+        let draft_paid_err = mark_payment_batch_paid(
+            &mut conn,
+            &PaymentBatchPaidInput {
+                id: detail.batch.id,
+                payment_date: "2026-08-31".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(draft_paid_err, AppError::InvalidParam(_)));
+
+        let exported = mark_payment_batch_exported(&conn, detail.batch.id).unwrap();
+        assert_eq!(exported.status, "exported");
+
+        let paid = mark_payment_batch_paid(
+            &mut conn,
+            &PaymentBatchPaidInput {
+                id: detail.batch.id,
+                payment_date: "2026-08-31".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(paid.status, "paid");
+
+        let (payment_status, payment_date, payment_batch_id): (String, String, i64) = conn
+            .query_row(
+                "SELECT payment_status, payment_date, payment_batch_id FROM reimbursement_claims WHERE id=2",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(payment_status, "paid");
+        assert_eq!(payment_date, "2026-08-31");
+        assert_eq!(payment_batch_id, detail.batch.id);
+    }
+
+    #[test]
+    fn test_closed_month_blocks_payment_batch_writes() {
+        let mut conn = setup_financial_db();
+        fill_employee_bank_info(&conn);
+        lock_salary_results(&conn, "2026-08").unwrap();
+        let detail = create_payment_batch(
+            &mut conn,
+            &PaymentBatchInput {
+                belong_month: "2026-08".into(),
+                batch_type: "salary".into(),
+                source_ids: None,
+                remark: None,
+            },
+        )
+        .unwrap();
+        make_august_closable(&conn);
+        mark_payment_batch_exported(&conn, detail.batch.id).unwrap();
+        mark_payment_batch_paid(
+            &mut conn,
+            &PaymentBatchPaidInput {
+                id: detail.batch.id,
+                payment_date: "2026-08-31".into(),
+            },
+        )
+        .unwrap();
+        close_month(&conn, "2026-08", "system", None).unwrap();
+
+        let create_err = create_payment_batch(
+            &mut conn,
+            &PaymentBatchInput {
+                belong_month: "2026-08".into(),
+                batch_type: "reimbursement".into(),
+                source_ids: None,
+                remark: None,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(create_err, AppError::InvalidParam(_)));
+
+        let void_err = void_payment_batch(
+            &mut conn,
+            &PaymentBatchVoidInput {
+                id: detail.batch.id,
+                reason: "锁账测试".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(void_err, AppError::InvalidParam(_)));
+
+        let remark_err = update_payment_batch_remark(
+            &conn,
+            &PaymentBatchRemarkInput {
+                id: detail.batch.id,
+                remark: Some("锁账测试".into()),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(remark_err, AppError::InvalidParam(_)));
     }
 
     #[test]

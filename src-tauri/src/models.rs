@@ -264,6 +264,7 @@ pub struct MonthCloseSummary {
     pub reimbursement_count: i32,
     pub pending_reimbursement_count: i32,
     pub unpaid_reimbursement_count: i32,
+    pub pending_payment_batch_count: i32,
     pub total_salary_cost: f64,
     pub total_invoice_amount: f64,
     pub approved_reimbursement_amount: f64,
@@ -320,6 +321,79 @@ pub struct MonthClosePackageResult {
     pub success: bool,
     pub output_dir: String,
     pub files: Vec<String>,
+}
+
+// ==================== Payment Batches ====================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentBatch {
+    pub id: i64,
+    pub batch_no: String,
+    pub belong_month: String,
+    pub batch_type: String,
+    pub status: String,
+    pub total_amount: f64,
+    pub item_count: i32,
+    pub payment_date: Option<String>,
+    pub remark: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentItem {
+    pub id: i64,
+    pub batch_id: i64,
+    pub source_type: String,
+    pub source_id: i64,
+    pub employee_id: Option<i64>,
+    pub employee_no: Option<String>,
+    pub employee_name: Option<String>,
+    pub bank_name: Option<String>,
+    pub bank_account: Option<String>,
+    pub amount: f64,
+    pub status: String,
+    pub remark: Option<String>,
+    pub created_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentBatchDetail {
+    pub batch: PaymentBatch,
+    pub items: Vec<PaymentItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PaymentBatchQuery {
+    pub belong_month: Option<String>,
+    pub batch_type: Option<String>,
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentBatchInput {
+    pub belong_month: String,
+    pub batch_type: String,
+    pub source_ids: Option<Vec<i64>>,
+    pub remark: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentBatchPaidInput {
+    pub id: i64,
+    pub payment_date: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentBatchVoidInput {
+    pub id: i64,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentBatchRemarkInput {
+    pub id: i64,
+    pub remark: Option<String>,
 }
 
 // ==================== Financial Analysis ====================

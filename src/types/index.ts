@@ -296,6 +296,7 @@ export interface MonthCloseSummary {
   reimbursement_count: number;
   pending_reimbursement_count: number;
   unpaid_reimbursement_count: number;
+  pending_payment_batch_count: number;
   total_salary_cost: number;
   total_invoice_amount: number;
   approved_reimbursement_amount: number;
@@ -340,6 +341,76 @@ export interface MonthCloseWorkbench {
   summary: MonthCloseSummary;
   checks: MonthCloseCheckItem[];
   month_close?: MonthCloseRecord;
+}
+
+// ==================== 付款批次 ====================
+
+export type PaymentBatchType = 'salary' | 'reimbursement';
+export type PaymentBatchStatus = 'draft' | 'exported' | 'paid' | 'void';
+export type PaymentSourceType = 'salary_result' | 'reimbursement_claim';
+export type PaymentItemStatus = 'pending' | 'paid' | 'void';
+
+export interface PaymentBatch {
+  id: number;
+  batch_no: string;
+  belong_month: string;
+  batch_type: PaymentBatchType;
+  status: PaymentBatchStatus;
+  total_amount: number;
+  item_count: number;
+  payment_date?: string;
+  remark?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface PaymentItem {
+  id: number;
+  batch_id: number;
+  source_type: PaymentSourceType;
+  source_id: number;
+  employee_id?: number;
+  employee_no?: string;
+  employee_name?: string;
+  bank_name?: string;
+  bank_account?: string;
+  amount: number;
+  status: PaymentItemStatus;
+  remark?: string;
+  created_at?: string;
+}
+
+export interface PaymentBatchDetail {
+  batch: PaymentBatch;
+  items: PaymentItem[];
+}
+
+export interface PaymentBatchQuery {
+  belong_month?: string;
+  batch_type?: PaymentBatchType;
+  status?: PaymentBatchStatus;
+}
+
+export interface PaymentBatchInput {
+  belong_month: string;
+  batch_type: PaymentBatchType;
+  source_ids?: number[];
+  remark?: string;
+}
+
+export interface PaymentBatchPaidInput {
+  id: number;
+  payment_date: string;
+}
+
+export interface PaymentBatchVoidInput {
+  id: number;
+  reason: string;
+}
+
+export interface PaymentBatchRemarkInput {
+  id: number;
+  remark?: string;
 }
 
 // ==================== 财务分析 ====================

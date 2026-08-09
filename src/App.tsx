@@ -38,6 +38,7 @@ import OperationLogs from '@/pages/OperationLogs';
 import Reimbursements from '@/pages/Reimbursements';
 import FinancialAnalysis from '@/pages/FinancialAnalysis';
 import DataSafety from '@/pages/DataSafety';
+import Payments from '@/pages/Payments';
 
 const { Sider, Header, Content } = Layout;
 
@@ -69,6 +70,7 @@ const menuItems: MenuProps['items'] = [
     icon: <CalculatorOutlined />,
     children: [
       { key: '/salary', label: '工资计算', icon: <CalculatorOutlined /> },
+      { key: '/payments', label: '付款批次', icon: <WalletOutlined /> },
     ],
   },
   {
@@ -199,6 +201,7 @@ const AppLayout: React.FC = () => {
             <Route path="/financial-analysis" element={<FinancialAnalysis />} />
             <Route path="/rules" element={<SalaryRules />} />
             <Route path="/salary" element={<SalaryCalculate />} />
+            <Route path="/payments" element={<Payments />} />
             <Route path="/export" element={<ExportCenter />} />
             <Route path="/logs" element={<OperationLogs />} />
             <Route path="/data-safety" element={<DataSafety />} />

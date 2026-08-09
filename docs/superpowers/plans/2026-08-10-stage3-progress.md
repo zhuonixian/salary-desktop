@@ -119,3 +119,72 @@
   - `3.3 付款批次`、`3.4 银行流水匹配`、`3.5 预算与异常`。
 - 下轮入口：进入 `3.3 付款批次`，新增 `payment_batches` / `payment_items` 并接入工资代发与报销付款。
 - 提交：待完成。
+
+### 2026-08-10 04:03
+
+- 目标：落地第三阶段 `3.3 付款批次`，统一工资代发与报销付款，并完成回归、打包、推送。
+- 完成：
+  - 新增 `payment_batches` / `payment_items` 表，给工资结果和报销单补充付款批次关联字段。
+  - 新增付款批次后端能力：查询批次、查看明细、生成工资/报销批次、导出批次 Excel、标记已付款、作废、更新备注。
+  - 工资批次仅纳入已锁定且未付款工资结果；报销批次仅纳入已审批未付款报销单。
+  - 批次明细保存收款人、银行账号、开户行和金额快照，解决旧按月银行代发无法带账号的问题。
+  - 同一工资结果/报销单不能重复进入未作废批次；作废批次后释放来源。
+  - 标记报销付款批次已付款时同步报销单 `payment_status/payment_date/payment_batch_id`。
+  - 已纳入有效批次的工资结果和报销单禁止直接编辑或绕过批次付款。
+  - 月结检查新增“付款批次完成”，存在待导出/待付款批次时阻塞正式月结；已月结月份禁止新增、付款、作废、改备注。
+  - 新增前端“付款批次”页面，接入“薪酬核算”菜单，支持筛选、统计、生成、导出、付款、作废、备注和明细抽屉。
+  - 操作日志增加付款批次相关中文映射。
+  - 使用 subagent 做后端设计、前端交互、测试回归清单审查，并按风险补齐银行信息校验、源数据保护和月结检查。
+- 修改文件：
+  - `src-tauri/src/models.rs`
+  - `src-tauri/src/db.rs`
+  - `src-tauri/src/excel.rs`
+  - `src-tauri/src/commands.rs`
+  - `src-tauri/src/lib.rs`
+  - `src/types/index.ts`
+  - `src/api/index.ts`
+  - `src/pages/Payments.tsx`
+  - `src/pages/OperationLogs.tsx`
+  - `src/App.tsx`
+  - `docs/superpowers/plans/2026-08-10-stage3-progress.md`
+- 测试：
+  - `npx tsc --noEmit`：通过。
+  - `npm run lint`：通过。
+  - `npm run build`：通过；仍有既有 Vite chunk 体积提示。
+  - `cd src-tauri && cargo fmt --check`：通过。
+  - `cd src-tauri && cargo check`：通过；仍有既有 unused/dead_code warning。
+  - `cd src-tauri && cargo test --lib`：通过，45 个测试。
+  - `npm run tauri build`：通过，生成 Linux deb/rpm/AppImage。
+- 未完成：
+  - Windows exe 下付款批次生成、Excel 导出和付款状态同步的手工验收。
+  - `3.4 银行流水匹配`、`3.5 预算与异常`。
+- 下轮入口：进入 `3.4 银行流水匹配`，新增银行流水导入、交易表、匹配表和付款批次核对流程。
+- 提交：待完成。
+
+### 2026-08-10 04:19
+
+- 目标：接力完成 `3.3 付款批次` 回归审查、补充一致性修复，并准备提交推送。
+- 完成：
+  - 使用 subagent 执行回归测试与 diff 审查。
+  - 修复已纳入有效付款批次的报销单仍可直接作废的问题，避免批次明细引用已作废源单据。
+  - 限制付款批次状态流：必须先导出为 `exported`，才能标记已付款；前端付款按钮同步只对“待付款”状态启用。
+  - 月结包新增导出已付款工资/报销付款批次明细，`manifest.json` 同步列出付款批次文件。
+  - 补充 Rust 测试覆盖报销单批次保护、先导出后付款、月结包包含付款批次明细。
+- 修改文件：
+  - `src-tauri/src/db.rs`
+  - `src-tauri/src/commands.rs`
+  - `src/pages/Payments.tsx`
+  - `docs/superpowers/plans/2026-08-10-stage3-progress.md`
+- 测试：
+  - `npx tsc --noEmit`：通过。
+  - `npm run lint`：通过。
+  - `npm run build`：通过；仍有既有 Vite chunk 体积提示。
+  - `cd src-tauri && cargo fmt --check`：通过。
+  - `cd src-tauri && cargo check`：通过；仍有既有 unused/dead_code warning。
+  - `cd src-tauri && cargo test --lib`：通过，45 个测试。
+  - `npm run tauri build`：通过，生成 Linux deb/rpm/AppImage。
+- 未完成：
+  - Windows exe 下付款批次生成、Excel 导出、付款状态同步和月结包付款批次文件打开的手工验收。
+  - `3.4 银行流水匹配`、`3.5 预算与异常`。
+- 下轮入口：进入 `3.4 银行流水匹配`。
+- 提交：待完成。

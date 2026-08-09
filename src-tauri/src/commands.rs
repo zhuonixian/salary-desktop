@@ -771,6 +771,14 @@ pub fn export_month_close_package_to_dir(
             ..Default::default()
         },
     )?;
+    let paid_payment_batches = db::query_payment_batches(
+        conn,
+        &PaymentBatchQuery {
+            belong_month: Some(month.to_string()),
+            status: Some("paid".to_string()),
+            ..Default::default()
+        },
+    )?;
 
     let mut files = Vec::new();
     let month_close_report = output_dir.join(format!("{month}_月结报告.xlsx"));
@@ -792,6 +800,13 @@ pub fn export_month_close_package_to_dir(
     let reimbursement_list = output_dir.join(format!("{month}_报销清单.xlsx"));
     excel::export_reimbursement_claim_list(&reimbursements, &reimbursement_list.to_string_lossy())?;
     files.push(reimbursement_list.to_string_lossy().to_string());
+
+    for batch in paid_payment_batches {
+        let detail = db::get_payment_batch_detail(conn, batch.id)?;
+        let batch_file = output_dir.join(format!("{month}_{}_付款明细.xlsx", batch.batch_no));
+        excel::export_payment_batch(&detail, &batch_file.to_string_lossy())?;
+        files.push(batch_file.to_string_lossy().to_string());
+    }
 
     let manifest_path = output_dir.join("manifest.json");
     let result_files = files.clone();
@@ -821,6 +836,123 @@ pub fn export_month_close_package_to_dir(
         output_dir: output_dir_str,
         files: result_files,
     })
+}
+
+#[tauri::command]
+pub fn query_payment_batches(
+    query: PaymentBatchQuery,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<PaymentBatch>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    db::query_payment_batches(&conn, &query)
+}
+
+#[tauri::command]
+pub fn get_payment_batch_detail(
+    id: i64,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<PaymentBatchDetail, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    db::get_payment_batch_detail(&conn, id)
+}
+
+#[tauri::command]
+pub fn create_payment_batch(
+    data: PaymentBatchInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<PaymentBatchDetail, AppError> {
+    let mut conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let detail = db::create_payment_batch(&mut conn, &data)?;
+    db::log_operation(
+        &conn,
+        "create_payment_batch",
+        &format!(
+            "生成{}付款批次{}，{}笔，金额{:.2}",
+            if detail.batch.batch_type == "salary" {
+                "工资"
+            } else {
+                "报销"
+            },
+            detail.batch.batch_no,
+            detail.batch.item_count,
+            detail.batch.total_amount
+        ),
+        "system",
+        data.remark.as_deref(),
+    )?;
+    Ok(detail)
+}
+
+#[tauri::command]
+pub fn export_payment_batch_file(
+    id: i64,
+    path: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<PaymentBatch, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let detail = db::get_payment_batch_detail(&conn, id)?;
+    db::ensure_month_open(&conn, &detail.batch.belong_month)?;
+    excel::export_payment_batch(&detail, &path)?;
+    let batch = db::mark_payment_batch_exported(&conn, id)?;
+    db::log_operation(
+        &conn,
+        "export_payment_batch",
+        &format!("导出付款批次{}到{}", batch.batch_no, path),
+        "system",
+        None,
+    )?;
+    Ok(batch)
+}
+
+#[tauri::command]
+pub fn mark_payment_batch_paid(
+    data: PaymentBatchPaidInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<PaymentBatch, AppError> {
+    let mut conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let batch = db::mark_payment_batch_paid(&mut conn, &data)?;
+    db::log_operation(
+        &conn,
+        "mark_payment_batch_paid",
+        &format!("标记付款批次{}已付款", batch.batch_no),
+        "system",
+        Some(&data.payment_date),
+    )?;
+    Ok(batch)
+}
+
+#[tauri::command]
+pub fn void_payment_batch(
+    data: PaymentBatchVoidInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<PaymentBatch, AppError> {
+    let mut conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let batch = db::void_payment_batch(&mut conn, &data)?;
+    db::log_operation(
+        &conn,
+        "void_payment_batch",
+        &format!("作废付款批次{}", batch.batch_no),
+        "system",
+        Some(&data.reason),
+    )?;
+    Ok(batch)
+}
+
+#[tauri::command]
+pub fn update_payment_batch_remark(
+    data: PaymentBatchRemarkInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<PaymentBatch, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let batch = db::update_payment_batch_remark(&conn, &data)?;
+    db::log_operation(
+        &conn,
+        "update_payment_batch_remark",
+        &format!("更新付款批次{}备注", batch.batch_no),
+        "system",
+        data.remark.as_deref(),
+    )?;
+    Ok(batch)
 }
 
 #[tauri::command]
@@ -1244,6 +1376,19 @@ mod tests {
 
             INSERT INTO reimbursement_claim_invoices (claim_id, invoice_id, created_at)
             VALUES (1, 1, '2026-08-15');
+
+            INSERT INTO payment_batches
+                (id, batch_no, belong_month, batch_type, status, total_amount, item_count, payment_date, created_at, updated_at)
+            VALUES
+                (1, 'GZ202608TEST', '2026-08', 'salary', 'paid', 7800, 1, '2026-08-31', '2026-08-31', '2026-08-31'),
+                (2, 'BX202608TEST', '2026-08', 'reimbursement', 'paid', 300, 1, '2026-08-31', '2026-08-31', '2026-08-31');
+
+            INSERT INTO payment_items
+                (batch_id, source_type, source_id, employee_id, employee_no, employee_name,
+                 bank_name, bank_account, amount, status, remark, created_at)
+            VALUES
+                (1, 'salary_result', 1, 1, 'E001', '张三', '测试银行', '62220001', 7800, 'paid', '工资代发', '2026-08-31'),
+                (2, 'reimbursement_claim', 1, 1, 'E001', '张三', '测试银行', '62220001', 300, 'paid', 'BX202608001', '2026-08-31');
             ",
         )
         .unwrap();
@@ -1267,6 +1412,8 @@ mod tests {
             "2026-08_银行代发.xlsx",
             "2026-08_发票清单.xlsx",
             "2026-08_报销清单.xlsx",
+            "2026-08_GZ202608TEST_付款明细.xlsx",
+            "2026-08_BX202608TEST_付款明细.xlsx",
             "manifest.json",
         ];
         for file_name in expected {
@@ -1278,6 +1425,8 @@ mod tests {
         let manifest =
             fs::read_to_string(PathBuf::from(&result.output_dir).join("manifest.json")).unwrap();
         assert!(manifest.contains("2026-08_报销清单.xlsx"));
+        assert!(manifest.contains("2026-08_GZ202608TEST_付款明细.xlsx"));
+        assert!(manifest.contains("2026-08_BX202608TEST_付款明细.xlsx"));
 
         drop(conn);
         let _ = fs::remove_dir_all(app_dir);

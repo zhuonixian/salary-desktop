@@ -25,6 +25,13 @@ import type {
   MonthCloseWorkbench,
   MonthCloseRecord,
   MonthClosePackageResult,
+  PaymentBatch,
+  PaymentBatchDetail,
+  PaymentBatchInput,
+  PaymentBatchPaidInput,
+  PaymentBatchQuery,
+  PaymentBatchRemarkInput,
+  PaymentBatchVoidInput,
   FinancialAnalysisQuery,
   FinancialAnalysisReport,
   OperationLog,
@@ -146,6 +153,7 @@ const emptyMonthCloseSummary = (month = '') => ({
   reimbursement_count: 0,
   pending_reimbursement_count: 0,
   unpaid_reimbursement_count: 0,
+  pending_payment_batch_count: 0,
   total_salary_cost: 0,
   total_invoice_amount: 0,
   approved_reimbursement_amount: 0,
@@ -189,6 +197,46 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
       };
     case 'export_month_close_package':
       return { success: true, output_dir: String(args?.dir ?? ''), files: [] };
+    case 'query_payment_batches':
+      return [];
+    case 'get_payment_batch_detail':
+      return {
+        batch: {
+          id: Number(args?.id ?? 0),
+          batch_no: 'MOCK',
+          belong_month: '',
+          batch_type: 'salary',
+          status: 'draft',
+          total_amount: 0,
+          item_count: 0,
+        },
+        items: [],
+      };
+    case 'create_payment_batch': {
+      const data = args?.data as PaymentBatchInput | undefined;
+      return {
+        batch: {
+          id: Date.now(),
+          batch_no: `MOCK${Date.now()}`,
+          belong_month: data?.belong_month ?? '',
+          batch_type: data?.batch_type ?? 'salary',
+          status: 'draft',
+          total_amount: 0,
+          item_count: 0,
+          remark: data?.remark,
+          created_at: new Date().toISOString(),
+        },
+        items: [],
+      };
+    }
+    case 'export_payment_batch_file':
+      return { id: Number(args?.id ?? 0), batch_no: 'MOCK', belong_month: '', batch_type: 'salary', status: 'exported', total_amount: 0, item_count: 0 };
+    case 'mark_payment_batch_paid':
+      return { id: Number((args?.data as { id?: number } | undefined)?.id ?? 0), batch_no: 'MOCK', belong_month: '', batch_type: 'salary', status: 'paid', total_amount: 0, item_count: 0 };
+    case 'void_payment_batch':
+      return { id: Number((args?.data as { id?: number } | undefined)?.id ?? 0), batch_no: 'MOCK', belong_month: '', batch_type: 'salary', status: 'void', total_amount: 0, item_count: 0 };
+    case 'update_payment_batch_remark':
+      return { id: Number((args?.data as { id?: number } | undefined)?.id ?? 0), batch_no: 'MOCK', belong_month: '', batch_type: 'salary', status: 'draft', total_amount: 0, item_count: 0 };
     case 'get_financial_analysis': {
       const query = args?.query as FinancialAnalysisQuery | undefined;
       return {
@@ -446,6 +494,34 @@ export async function reopenMonth(month: string, reason: string): Promise<MonthC
 
 export async function exportMonthClosePackage(month: string, dir: string): Promise<MonthClosePackageResult> {
   return invoke<MonthClosePackageResult>('export_month_close_package', { month, dir });
+}
+
+export async function queryPaymentBatches(query: PaymentBatchQuery): Promise<PaymentBatch[]> {
+  return invoke<PaymentBatch[]>('query_payment_batches', { query });
+}
+
+export async function getPaymentBatchDetail(id: number): Promise<PaymentBatchDetail> {
+  return invoke<PaymentBatchDetail>('get_payment_batch_detail', { id });
+}
+
+export async function createPaymentBatch(data: PaymentBatchInput): Promise<PaymentBatchDetail> {
+  return invoke<PaymentBatchDetail>('create_payment_batch', { data });
+}
+
+export async function exportPaymentBatchFile(id: number, savePath: string): Promise<PaymentBatch> {
+  return invoke<PaymentBatch>('export_payment_batch_file', { id, path: savePath });
+}
+
+export async function markPaymentBatchPaid(data: PaymentBatchPaidInput): Promise<PaymentBatch> {
+  return invoke<PaymentBatch>('mark_payment_batch_paid', { data });
+}
+
+export async function voidPaymentBatch(data: PaymentBatchVoidInput): Promise<PaymentBatch> {
+  return invoke<PaymentBatch>('void_payment_batch', { data });
+}
+
+export async function updatePaymentBatchRemark(data: PaymentBatchRemarkInput): Promise<PaymentBatch> {
+  return invoke<PaymentBatch>('update_payment_batch_remark', { data });
 }
 
 export async function getFinancialAnalysis(query: FinancialAnalysisQuery): Promise<FinancialAnalysisReport> {

@@ -1181,6 +1181,65 @@ pub fn export_reimbursement_claim_list(
     Ok(true)
 }
 
+pub fn export_payment_batch(detail: &PaymentBatchDetail, path: &str) -> AppResult<bool> {
+    if detail.items.is_empty() {
+        return Err(AppError::InvalidParam("付款批次没有明细，不能导出".into()));
+    }
+
+    let mut workbook = Workbook::new();
+    let worksheet = workbook.add_worksheet();
+    worksheet.set_name("付款明细")?;
+
+    let header_fmt = report_header_format();
+    let money_fmt = report_money_format();
+    let batch_type_text = if detail.batch.batch_type == "salary" {
+        "工资"
+    } else {
+        "报销"
+    };
+
+    worksheet.write_string(0, 0, format!("付款批次：{}", detail.batch.batch_no))?;
+    worksheet.write_string(1, 0, format!("类型：{batch_type_text}"))?;
+    worksheet.write_string(1, 2, format!("月份：{}", detail.batch.belong_month))?;
+    worksheet.write_number_with_format(1, 4, detail.batch.total_amount, &money_fmt)?;
+
+    let headers = [
+        "序号",
+        "收款人",
+        "银行账号",
+        "开户行",
+        "付款金额",
+        "来源类型",
+        "来源ID",
+        "工号",
+        "备注",
+    ];
+    for (col, header) in headers.iter().enumerate() {
+        worksheet.write_with_format(3, col as u16, *header, &header_fmt)?;
+    }
+
+    for (idx, item) in detail.items.iter().enumerate() {
+        let row = (idx + 4) as u32;
+        worksheet.write_number(row, 0, (idx + 1) as f64)?;
+        worksheet.write_string(row, 1, item.employee_name.clone().unwrap_or_default())?;
+        worksheet.write_string(row, 2, item.bank_account.clone().unwrap_or_default())?;
+        worksheet.write_string(row, 3, item.bank_name.clone().unwrap_or_default())?;
+        worksheet.write_number_with_format(row, 4, item.amount, &money_fmt)?;
+        worksheet.write_string(row, 5, payment_source_text(&item.source_type))?;
+        worksheet.write_number(row, 6, item.source_id as f64)?;
+        worksheet.write_string(row, 7, item.employee_no.clone().unwrap_or_default())?;
+        worksheet.write_string(row, 8, item.remark.clone().unwrap_or_default())?;
+    }
+
+    let widths = [6, 12, 24, 22, 14, 12, 10, 12, 24];
+    for (col, width) in widths.iter().enumerate() {
+        worksheet.set_column_width(col as u16, *width)?;
+    }
+
+    workbook.save(path)?;
+    Ok(true)
+}
+
 // ==================== Financial Analysis Export ====================
 
 pub fn export_department_cost_analysis(
@@ -1483,6 +1542,14 @@ fn payment_status_text(status: &str) -> &str {
         "unpaid" => "未付款",
         "paid" => "已付款",
         _ => status,
+    }
+}
+
+fn payment_source_text(source_type: &str) -> &str {
+    match source_type {
+        "salary_result" => "工资",
+        "reimbursement_claim" => "报销",
+        _ => source_type,
     }
 }
 
