@@ -413,6 +413,67 @@ export interface PaymentBatchRemarkInput {
   remark?: string;
 }
 
+// ==================== 银行流水 ====================
+
+export type BankTransactionStatus = 'unmatched' | 'matched' | 'ignored';
+
+export interface BankTransaction {
+  id: number;
+  transaction_date: string;
+  belong_month: string;
+  summary?: string;
+  counterparty_name?: string;
+  counterparty_account?: string;
+  income_amount: number;
+  expense_amount: number;
+  balance?: number;
+  status: BankTransactionStatus;
+  ignore_reason?: string;
+  imported_file?: string;
+  raw_json?: string;
+  matched_batch_id?: number;
+  matched_batch_no?: string;
+  matched_batch_type?: PaymentBatchType;
+  matched_amount?: number;
+  match_score?: number;
+  match_remark?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface BankTransactionQuery {
+  belong_month?: string;
+  status?: BankTransactionStatus;
+  keyword?: string;
+}
+
+export interface BankTransactionMatch {
+  id: number;
+  transaction_id: number;
+  payment_batch_id: number;
+  match_score: number;
+  remark?: string;
+  created_at?: string;
+}
+
+export interface BankTransactionMatchInput {
+  transaction_id: number;
+  payment_batch_id: number;
+  remark?: string;
+}
+
+export interface BankTransactionIgnoreInput {
+  transaction_id: number;
+  reason: string;
+}
+
+export interface BankAutoMatchResult {
+  success: boolean;
+  matched: number;
+  skipped: number;
+  errors: string[];
+}
+
 // ==================== 财务分析 ====================
 
 export interface FinancialAnalysisQuery {

@@ -956,6 +956,144 @@ pub fn update_payment_batch_remark(
 }
 
 #[tauri::command]
+pub fn import_bank_transactions_file(
+    path: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<ImportResult, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let transactions = excel::read_bank_transactions_file(&path)?;
+    let total = transactions.len() as i32;
+    let mut imported = 0;
+    let mut skipped = 0;
+    let mut errors = Vec::new();
+
+    for tx in &transactions {
+        match db::insert_bank_transaction(&conn, tx) {
+            Ok(true) => imported += 1,
+            Ok(false) => {
+                skipped += 1;
+                errors.push(format!(
+                    "{} {}: 重复流水已跳过",
+                    tx.transaction_date,
+                    tx.summary.as_deref().unwrap_or("")
+                ));
+            }
+            Err(e) => {
+                skipped += 1;
+                errors.push(format!(
+                    "{} {}: {e}",
+                    tx.transaction_date,
+                    tx.summary.as_deref().unwrap_or("")
+                ));
+            }
+        }
+    }
+
+    db::log_operation(
+        &conn,
+        "import_bank_transactions",
+        &format!("导入银行流水: 总{total}, 成功{imported}, 跳过{skipped}"),
+        "system",
+        Some(&path),
+    )?;
+
+    Ok(ImportResult {
+        success: true,
+        total,
+        imported,
+        skipped,
+        errors,
+    })
+}
+
+#[tauri::command]
+pub fn query_bank_transactions(
+    query: BankTransactionQuery,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<BankTransaction>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    db::query_bank_transactions(&conn, &query)
+}
+
+#[tauri::command]
+pub fn auto_match_bank_transactions(
+    month: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<BankAutoMatchResult, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let result = db::auto_match_bank_transactions(&conn, &month)?;
+    db::log_operation(
+        &conn,
+        "auto_match_bank_transactions",
+        &format!(
+            "自动匹配{}银行流水: 成功{}, 跳过{}",
+            month, result.matched, result.skipped
+        ),
+        "system",
+        None,
+    )?;
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn confirm_bank_transaction_match(
+    data: BankTransactionMatchInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<BankTransactionMatch, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let result = db::confirm_bank_transaction_match(&conn, &data, 100)?;
+    db::log_operation(
+        &conn,
+        "confirm_bank_transaction_match",
+        &format!(
+            "确认银行流水ID={}匹配付款批次ID={}",
+            data.transaction_id, data.payment_batch_id
+        ),
+        "system",
+        data.remark.as_deref(),
+    )?;
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn cancel_bank_transaction_match(
+    transaction_id: i64,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let result = db::cancel_bank_transaction_match(&conn, transaction_id)?;
+    if result {
+        db::log_operation(
+            &conn,
+            "cancel_bank_transaction_match",
+            &format!("取消银行流水ID={transaction_id}匹配"),
+            "system",
+            None,
+        )?;
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn ignore_bank_transaction(
+    data: BankTransactionIgnoreInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let result = db::ignore_bank_transaction(&conn, &data)?;
+    if result {
+        db::log_operation(
+            &conn,
+            "ignore_bank_transaction",
+            &format!("忽略银行流水ID={}", data.transaction_id),
+            "system",
+            Some(&data.reason),
+        )?;
+    }
+    Ok(result)
+}
+
+#[tauri::command]
 pub fn query_operation_logs(
     query: OperationLogQuery,
     state: tauri::State<'_, Mutex<Connection>>,
@@ -1389,6 +1527,19 @@ mod tests {
             VALUES
                 (1, 'salary_result', 1, 1, 'E001', '张三', '测试银行', '62220001', 7800, 'paid', '工资代发', '2026-08-31'),
                 (2, 'reimbursement_claim', 1, 1, 'E001', '张三', '测试银行', '62220001', 300, 'paid', 'BX202608001', '2026-08-31');
+
+            INSERT INTO bank_transactions
+                (id, transaction_date, belong_month, summary, counterparty_name, counterparty_account,
+                 income_amount, expense_amount, balance, status, created_at, updated_at)
+            VALUES
+                (1, '2026-08-31', '2026-08', 'GZ202608TEST 工资代发', '张三', '62220001', 0, 7800, 10000, 'matched', '2026-08-31', '2026-08-31'),
+                (2, '2026-08-31', '2026-08', 'BX202608TEST 报销付款', '张三', '62220001', 0, 300, 9700, 'matched', '2026-08-31', '2026-08-31');
+
+            INSERT INTO bank_transaction_matches
+                (transaction_id, payment_batch_id, match_score, remark, status, created_at)
+            VALUES
+                (1, 1, 100, '测试匹配', 'active', '2026-08-31'),
+                (2, 2, 100, '测试匹配', 'active', '2026-08-31');
             ",
         )
         .unwrap();

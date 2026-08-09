@@ -188,3 +188,41 @@
   - `3.4 银行流水匹配`、`3.5 预算与异常`。
 - 下轮入口：进入 `3.4 银行流水匹配`。
 - 提交：待完成。
+
+### 2026-08-10 04:34
+
+- 目标：落地第三阶段 `3.4 银行流水匹配` 首版，形成付款批次后的本地核对闭环。
+- 完成：
+  - 新增 `bank_transactions` / `bank_transaction_matches` 表和旧库兼容字段补齐。
+  - 支持导入 CSV / Excel 银行流水，保存交易日期、摘要、对方户名、账号、收入、支出、余额、原始行和导入文件。
+  - 新增银行流水查询、自动匹配、人工确认匹配、取消匹配、忽略流水后端能力。
+  - 自动匹配首版按月份、已付款批次、支出金额一致、批次号/类型文本加分进行一对一匹配；人工匹配限定金额一致的已付款批次。
+  - 月结检查新增“银行流水匹配”，存在已付款但未匹配银行流水的付款批次时阻塞正式月结。
+  - 新增前端“银行流水”页面，接入“薪酬核算”菜单，支持导入、筛选、统计、自动匹配、人工匹配、忽略和取消匹配。
+  - 操作日志增加银行流水导入、自动匹配、确认匹配、取消匹配、忽略的中文映射。
+  - 使用 subagent 分别审查后端方案和前端/API 方案，并按最小闭环实现。
+- 修改文件：
+  - `src-tauri/src/models.rs`
+  - `src-tauri/src/excel.rs`
+  - `src-tauri/src/db.rs`
+  - `src-tauri/src/commands.rs`
+  - `src-tauri/src/lib.rs`
+  - `src/types/index.ts`
+  - `src/api/index.ts`
+  - `src/pages/BankTransactions.tsx`
+  - `src/pages/OperationLogs.tsx`
+  - `src/App.tsx`
+  - `docs/superpowers/plans/2026-08-10-stage3-progress.md`
+- 测试：
+  - `npx tsc --noEmit`：通过。
+  - `npm run lint`：通过。
+  - `npm run build`：通过；仍有既有 Vite chunk 体积提示。
+  - `cd src-tauri && cargo fmt --check`：通过。
+  - `cd src-tauri && cargo check`：通过；仍有既有 unused/dead_code warning。
+  - `cd src-tauri && cargo test --lib`：通过，48 个测试。
+- 未完成：
+  - Windows exe 下银行流水 CSV/XLS/XLSX 导入、匹配、忽略、取消匹配和月结阻塞的手工验收。
+  - 复杂银行模板字段映射预览、多笔流水对多批次匹配、付款明细级匹配。
+  - `3.5 预算与异常`。
+- 下轮入口：进入 `3.5 预算与异常`。
+- 提交：待完成。

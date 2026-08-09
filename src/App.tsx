@@ -18,6 +18,7 @@ import {
   AuditOutlined,
   CheckSquareOutlined,
   WalletOutlined,
+  BankOutlined,
   BarChartOutlined,
   AppstoreOutlined,
 } from '@ant-design/icons';
@@ -39,6 +40,7 @@ import Reimbursements from '@/pages/Reimbursements';
 import FinancialAnalysis from '@/pages/FinancialAnalysis';
 import DataSafety from '@/pages/DataSafety';
 import Payments from '@/pages/Payments';
+import BankTransactions from '@/pages/BankTransactions';
 
 const { Sider, Header, Content } = Layout;
 
@@ -71,6 +73,7 @@ const menuItems: MenuProps['items'] = [
     children: [
       { key: '/salary', label: '工资计算', icon: <CalculatorOutlined /> },
       { key: '/payments', label: '付款批次', icon: <WalletOutlined /> },
+      { key: '/bank-transactions', label: '银行流水', icon: <BankOutlined /> },
     ],
   },
   {
@@ -202,6 +205,7 @@ const AppLayout: React.FC = () => {
             <Route path="/rules" element={<SalaryRules />} />
             <Route path="/salary" element={<SalaryCalculate />} />
             <Route path="/payments" element={<Payments />} />
+            <Route path="/bank-transactions" element={<BankTransactions />} />
             <Route path="/export" element={<ExportCenter />} />
             <Route path="/logs" element={<OperationLogs />} />
             <Route path="/data-safety" element={<DataSafety />} />

@@ -39,6 +39,11 @@ const operationTypeLabels: Record<string, string> = {
   mark_payment_batch_paid: '标记批次付款',
   void_payment_batch: '作废付款批次',
   update_payment_batch_remark: '更新批次备注',
+  import_bank_transactions: '导入银行流水',
+  auto_match_bank_transactions: '自动匹配银行流水',
+  confirm_bank_transaction_match: '确认流水匹配',
+  cancel_bank_transaction_match: '取消流水匹配',
+  ignore_bank_transaction: '忽略银行流水',
 };
 
 const getOperationLabel = (value?: string) =>

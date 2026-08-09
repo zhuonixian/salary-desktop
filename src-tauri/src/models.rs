@@ -265,6 +265,7 @@ pub struct MonthCloseSummary {
     pub pending_reimbursement_count: i32,
     pub unpaid_reimbursement_count: i32,
     pub pending_payment_batch_count: i32,
+    pub unmatched_paid_batch_count: i32,
     pub total_salary_cost: f64,
     pub total_invoice_amount: f64,
     pub approved_reimbursement_amount: f64,
@@ -394,6 +395,71 @@ pub struct PaymentBatchVoidInput {
 pub struct PaymentBatchRemarkInput {
     pub id: i64,
     pub remark: Option<String>,
+}
+
+// ==================== Bank Transactions ====================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BankTransaction {
+    pub id: i64,
+    pub transaction_date: String,
+    pub belong_month: String,
+    pub summary: Option<String>,
+    pub counterparty_name: Option<String>,
+    pub counterparty_account: Option<String>,
+    pub income_amount: f64,
+    pub expense_amount: f64,
+    pub balance: Option<f64>,
+    pub status: String,
+    pub ignore_reason: Option<String>,
+    pub imported_file: Option<String>,
+    pub raw_json: Option<String>,
+    pub matched_batch_id: Option<i64>,
+    pub matched_batch_no: Option<String>,
+    pub matched_batch_type: Option<String>,
+    pub matched_amount: Option<f64>,
+    pub match_score: Option<i32>,
+    pub match_remark: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BankTransactionQuery {
+    pub belong_month: Option<String>,
+    pub status: Option<String>,
+    pub keyword: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BankTransactionMatch {
+    pub id: i64,
+    pub transaction_id: i64,
+    pub payment_batch_id: i64,
+    pub match_score: i32,
+    pub remark: Option<String>,
+    pub created_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BankTransactionMatchInput {
+    pub transaction_id: i64,
+    pub payment_batch_id: i64,
+    pub remark: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BankTransactionIgnoreInput {
+    pub transaction_id: i64,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BankAutoMatchResult {
+    pub success: bool,
+    pub matched: i32,
+    pub skipped: i32,
+    pub errors: Vec<String>,
 }
 
 // ==================== Financial Analysis ====================

@@ -32,6 +32,12 @@ import type {
   PaymentBatchQuery,
   PaymentBatchRemarkInput,
   PaymentBatchVoidInput,
+  BankAutoMatchResult,
+  BankTransaction,
+  BankTransactionIgnoreInput,
+  BankTransactionMatch,
+  BankTransactionMatchInput,
+  BankTransactionQuery,
   FinancialAnalysisQuery,
   FinancialAnalysisReport,
   OperationLog,
@@ -154,6 +160,7 @@ const emptyMonthCloseSummary = (month = '') => ({
   pending_reimbursement_count: 0,
   unpaid_reimbursement_count: 0,
   pending_payment_batch_count: 0,
+  unmatched_paid_batch_count: 0,
   total_salary_cost: 0,
   total_invoice_amount: 0,
   approved_reimbursement_amount: 0,
@@ -237,6 +244,22 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
       return { id: Number((args?.data as { id?: number } | undefined)?.id ?? 0), batch_no: 'MOCK', belong_month: '', batch_type: 'salary', status: 'void', total_amount: 0, item_count: 0 };
     case 'update_payment_batch_remark':
       return { id: Number((args?.data as { id?: number } | undefined)?.id ?? 0), batch_no: 'MOCK', belong_month: '', batch_type: 'salary', status: 'draft', total_amount: 0, item_count: 0 };
+    case 'import_bank_transactions_file':
+      return { success: true, total: 0, imported: 0, skipped: 0, errors: [] };
+    case 'query_bank_transactions':
+      return [];
+    case 'auto_match_bank_transactions':
+      return { success: true, matched: 0, skipped: 0, errors: [] };
+    case 'confirm_bank_transaction_match':
+      return {
+        id: Date.now(),
+        transaction_id: Number((args?.data as { transaction_id?: number } | undefined)?.transaction_id ?? 0),
+        payment_batch_id: Number((args?.data as { payment_batch_id?: number } | undefined)?.payment_batch_id ?? 0),
+        match_score: 100,
+      };
+    case 'cancel_bank_transaction_match':
+    case 'ignore_bank_transaction':
+      return true;
     case 'get_financial_analysis': {
       const query = args?.query as FinancialAnalysisQuery | undefined;
       return {
@@ -522,6 +545,31 @@ export async function voidPaymentBatch(data: PaymentBatchVoidInput): Promise<Pay
 
 export async function updatePaymentBatchRemark(data: PaymentBatchRemarkInput): Promise<PaymentBatch> {
   return invoke<PaymentBatch>('update_payment_batch_remark', { data });
+}
+
+export async function importBankTransactionsFile(filePath: string): Promise<ImportResult> {
+  const result = await invoke<ImportResult & { skipped?: number }>('import_bank_transactions_file', { path: filePath });
+  return normalizeImportResult(result);
+}
+
+export async function queryBankTransactions(query: BankTransactionQuery): Promise<BankTransaction[]> {
+  return invoke<BankTransaction[]>('query_bank_transactions', { query });
+}
+
+export async function autoMatchBankTransactions(month: string): Promise<BankAutoMatchResult> {
+  return invoke<BankAutoMatchResult>('auto_match_bank_transactions', { month });
+}
+
+export async function confirmBankTransactionMatch(data: BankTransactionMatchInput): Promise<BankTransactionMatch> {
+  return invoke<BankTransactionMatch>('confirm_bank_transaction_match', { data });
+}
+
+export async function cancelBankTransactionMatch(transactionId: number): Promise<boolean> {
+  return invoke<boolean>('cancel_bank_transaction_match', { transaction_id: transactionId });
+}
+
+export async function ignoreBankTransaction(data: BankTransactionIgnoreInput): Promise<boolean> {
+  return invoke<boolean>('ignore_bank_transaction', { data });
 }
 
 export async function getFinancialAnalysis(query: FinancialAnalysisQuery): Promise<FinancialAnalysisReport> {

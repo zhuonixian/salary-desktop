@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
 
 use calamine::{open_workbook_auto, Data, Reader};
 use rust_xlsxwriter::{Format, Workbook};
@@ -225,6 +227,225 @@ pub fn read_attendance_excel(path: &str, month: &str) -> AppResult<Vec<Attendanc
     }
 
     Ok(records)
+}
+
+// ==================== Bank Transaction Import ====================
+
+pub fn read_bank_transactions_file(path: &str) -> AppResult<Vec<BankTransaction>> {
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if ext == "csv" {
+        read_bank_transactions_csv(path)
+    } else {
+        read_bank_transactions_excel(path)
+    }
+}
+
+fn read_bank_transactions_excel(path: &str) -> AppResult<Vec<BankTransaction>> {
+    let mut workbook = open_workbook_auto(path)?;
+    let sheet_names = workbook.sheet_names().to_vec();
+    if sheet_names.is_empty() {
+        return Err(AppError::InvalidParam("Excel文件没有工作表".to_string()));
+    }
+
+    let range = workbook.worksheet_range(&sheet_names[0])?;
+    let mut rows = range.rows();
+    let headers = if let Some(header_row) = rows.next() {
+        header_map(header_row.iter().map(|cell| cell.to_string()).collect())
+    } else {
+        return Ok(Vec::new());
+    };
+
+    let mut transactions = Vec::new();
+    for row in rows {
+        let values: Vec<String> = row.iter().map(cell_to_string).collect();
+        if let Some(transaction) = bank_transaction_from_values(&headers, &values, path)? {
+            transactions.push(transaction);
+        }
+    }
+    Ok(transactions)
+}
+
+fn read_bank_transactions_csv(path: &str) -> AppResult<Vec<BankTransaction>> {
+    let content = fs::read_to_string(path)?;
+    let mut lines = content.lines();
+    let Some(header_line) = lines.next() else {
+        return Ok(Vec::new());
+    };
+    let headers = header_map(split_csv_line(header_line));
+
+    let mut transactions = Vec::new();
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let values = split_csv_line(line);
+        if let Some(transaction) = bank_transaction_from_values(&headers, &values, path)? {
+            transactions.push(transaction);
+        }
+    }
+    Ok(transactions)
+}
+
+fn header_map(headers: Vec<String>) -> HashMap<String, usize> {
+    headers
+        .into_iter()
+        .enumerate()
+        .map(|(idx, header)| {
+            (
+                header.trim().trim_start_matches('\u{feff}').to_string(),
+                idx,
+            )
+        })
+        .collect()
+}
+
+fn bank_transaction_from_values(
+    headers: &HashMap<String, usize>,
+    values: &[String],
+    path: &str,
+) -> AppResult<Option<BankTransaction>> {
+    let transaction_date = get_bank_value(
+        headers,
+        values,
+        &["交易日期", "记账日期", "日期", "transaction_date", "date"],
+    )
+    .unwrap_or_default();
+    if transaction_date.trim().is_empty() {
+        return Ok(None);
+    }
+    let transaction_date = normalize_bank_date(&transaction_date)?;
+    let belong_month = transaction_date.chars().take(7).collect::<String>();
+    let summary = get_bank_value(
+        headers,
+        values,
+        &["摘要", "用途", "备注", "summary", "remark"],
+    );
+    let counterparty_name = get_bank_value(
+        headers,
+        values,
+        &["对方户名", "对方名称", "收付款方", "counterparty_name"],
+    );
+    let counterparty_account = get_bank_value(
+        headers,
+        values,
+        &["对方账号", "对方账户", "counterparty_account"],
+    );
+    let income_amount = parse_money(
+        get_bank_value(headers, values, &["收入", "贷方金额", "income", "credit"])
+            .as_deref()
+            .unwrap_or(""),
+    );
+    let expense_amount = parse_money(
+        get_bank_value(
+            headers,
+            values,
+            &["支出", "借方金额", "付款金额", "expense", "debit"],
+        )
+        .as_deref()
+        .unwrap_or(""),
+    );
+    let balance =
+        get_bank_value(headers, values, &["余额", "balance"]).map(|value| parse_money(&value));
+
+    if income_amount == 0.0 && expense_amount == 0.0 {
+        return Ok(None);
+    }
+
+    let raw_json = serde_json::to_string(values).ok();
+    Ok(Some(BankTransaction {
+        id: 0,
+        transaction_date,
+        belong_month,
+        summary,
+        counterparty_name,
+        counterparty_account,
+        income_amount,
+        expense_amount,
+        balance,
+        status: "unmatched".to_string(),
+        ignore_reason: None,
+        imported_file: Some(path.to_string()),
+        raw_json,
+        matched_batch_id: None,
+        matched_batch_no: None,
+        matched_batch_type: None,
+        matched_amount: None,
+        match_score: None,
+        match_remark: None,
+        created_at: None,
+        updated_at: None,
+    }))
+}
+
+fn get_bank_value(
+    headers: &HashMap<String, usize>,
+    values: &[String],
+    aliases: &[&str],
+) -> Option<String> {
+    aliases
+        .iter()
+        .find_map(|alias| headers.get(*alias))
+        .and_then(|idx| values.get(*idx))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn normalize_bank_date(value: &str) -> AppResult<String> {
+    let trimmed = value.trim().replace('/', "-").replace('.', "-");
+    if trimmed.len() >= 10 {
+        return Ok(trimmed.chars().take(10).collect());
+    }
+    Err(AppError::InvalidParam(format!(
+        "银行流水日期格式无效: {value}"
+    )))
+}
+
+fn parse_money(value: &str) -> f64 {
+    value
+        .trim()
+        .replace(',', "")
+        .replace('，', "")
+        .replace('¥', "")
+        .parse::<f64>()
+        .unwrap_or(0.0)
+}
+
+fn cell_to_string(cell: &Data) -> String {
+    match cell {
+        Data::Float(value) => value.to_string(),
+        Data::Int(value) => value.to_string(),
+        Data::String(value) => value.trim().to_string(),
+        Data::Bool(value) => value.to_string(),
+        _ => cell.to_string(),
+    }
+}
+
+fn split_csv_line(line: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut current = String::new();
+    let mut chars = line.chars().peekable();
+    let mut in_quotes = false;
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' if in_quotes && chars.peek() == Some(&'"') => {
+                current.push('"');
+                chars.next();
+            }
+            '"' => in_quotes = !in_quotes,
+            ',' if !in_quotes => {
+                values.push(current.trim().to_string());
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    values.push(current.trim().to_string());
+    values
 }
 
 // ==================== Export Helpers ====================
@@ -1583,6 +1804,26 @@ mod tests {
 
         export_reimbursement_claim_list(&claims, &path.to_string_lossy()).unwrap();
         assert!(path.exists());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_read_bank_transactions_csv_with_quoted_summary() {
+        let path = std::env::temp_dir().join(format!(
+            "salary-bank-transactions-{}.csv",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(
+            &path,
+            "交易日期,摘要,对方户名,对方账号,收入,支出,余额\n2026-08-31,\"工资,代发\",张三,62220001,0,7800,10000\n",
+        )
+        .unwrap();
+
+        let records = read_bank_transactions_file(&path.to_string_lossy()).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].belong_month, "2026-08");
+        assert_eq!(records[0].summary.as_deref(), Some("工资,代发"));
+        assert_eq!(records[0].expense_amount, 7800.0);
         let _ = std::fs::remove_file(path);
     }
 }

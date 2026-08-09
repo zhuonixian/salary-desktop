@@ -278,6 +278,47 @@ fn create_tables(conn: &Connection) -> AppResult<()> {
         CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_items_active_source
             ON payment_items(source_type, source_id)
             WHERE status != 'void';
+
+        CREATE TABLE IF NOT EXISTS bank_transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            transaction_date TEXT NOT NULL,
+            belong_month TEXT NOT NULL,
+            summary TEXT,
+            counterparty_name TEXT,
+            counterparty_account TEXT,
+            income_amount REAL DEFAULT 0,
+            expense_amount REAL DEFAULT 0,
+            balance REAL,
+            status TEXT NOT NULL DEFAULT 'unmatched',
+            ignore_reason TEXT,
+            imported_file TEXT,
+            raw_json TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS bank_transaction_matches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            transaction_id INTEGER NOT NULL,
+            payment_batch_id INTEGER NOT NULL,
+            match_score INTEGER DEFAULT 0,
+            remark TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            created_at TEXT,
+            FOREIGN KEY (transaction_id) REFERENCES bank_transactions(id) ON DELETE CASCADE,
+            FOREIGN KEY (payment_batch_id) REFERENCES payment_batches(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_bank_transactions_month ON bank_transactions(belong_month, status);
+        CREATE INDEX IF NOT EXISTS idx_bank_transactions_date ON bank_transactions(transaction_date);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_bank_transactions_dedup
+            ON bank_transactions(transaction_date, COALESCE(summary,''), COALESCE(counterparty_name,''),
+                                 COALESCE(counterparty_account,''), income_amount, expense_amount, COALESCE(balance,0));
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_bank_matches_active_transaction
+            ON bank_transaction_matches(transaction_id)
+            WHERE status = 'active';
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_bank_matches_active_batch
+            ON bank_transaction_matches(payment_batch_id)
+            WHERE status = 'active';
         ",
     )?;
     migrate_existing_schema(conn)?;
@@ -309,6 +350,7 @@ fn migrate_existing_schema(conn: &Connection) -> AppResult<()> {
         "INTEGER",
     )?;
     ensure_column(conn, "reimbursement_claims", "payment_batch_id", "INTEGER")?;
+    ensure_column(conn, "bank_transactions", "ignore_reason", "TEXT")?;
     Ok(())
 }
 
@@ -1478,6 +1520,17 @@ pub fn get_month_close_workbench(conn: &Connection, month: &str) -> AppResult<Mo
         params![month],
         |row| row.get(0),
     )?;
+    let unmatched_paid_batch_count: i64 = conn.query_row(
+        "SELECT COUNT(*)
+         FROM payment_batches b
+         WHERE b.belong_month = ?1 AND b.status = 'paid'
+           AND NOT EXISTS (
+             SELECT 1 FROM bank_transaction_matches m
+             WHERE m.payment_batch_id = b.id AND m.status = 'active'
+           )",
+        params![month],
+        |row| row.get(0),
+    )?;
     let total_salary_cost: f64 = conn
         .query_row(
             "SELECT COALESCE(SUM(gross_salary), 0) FROM salary_monthly_results WHERE salary_month = ?1",
@@ -1525,6 +1578,7 @@ pub fn get_month_close_workbench(conn: &Connection, month: &str) -> AppResult<Mo
         pending_reimbursement_count: pending_reimbursement_count as i32,
         unpaid_reimbursement_count: unpaid_reimbursement_count as i32,
         pending_payment_batch_count: pending_payment_batch_count as i32,
+        unmatched_paid_batch_count: unmatched_paid_batch_count as i32,
         total_salary_cost,
         total_invoice_amount,
         approved_reimbursement_amount,
@@ -1706,6 +1760,26 @@ fn build_month_close_checks(summary: &MonthCloseSummary) -> Vec<MonthCloseCheckI
                 )
             },
             action_route: Some("/payments".to_string()),
+        },
+        MonthCloseCheckItem {
+            key: "bank_transactions_matched".to_string(),
+            title: "银行流水匹配".to_string(),
+            status: if summary.unmatched_paid_batch_count == 0 {
+                "ok"
+            } else {
+                "blocking"
+            }
+            .to_string(),
+            count: summary.unmatched_paid_batch_count,
+            description: if summary.unmatched_paid_batch_count == 0 {
+                "已付款批次均已匹配银行流水".to_string()
+            } else {
+                format!(
+                    "{} 个已付款批次尚未匹配银行流水",
+                    summary.unmatched_paid_batch_count
+                )
+            },
+            action_route: Some("/bank-transactions".to_string()),
         },
     ]
 }
@@ -2344,6 +2418,345 @@ pub fn void_payment_batch(
     )?;
     tx.commit()?;
     get_payment_batch(conn, input.id)
+}
+
+// ==================== Bank Transactions ====================
+
+fn row_to_bank_transaction(row: &rusqlite::Row<'_>) -> rusqlite::Result<BankTransaction> {
+    Ok(BankTransaction {
+        id: row.get(0)?,
+        transaction_date: row.get(1)?,
+        belong_month: row.get(2)?,
+        summary: row.get(3)?,
+        counterparty_name: row.get(4)?,
+        counterparty_account: row.get(5)?,
+        income_amount: row.get(6)?,
+        expense_amount: row.get(7)?,
+        balance: row.get(8)?,
+        status: row.get(9)?,
+        ignore_reason: row.get(10)?,
+        imported_file: row.get(11)?,
+        raw_json: row.get(12)?,
+        created_at: row.get(13)?,
+        updated_at: row.get(14)?,
+        matched_batch_id: row.get(15)?,
+        matched_batch_no: row.get(16)?,
+        matched_batch_type: row.get(17)?,
+        matched_amount: row.get(18)?,
+        match_score: row.get(19)?,
+        match_remark: row.get(20)?,
+    })
+}
+
+fn row_to_bank_match(row: &rusqlite::Row<'_>) -> rusqlite::Result<BankTransactionMatch> {
+    Ok(BankTransactionMatch {
+        id: row.get(0)?,
+        transaction_id: row.get(1)?,
+        payment_batch_id: row.get(2)?,
+        match_score: row.get(3)?,
+        remark: row.get(4)?,
+        created_at: row.get(5)?,
+    })
+}
+
+pub fn query_bank_transactions(
+    conn: &Connection,
+    query: &BankTransactionQuery,
+) -> AppResult<Vec<BankTransaction>> {
+    let mut where_clauses = vec!["1=1".to_string()];
+    let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let mut idx = 1;
+
+    if let Some(month) = query
+        .belong_month
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        where_clauses.push(format!("t.belong_month = ?{idx}"));
+        params_vec.push(Box::new(month.clone()));
+        idx += 1;
+    }
+    if let Some(status) = query
+        .status
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        where_clauses.push(format!("t.status = ?{idx}"));
+        params_vec.push(Box::new(status.clone()));
+        idx += 1;
+    }
+    if let Some(keyword) = query
+        .keyword
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        where_clauses.push(format!(
+            "(t.summary LIKE ?{idx} OR t.counterparty_name LIKE ?{idx} OR t.counterparty_account LIKE ?{idx} OR b.batch_no LIKE ?{idx})"
+        ));
+        params_vec.push(Box::new(format!("%{}%", keyword.trim())));
+    }
+
+    let sql = format!(
+        "SELECT t.id, t.transaction_date, t.belong_month, t.summary, t.counterparty_name,
+                t.counterparty_account, t.income_amount, t.expense_amount, t.balance, t.status,
+                t.ignore_reason, t.imported_file, t.raw_json, t.created_at, t.updated_at,
+                b.id, b.batch_no, b.batch_type, b.total_amount, m.match_score, m.remark
+         FROM bank_transactions t
+         LEFT JOIN bank_transaction_matches m ON m.transaction_id = t.id AND m.status = 'active'
+         LEFT JOIN payment_batches b ON b.id = m.payment_batch_id
+         WHERE {}
+         ORDER BY t.transaction_date DESC, t.id DESC",
+        where_clauses.join(" AND ")
+    );
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+        params_vec.iter().map(|param| param.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_refs.as_slice(), row_to_bank_transaction)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
+pub fn insert_bank_transaction(conn: &Connection, tx: &BankTransaction) -> AppResult<bool> {
+    ensure_month_open(conn, &tx.belong_month)?;
+    let now = Utc::now().to_rfc3339();
+    let inserted = conn.execute(
+        "INSERT OR IGNORE INTO bank_transactions
+            (transaction_date, belong_month, summary, counterparty_name, counterparty_account,
+             income_amount, expense_amount, balance, status, ignore_reason, imported_file, raw_json, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'unmatched', NULL, ?9, ?10, ?11, ?12)",
+        params![
+            tx.transaction_date,
+            tx.belong_month,
+            tx.summary,
+            tx.counterparty_name,
+            tx.counterparty_account,
+            tx.income_amount,
+            tx.expense_amount,
+            tx.balance,
+            tx.imported_file,
+            tx.raw_json,
+            now,
+            now
+        ],
+    )?;
+    Ok(inserted > 0)
+}
+
+pub fn get_bank_transaction(conn: &Connection, id: i64) -> AppResult<BankTransaction> {
+    query_bank_transactions(
+        conn,
+        &BankTransactionQuery {
+            ..Default::default()
+        },
+    )?
+    .into_iter()
+    .find(|tx| tx.id == id)
+    .ok_or_else(|| AppError::NotFound(format!("银行流水ID={id}未找到")))
+}
+
+pub fn confirm_bank_transaction_match(
+    conn: &Connection,
+    input: &BankTransactionMatchInput,
+    score: i32,
+) -> AppResult<BankTransactionMatch> {
+    let tx = get_bank_transaction(conn, input.transaction_id)?;
+    ensure_month_open(conn, &tx.belong_month)?;
+    if tx.status == "ignored" {
+        return Err(AppError::InvalidParam("已忽略流水不能匹配".into()));
+    }
+    let batch = get_payment_batch(conn, input.payment_batch_id)?;
+    ensure_month_open(conn, &batch.belong_month)?;
+    if batch.status != "paid" {
+        return Err(AppError::InvalidParam("只能匹配已付款批次".into()));
+    }
+    if tx.belong_month != batch.belong_month {
+        return Err(AppError::InvalidParam(
+            "银行流水月份与付款批次月份不一致".into(),
+        ));
+    }
+    if (tx.expense_amount - batch.total_amount).abs() > 0.01 {
+        return Err(AppError::InvalidParam(format!(
+            "流水支出金额{:.2}与付款批次金额{:.2}不一致",
+            tx.expense_amount, batch.total_amount
+        )));
+    }
+
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE bank_transaction_matches
+         SET status='cancelled'
+         WHERE status='active' AND (transaction_id=?1 OR payment_batch_id=?2)",
+        params![input.transaction_id, input.payment_batch_id],
+    )?;
+    conn.execute(
+        "INSERT INTO bank_transaction_matches
+            (transaction_id, payment_batch_id, match_score, remark, status, created_at)
+         VALUES (?1, ?2, ?3, ?4, 'active', ?5)",
+        params![
+            input.transaction_id,
+            input.payment_batch_id,
+            score,
+            input.remark,
+            now
+        ],
+    )?;
+    let match_id = conn.last_insert_rowid();
+    conn.execute(
+        "UPDATE bank_transactions SET status='matched', updated_at=?1 WHERE id=?2",
+        params![now, input.transaction_id],
+    )?;
+
+    conn.query_row(
+        "SELECT id, transaction_id, payment_batch_id, match_score, remark, created_at
+         FROM bank_transaction_matches WHERE id=?1",
+        params![match_id],
+        row_to_bank_match,
+    )
+    .map_err(AppError::from)
+}
+
+pub fn cancel_bank_transaction_match(conn: &Connection, transaction_id: i64) -> AppResult<bool> {
+    let tx = get_bank_transaction(conn, transaction_id)?;
+    ensure_month_open(conn, &tx.belong_month)?;
+    let now = Utc::now().to_rfc3339();
+    let updated = conn.execute(
+        "UPDATE bank_transaction_matches SET status='cancelled'
+         WHERE transaction_id=?1 AND status='active'",
+        params![transaction_id],
+    )?;
+    conn.execute(
+        "UPDATE bank_transactions SET status='unmatched', updated_at=?1 WHERE id=?2",
+        params![now, transaction_id],
+    )?;
+    Ok(updated > 0)
+}
+
+pub fn ignore_bank_transaction(
+    conn: &Connection,
+    input: &BankTransactionIgnoreInput,
+) -> AppResult<bool> {
+    if input.reason.trim().is_empty() {
+        return Err(AppError::InvalidParam("忽略原因必填".into()));
+    }
+    let tx = get_bank_transaction(conn, input.transaction_id)?;
+    ensure_month_open(conn, &tx.belong_month)?;
+    if tx.status == "matched" {
+        return Err(AppError::InvalidParam("已匹配流水不能直接忽略".into()));
+    }
+    let now = Utc::now().to_rfc3339();
+    let updated = conn.execute(
+        "UPDATE bank_transactions SET status='ignored', ignore_reason=?1, updated_at=?2 WHERE id=?3",
+        params![input.reason.trim(), now, input.transaction_id],
+    )?;
+    Ok(updated > 0)
+}
+
+pub fn auto_match_bank_transactions(
+    conn: &Connection,
+    month: &str,
+) -> AppResult<BankAutoMatchResult> {
+    ensure_month_open(conn, month)?;
+    let transactions = query_bank_transactions(
+        conn,
+        &BankTransactionQuery {
+            belong_month: Some(month.to_string()),
+            status: Some("unmatched".to_string()),
+            keyword: None,
+        },
+    )?;
+    let batches = query_payment_batches(
+        conn,
+        &PaymentBatchQuery {
+            belong_month: Some(month.to_string()),
+            status: Some("paid".to_string()),
+            batch_type: None,
+        },
+    )?;
+
+    let mut matched = 0;
+    let mut skipped = 0;
+    let mut errors = Vec::new();
+    for tx in transactions {
+        let candidates: Vec<&PaymentBatch> = batches
+            .iter()
+            .filter(|batch| (tx.expense_amount - batch.total_amount).abs() <= 0.01)
+            .filter(|batch| {
+                !active_bank_match_for_batch_exists(conn, batch.id).unwrap_or(true)
+                    && !active_bank_match_for_transaction_exists(conn, tx.id).unwrap_or(true)
+            })
+            .collect();
+
+        if candidates.len() != 1 {
+            skipped += 1;
+            continue;
+        }
+        let batch = candidates[0];
+        let score = bank_match_score(&tx, batch);
+        match confirm_bank_transaction_match(
+            conn,
+            &BankTransactionMatchInput {
+                transaction_id: tx.id,
+                payment_batch_id: batch.id,
+                remark: Some("自动匹配".to_string()),
+            },
+            score,
+        ) {
+            Ok(_) => matched += 1,
+            Err(e) => {
+                skipped += 1;
+                errors.push(format!("流水ID={}：{e}", tx.id));
+            }
+        }
+    }
+
+    Ok(BankAutoMatchResult {
+        success: true,
+        matched,
+        skipped,
+        errors,
+    })
+}
+
+fn active_bank_match_for_batch_exists(conn: &Connection, batch_id: i64) -> AppResult<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM bank_transaction_matches
+         WHERE payment_batch_id=?1 AND status='active'",
+        params![batch_id],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+fn active_bank_match_for_transaction_exists(
+    conn: &Connection,
+    transaction_id: i64,
+) -> AppResult<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM bank_transaction_matches
+         WHERE transaction_id=?1 AND status='active'",
+        params![transaction_id],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+fn bank_match_score(tx: &BankTransaction, batch: &PaymentBatch) -> i32 {
+    let mut score = 80;
+    let haystack = format!(
+        "{} {} {}",
+        tx.summary.as_deref().unwrap_or(""),
+        tx.counterparty_name.as_deref().unwrap_or(""),
+        tx.counterparty_account.as_deref().unwrap_or("")
+    );
+    if haystack.contains(&batch.batch_no) {
+        score += 15;
+    }
+    if batch.batch_type == "salary" && haystack.contains("工资") {
+        score += 5;
+    }
+    if batch.batch_type == "reimbursement" && haystack.contains("报销") {
+        score += 5;
+    }
+    score.min(100)
 }
 
 // ==================== Financial Analysis ====================
@@ -3991,6 +4404,26 @@ mod tests {
         .unwrap();
     }
 
+    fn insert_paid_batch_bank_match(conn: &Connection, batch_id: i64, amount: f64) {
+        conn.execute(
+            "INSERT INTO bank_transactions
+                (transaction_date, belong_month, summary, counterparty_name, counterparty_account,
+                 income_amount, expense_amount, balance, status, created_at, updated_at)
+             VALUES ('2026-08-31', '2026-08', '测试付款批次匹配', '测试收款人', '62220000',
+                     0, ?1, 10000, 'matched', '2026-08-31', '2026-08-31')",
+            params![amount],
+        )
+        .unwrap();
+        let transaction_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO bank_transaction_matches
+                (transaction_id, payment_batch_id, match_score, remark, status, created_at)
+             VALUES (?1, ?2, 100, '测试匹配', 'active', '2026-08-31')",
+            params![transaction_id, batch_id],
+        )
+        .unwrap();
+    }
+
     #[test]
     fn test_close_month_rejects_blocking_checks() {
         let conn = setup_financial_db();
@@ -4304,6 +4737,168 @@ mod tests {
     }
 
     #[test]
+    fn test_bank_transactions_auto_match_and_month_close_gate() {
+        let mut conn = setup_financial_db();
+        fill_employee_bank_info(&conn);
+        make_august_closable(&conn);
+        let detail = create_payment_batch(
+            &mut conn,
+            &PaymentBatchInput {
+                belong_month: "2026-08".into(),
+                batch_type: "salary".into(),
+                source_ids: None,
+                remark: None,
+            },
+        )
+        .unwrap();
+        mark_payment_batch_exported(&conn, detail.batch.id).unwrap();
+        mark_payment_batch_paid(
+            &mut conn,
+            &PaymentBatchPaidInput {
+                id: detail.batch.id,
+                payment_date: "2026-08-31".into(),
+            },
+        )
+        .unwrap();
+
+        let workbench = get_month_close_workbench(&conn, "2026-08").unwrap();
+        assert_eq!(workbench.summary.unmatched_paid_batch_count, 1);
+        assert!(matches!(
+            close_month(&conn, "2026-08", "system", None).unwrap_err(),
+            AppError::InvalidParam(_)
+        ));
+
+        assert!(insert_bank_transaction(
+            &conn,
+            &BankTransaction {
+                id: 0,
+                transaction_date: "2026-08-31".into(),
+                belong_month: "2026-08".into(),
+                summary: Some(format!("{} 工资代发", detail.batch.batch_no)),
+                counterparty_name: Some("测试银行".into()),
+                counterparty_account: Some("62220000".into()),
+                income_amount: 0.0,
+                expense_amount: detail.batch.total_amount,
+                balance: Some(10000.0),
+                status: "unmatched".into(),
+                ignore_reason: None,
+                imported_file: None,
+                raw_json: None,
+                matched_batch_id: None,
+                matched_batch_no: None,
+                matched_batch_type: None,
+                matched_amount: None,
+                match_score: None,
+                match_remark: None,
+                created_at: None,
+                updated_at: None,
+            }
+        )
+        .unwrap());
+
+        let match_result = auto_match_bank_transactions(&conn, "2026-08").unwrap();
+        assert_eq!(match_result.matched, 1);
+        let transactions = query_bank_transactions(
+            &conn,
+            &BankTransactionQuery {
+                belong_month: Some("2026-08".into()),
+                status: Some("matched".into()),
+                keyword: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(transactions.len(), 1);
+        assert_eq!(transactions[0].matched_batch_id, Some(detail.batch.id));
+
+        cancel_bank_transaction_match(&conn, transactions[0].id).unwrap();
+        let unmatched = query_bank_transactions(
+            &conn,
+            &BankTransactionQuery {
+                belong_month: Some("2026-08".into()),
+                status: Some("unmatched".into()),
+                keyword: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(unmatched.len(), 1);
+
+        confirm_bank_transaction_match(
+            &conn,
+            &BankTransactionMatchInput {
+                transaction_id: unmatched[0].id,
+                payment_batch_id: detail.batch.id,
+                remark: Some("手工确认".into()),
+            },
+            100,
+        )
+        .unwrap();
+        let workbench = get_month_close_workbench(&conn, "2026-08").unwrap();
+        assert_eq!(workbench.summary.unmatched_paid_batch_count, 0);
+        close_month(&conn, "2026-08", "system", None).unwrap();
+    }
+
+    #[test]
+    fn test_ignore_bank_transaction_requires_open_unmatched_transaction() {
+        let conn = setup_financial_db();
+        assert!(insert_bank_transaction(
+            &conn,
+            &BankTransaction {
+                id: 0,
+                transaction_date: "2026-08-20".into(),
+                belong_month: "2026-08".into(),
+                summary: Some("利息收入".into()),
+                counterparty_name: None,
+                counterparty_account: None,
+                income_amount: 1.0,
+                expense_amount: 0.0,
+                balance: Some(1.0),
+                status: "unmatched".into(),
+                ignore_reason: None,
+                imported_file: None,
+                raw_json: None,
+                matched_batch_id: None,
+                matched_batch_no: None,
+                matched_batch_type: None,
+                matched_amount: None,
+                match_score: None,
+                match_remark: None,
+                created_at: None,
+                updated_at: None,
+            }
+        )
+        .unwrap());
+        let tx = query_bank_transactions(
+            &conn,
+            &BankTransactionQuery {
+                belong_month: Some("2026-08".into()),
+                status: Some("unmatched".into()),
+                keyword: None,
+            },
+        )
+        .unwrap()
+        .remove(0);
+
+        ignore_bank_transaction(
+            &conn,
+            &BankTransactionIgnoreInput {
+                transaction_id: tx.id,
+                reason: "非付款流水".into(),
+            },
+        )
+        .unwrap();
+        let ignored = query_bank_transactions(
+            &conn,
+            &BankTransactionQuery {
+                belong_month: Some("2026-08".into()),
+                status: Some("ignored".into()),
+                keyword: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(ignored[0].ignore_reason.as_deref(), Some("非付款流水"));
+    }
+
+    #[test]
     fn test_closed_month_blocks_payment_batch_writes() {
         let mut conn = setup_financial_db();
         fill_employee_bank_info(&conn);
@@ -4328,6 +4923,7 @@ mod tests {
             },
         )
         .unwrap();
+        insert_paid_batch_bank_match(&conn, detail.batch.id, detail.batch.total_amount);
         close_month(&conn, "2026-08", "system", None).unwrap();
 
         let create_err = create_payment_batch(
