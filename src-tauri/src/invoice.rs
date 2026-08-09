@@ -97,7 +97,7 @@ pub fn ocr_invoice<D: InvoiceOcrDbOps + ?Sized>(
 ) -> AppResult<InvoiceOcrPreview> {
     match ocr_invoice_inner(image_path, db_ops) {
         Ok(preview) => Ok(preview),
-        Err(InvoiceOcrInnerError::TokenInvalid(e)) => {
+        Err(InvoiceOcrInnerError::TokenInvalid(_e)) => {
             // 110 = Access token invalid or no longer valid
             // 通常发生在用户重置 secret 后旧 token 还在 DB 缓存里
             db_ops.clear_baidu_access_token()?;
@@ -292,6 +292,10 @@ pub fn save_invoice(
     conn: &Connection,
     app_data_dir: &std::path::Path,
 ) -> AppResult<Invoice> {
+    if let Some(month) = input.belong_month.as_deref() {
+        db::ensure_month_open(conn, month)?;
+    }
+
     // 二次查重（发票号码必填；发票代码可空，支持全电票）
     let number = input.invoice_number.as_deref().unwrap_or("").trim();
     if number.is_empty() {
@@ -346,6 +350,9 @@ pub fn save_invoice_with_mutex(
     let code_ref = input.invoice_code.as_deref();
     {
         let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+        if let Some(month) = input.belong_month.as_deref() {
+            db::ensure_month_open(&conn, month)?;
+        }
         if let Some(existing) = db::find_invoice_by_dedup_key(&conn, code_ref, number)? {
             let code_disp = code_ref.unwrap_or("");
             return Err(AppError::General(format!(
@@ -390,6 +397,12 @@ pub fn update_invoice(
     app_data_dir: &std::path::Path,
 ) -> AppResult<bool> {
     let existing = db::get_invoice(conn, id)?;
+    if let Some(month) = existing.belong_month.as_deref() {
+        db::ensure_month_open(conn, month)?;
+    }
+    if let Some(month) = input.belong_month.as_deref() {
+        db::ensure_month_open(conn, month)?;
+    }
     let new_image_path = if let Some(new_src) = input.image_path.as_deref() {
         if !new_src.is_empty() && new_src != existing.image_path.as_deref().unwrap_or("") {
             // 用户换图，复制新图
@@ -432,7 +445,14 @@ pub fn update_invoice_with_mutex(
 ) -> AppResult<bool> {
     let existing = {
         let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
-        db::get_invoice(&conn, id)?
+        let existing = db::get_invoice(&conn, id)?;
+        if let Some(month) = existing.belong_month.as_deref() {
+            db::ensure_month_open(&conn, month)?;
+        }
+        if let Some(month) = input.belong_month.as_deref() {
+            db::ensure_month_open(&conn, month)?;
+        }
+        existing
     };
     let new_image_path = if let Some(new_src) = input.image_path.as_deref() {
         if !new_src.is_empty() && new_src != existing.image_path.as_deref().unwrap_or("") {
@@ -634,13 +654,19 @@ mod tests {
         let resp = make_response(resp_json);
         let preview = map_baidu_response(&resp, "");
 
-        assert_eq!(preview.invoice_number.as_deref(), Some("26317000002652868787"));
+        assert_eq!(
+            preview.invoice_number.as_deref(),
+            Some("26317000002652868787")
+        );
         assert_eq!(preview.invoice_type.as_deref(), Some("电子发票(普通发票)"));
         assert!((preview.amount - 129.51).abs() < 1e-6);
         assert!((preview.tax_amount - 3.89).abs() < 1e-6);
         assert!((preview.total_amount - 133.40).abs() < 1e-6);
         assert_eq!(preview.seller_name.as_deref(), Some("上海路团科技有限公司"));
-        assert_eq!(preview.buyer_name.as_deref(), Some("奇安信科技集团股份有限公司"));
+        assert_eq!(
+            preview.buyer_name.as_deref(),
+            Some("奇安信科技集团股份有限公司")
+        );
         // 空字符串视为 None
         assert!(preview.invoice_code.is_none());
     }
@@ -655,7 +681,10 @@ mod tests {
         });
         let resp = make_response(resp_json);
         let preview = map_baidu_response(&resp, "");
-        assert_eq!(preview.invoice_number.as_deref(), Some("26317000002652868787"));
+        assert_eq!(
+            preview.invoice_number.as_deref(),
+            Some("26317000002652868787")
+        );
     }
 
     #[test]

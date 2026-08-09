@@ -23,6 +23,8 @@ import type {
   InvoiceOcrPreview,
   InvoiceQuery,
   MonthCloseWorkbench,
+  MonthCloseRecord,
+  MonthClosePackageResult,
   FinancialAnalysisQuery,
   FinancialAnalysisReport,
   OperationLog,
@@ -166,7 +168,27 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
         attendance_count: 0,
       };
     case 'get_month_close_workbench':
-      return { summary: emptyMonthCloseSummary(String(args?.month ?? '')), checks: [] };
+      return { summary: emptyMonthCloseSummary(String(args?.month ?? '')), checks: [], month_close: undefined };
+    case 'get_month_close_status':
+      return undefined;
+    case 'close_month':
+      return {
+        id: Date.now(),
+        month: String((args?.data as { month?: string } | undefined)?.month ?? ''),
+        status: 'closed',
+        closed_at: new Date().toISOString(),
+        closed_by: 'system',
+      };
+    case 'reopen_month':
+      return {
+        id: Date.now(),
+        month: String((args?.data as { month?: string } | undefined)?.month ?? ''),
+        status: 'reopened',
+        reopened_at: new Date().toISOString(),
+        reopen_reason: String((args?.data as { reason?: string } | undefined)?.reason ?? ''),
+      };
+    case 'export_month_close_package':
+      return { success: true, output_dir: String(args?.dir ?? ''), files: [] };
     case 'get_financial_analysis': {
       const query = args?.query as FinancialAnalysisQuery | undefined;
       return {
@@ -408,6 +430,22 @@ export async function getDashboardSummary(month: string): Promise<DashboardSumma
 
 export async function getMonthCloseWorkbench(month: string): Promise<MonthCloseWorkbench> {
   return invoke<MonthCloseWorkbench>('get_month_close_workbench', { month });
+}
+
+export async function getMonthCloseStatus(month: string): Promise<MonthCloseRecord | undefined> {
+  return invoke<MonthCloseRecord | undefined>('get_month_close_status', { month });
+}
+
+export async function closeMonth(month: string, remark?: string): Promise<MonthCloseRecord> {
+  return invoke<MonthCloseRecord>('close_month', { data: { month, remark } });
+}
+
+export async function reopenMonth(month: string, reason: string): Promise<MonthCloseRecord> {
+  return invoke<MonthCloseRecord>('reopen_month', { data: { month, reason } });
+}
+
+export async function exportMonthClosePackage(month: string, dir: string): Promise<MonthClosePackageResult> {
+  return invoke<MonthClosePackageResult>('export_month_close_package', { month, dir });
 }
 
 export async function getFinancialAnalysis(query: FinancialAnalysisQuery): Promise<FinancialAnalysisReport> {

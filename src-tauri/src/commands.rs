@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -205,6 +206,7 @@ pub fn import_attendance_excel(
     state: tauri::State<'_, Mutex<Connection>>,
 ) -> Result<ImportResult, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    db::ensure_month_open(&conn, &month)?;
     let records = excel::read_attendance_excel(&path, &month)?;
 
     let total = records.len() as i32;
@@ -275,6 +277,7 @@ pub fn save_attendance_records(
 ) -> Result<bool, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     for rec in &records {
+        db::ensure_month_open(&conn, &rec.salary_month)?;
         db::upsert_attendance_record(&conn, rec)?;
     }
     Ok(true)
@@ -286,6 +289,7 @@ pub fn create_attendance_record(
     state: tauri::State<'_, Mutex<Connection>>,
 ) -> Result<AttendanceRecord, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    db::ensure_month_open(&conn, &data.salary_month)?;
     db::create_attendance_record(&conn, &data)
 }
 
@@ -296,6 +300,12 @@ pub fn update_attendance_record(
     state: tauri::State<'_, Mutex<Connection>>,
 ) -> Result<bool, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let month = if data.salary_month.trim().is_empty() {
+        db::get_attendance_record_month(&conn, id)?
+    } else {
+        data.salary_month.clone()
+    };
+    db::ensure_month_open(&conn, &month)?;
     db::update_attendance_record(&conn, id, &data)
 }
 
@@ -305,6 +315,8 @@ pub fn delete_attendance_record(
     state: tauri::State<'_, Mutex<Connection>>,
 ) -> Result<bool, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let month = db::get_attendance_record_month(&conn, id)?;
+    db::ensure_month_open(&conn, &month)?;
     db::delete_attendance_record(&conn, id)
 }
 
@@ -372,6 +384,7 @@ pub fn calculate_salary(
     state: tauri::State<'_, Mutex<Connection>>,
 ) -> Result<Vec<SalaryResult>, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    db::ensure_month_open(&conn, &month)?;
     salary::calculate_monthly_salary(&month, &conn)
 }
 
@@ -391,6 +404,8 @@ pub fn update_salary_result(
     state: tauri::State<'_, Mutex<Connection>>,
 ) -> Result<bool, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let month = db::get_salary_result_month(&conn, id)?;
+    db::ensure_month_open(&conn, &month)?;
     db::update_salary_result(&conn, id, &data)
 }
 
@@ -400,6 +415,7 @@ pub fn lock_salary_results(
     state: tauri::State<'_, Mutex<Connection>>,
 ) -> Result<bool, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    db::ensure_month_open(&conn, &month)?;
     let result = db::lock_salary_results(&conn, &month)?;
     if result {
         db::log_operation(
@@ -419,6 +435,7 @@ pub fn review_salary_results(
     state: tauri::State<'_, Mutex<Connection>>,
 ) -> Result<bool, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    db::ensure_month_open(&conn, &month)?;
     let result = db::review_salary_results(&conn, &month)?;
     if result {
         db::log_operation(
@@ -439,6 +456,7 @@ pub fn recalculate_employee(
     state: tauri::State<'_, Mutex<Connection>>,
 ) -> Result<SalaryResult, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    db::ensure_month_open(&conn, &month)?;
     salary::recalculate_single(&month, &employee_no, &conn)
 }
 
@@ -453,6 +471,7 @@ pub fn ocr_recognize(
     state: tauri::State<'_, Mutex<Connection>>,
 ) -> Result<OcrResult, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    db::ensure_month_open(&conn, &month)?;
     let resource_dir = app.path().resource_dir().ok();
     let mode = mode.as_deref().unwrap_or("local");
     ocr::ocr_recognize(&image_path, &month, mode, &conn, resource_dir.as_deref())
@@ -474,6 +493,13 @@ pub fn confirm_ocr_results(
     state: tauri::State<'_, Mutex<Connection>>,
 ) -> Result<bool, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let months = records
+        .iter()
+        .map(|record| record.salary_month.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    for month in months {
+        db::ensure_month_open(&conn, month)?;
+    }
     ocr::confirm_ocr_results(batch_id, &records, &conn)
 }
 
@@ -583,6 +609,53 @@ pub fn get_month_close_workbench(
 }
 
 #[tauri::command]
+pub fn get_month_close_status(
+    month: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Option<MonthCloseRecord>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    db::get_month_close_record(&conn, &month)
+}
+
+#[tauri::command]
+pub fn close_month(
+    data: MonthCloseInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<MonthCloseRecord, AppError> {
+    let mut conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let tx = conn.transaction()?;
+    let result = db::close_month(&tx, &data.month, "system", data.remark.as_deref())?;
+    db::log_operation(
+        &tx,
+        "close_month",
+        &format!("正式月结{}", result.month),
+        "system",
+        data.remark.as_deref(),
+    )?;
+    tx.commit()?;
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn reopen_month(
+    data: MonthReopenInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<MonthCloseRecord, AppError> {
+    let mut conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let tx = conn.transaction()?;
+    let result = db::reopen_month(&tx, &data.month, &data.reason)?;
+    db::log_operation(
+        &tx,
+        "reopen_month",
+        &format!("反月结{}", result.month),
+        "system",
+        Some(&data.reason),
+    )?;
+    tx.commit()?;
+    Ok(result)
+}
+
+#[tauri::command]
 pub fn get_financial_analysis(
     query: FinancialAnalysisQuery,
     state: tauri::State<'_, Mutex<Connection>>,
@@ -647,6 +720,107 @@ pub fn export_month_close_report(
         None,
     )?;
     Ok(true)
+}
+
+#[tauri::command]
+pub fn export_month_close_package(
+    month: String,
+    dir: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<MonthClosePackageResult, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    export_month_close_package_to_dir(&conn, &month, &dir)
+}
+
+pub fn export_month_close_package_to_dir(
+    conn: &Connection,
+    month: &str,
+    dir: &str,
+) -> Result<MonthClosePackageResult, AppError> {
+    let month_close = db::get_month_close_record(conn, month)?
+        .ok_or_else(|| AppError::InvalidParam(format!("{month} 尚未正式月结")))?;
+    if month_close.status != "closed" {
+        return Err(AppError::InvalidParam(format!(
+            "{month} 当前不是已月结状态，不能导出月结包"
+        )));
+    }
+
+    let output_dir = PathBuf::from(&dir).join(format!("{month}-month-close-package"));
+    fs::create_dir_all(&output_dir)?;
+
+    let report = db::get_financial_analysis(
+        conn,
+        &FinancialAnalysisQuery {
+            month: month.to_string(),
+            months: Some(6),
+        },
+    )?;
+    let workbench = db::get_month_close_workbench(conn, month)?;
+    let salary_results = db::get_salary_results(conn, month)?;
+    let invoices = db::query_invoices(
+        conn,
+        &InvoiceQuery {
+            belong_month: Some(month.to_string()),
+            ..Default::default()
+        },
+    )?;
+    let reimbursements = db::query_reimbursement_claims(
+        conn,
+        &ReimbursementQuery {
+            belong_month: Some(month.to_string()),
+            ..Default::default()
+        },
+    )?;
+
+    let mut files = Vec::new();
+    let month_close_report = output_dir.join(format!("{month}_月结报告.xlsx"));
+    excel::export_month_close_report(&report, &workbench, &month_close_report.to_string_lossy())?;
+    files.push(month_close_report.to_string_lossy().to_string());
+
+    let salary_detail = output_dir.join(format!("{month}_工资明细.xlsx"));
+    excel::export_salary_excel(&salary_results, &salary_detail.to_string_lossy())?;
+    files.push(salary_detail.to_string_lossy().to_string());
+
+    let bank_payment = output_dir.join(format!("{month}_银行代发.xlsx"));
+    excel::export_bank_payment(&salary_results, &bank_payment.to_string_lossy())?;
+    files.push(bank_payment.to_string_lossy().to_string());
+
+    let invoice_list = output_dir.join(format!("{month}_发票清单.xlsx"));
+    excel::export_invoice_list(&invoices, &invoice_list.to_string_lossy())?;
+    files.push(invoice_list.to_string_lossy().to_string());
+
+    let reimbursement_list = output_dir.join(format!("{month}_报销清单.xlsx"));
+    excel::export_reimbursement_claim_list(&reimbursements, &reimbursement_list.to_string_lossy())?;
+    files.push(reimbursement_list.to_string_lossy().to_string());
+
+    let manifest_path = output_dir.join("manifest.json");
+    let result_files = files.clone();
+    let manifest = serde_json::json!({
+        "month": month,
+        "status": month_close.status,
+        "closed_at": month_close.closed_at,
+        "closed_by": month_close.closed_by,
+        "files": result_files,
+    });
+    fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
+    let manifest_path_str = manifest_path.to_string_lossy().to_string();
+    let output_dir_str = output_dir.to_string_lossy().to_string();
+    let mut result_files = files;
+    result_files.push(manifest_path_str);
+
+    db::log_operation(
+        conn,
+        "export_month_close_package",
+        &format!("导出{}月结包到{}", month_close.month, output_dir_str),
+        "system",
+        None,
+    )?;
+
+    Ok(MonthClosePackageResult {
+        success: true,
+        output_dir: output_dir_str,
+        files: result_files,
+    })
 }
 
 #[tauri::command]
@@ -864,7 +1038,7 @@ pub fn delete_invoice_expense_type(
 #[tauri::command]
 pub fn ocr_invoice(
     image_path: String,
-    app: tauri::AppHandle,
+    _app: tauri::AppHandle,
     state: tauri::State<'_, Mutex<Connection>>,
 ) -> Result<InvoiceOcrPreview, AppError> {
     crate::invoice::ocr_invoice(&image_path, state.inner())
@@ -1026,4 +1200,87 @@ pub fn delete_reimbursement_claim(
         )?;
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("salary-{name}-{}", uuid::Uuid::new_v4()))
+    }
+
+    fn setup_closed_month_package_db(app_dir: &std::path::Path) -> Connection {
+        fs::create_dir_all(app_dir).unwrap();
+        let conn = db::init_db(&app_dir.to_string_lossy()).unwrap();
+        conn.execute_batch(
+            "
+            INSERT INTO employees
+                (id, employee_no, name, department, status, bank_account, bank_name, base_salary, created_at, updated_at)
+            VALUES
+                (1, 'E001', '张三', '销售部', 'active', '62220001', '测试银行', 10000, '2026-08-01', '2026-08-01');
+
+            INSERT INTO attendance_records
+                (salary_month, employee_no, name, expected_days, actual_days, late_count, early_leave_count, absent_days, created_at, updated_at)
+            VALUES
+                ('2026-08', 'E001', '张三', 22, 22, 0, 0, 0, '2026-08-31', '2026-08-31');
+
+            INSERT INTO salary_monthly_results
+                (salary_month, employee_no, name, department, base_salary, gross_salary, net_salary,
+                 social_security_personal, housing_fund_personal, attendance_deduction, tax_amount,
+                 other_deduction, status, locked, created_at, updated_at)
+            VALUES
+                ('2026-08', 'E001', '张三', '销售部', 10000, 10000, 7800, 1000, 1200, 0, 0, 0, 'locked', 1, '2026-08-31', '2026-08-31');
+
+            INSERT INTO invoices
+                (id, invoice_code, invoice_number, total_amount, expense_type_code, employee_id, belong_month, status, created_at, updated_at)
+            VALUES
+                (1, 'A', '001', 300, 'office', 1, '2026-08', 'normal', '2026-08-10', '2026-08-10');
+
+            INSERT INTO reimbursement_claims
+                (id, claim_no, employee_id, belong_month, title, total_amount, invoice_count, status, payment_status, payment_date, created_at, updated_at)
+            VALUES
+                (1, 'BX202608001', 1, '2026-08', '销售报销', 300, 1, 'approved', 'paid', '2026-08-31', '2026-08-15', '2026-08-15');
+
+            INSERT INTO reimbursement_claim_invoices (claim_id, invoice_id, created_at)
+            VALUES (1, 1, '2026-08-15');
+            ",
+        )
+        .unwrap();
+        db::close_month(&conn, "2026-08", "system", Some("导出测试")).unwrap();
+        conn
+    }
+
+    #[test]
+    fn test_export_month_close_package_includes_expected_files() {
+        let app_dir = temp_dir("app-data");
+        let output_root = temp_dir("package-output");
+        let conn = setup_closed_month_package_db(&app_dir);
+
+        let result =
+            export_month_close_package_to_dir(&conn, "2026-08", &output_root.to_string_lossy())
+                .unwrap();
+
+        let expected = [
+            "2026-08_月结报告.xlsx",
+            "2026-08_工资明细.xlsx",
+            "2026-08_银行代发.xlsx",
+            "2026-08_发票清单.xlsx",
+            "2026-08_报销清单.xlsx",
+            "manifest.json",
+        ];
+        for file_name in expected {
+            let path = PathBuf::from(&result.output_dir).join(file_name);
+            assert!(path.exists(), "missing package file: {}", path.display());
+        }
+        assert_eq!(result.files.len(), expected.len());
+
+        let manifest =
+            fs::read_to_string(PathBuf::from(&result.output_dir).join("manifest.json")).unwrap();
+        assert!(manifest.contains("2026-08_报销清单.xlsx"));
+
+        drop(conn);
+        let _ = fs::remove_dir_all(app_dir);
+        let _ = fs::remove_dir_all(output_root);
+    }
 }

@@ -1118,6 +1118,69 @@ pub fn export_invoice_list(invoices: &[Invoice], path: &str) -> AppResult<bool> 
     Ok(true)
 }
 
+pub fn export_reimbursement_claim_list(
+    claims: &[ReimbursementClaim],
+    path: &str,
+) -> AppResult<bool> {
+    use rust_xlsxwriter::FormatBorder;
+
+    let mut workbook = Workbook::new();
+    let worksheet = workbook.add_worksheet();
+    worksheet.set_name("报销清单")?;
+
+    let header_fmt = Format::new()
+        .set_bold()
+        .set_background_color("#D9E1F2")
+        .set_border(FormatBorder::Thin);
+    let money_fmt = report_money_format();
+
+    let headers = [
+        "归属月份",
+        "报销单号",
+        "报销人",
+        "部门",
+        "标题",
+        "发票张数",
+        "报销金额",
+        "审批状态",
+        "付款状态",
+        "付款日期",
+        "备注",
+        "更新时间",
+    ];
+    for (col, h) in headers.iter().enumerate() {
+        worksheet.write_with_format(0, col as u16, *h, &header_fmt)?;
+    }
+
+    for (row_idx, claim) in claims.iter().enumerate() {
+        let row = (row_idx + 1) as u32;
+        worksheet.write_string(row, 0, &claim.belong_month)?;
+        worksheet.write_string(row, 1, &claim.claim_no)?;
+        worksheet.write_string(row, 2, claim.employee_name.clone().unwrap_or_default())?;
+        worksheet.write_string(row, 3, claim.department.clone().unwrap_or_default())?;
+        worksheet.write_string(row, 4, &claim.title)?;
+        worksheet.write_number(row, 5, claim.invoice_count as f64)?;
+        worksheet.write_number_with_format(row, 6, claim.total_amount, &money_fmt)?;
+        worksheet.write_string(row, 7, reimbursement_status_text(&claim.status))?;
+        worksheet.write_string(row, 8, payment_status_text(&claim.payment_status))?;
+        worksheet.write_string(row, 9, claim.payment_date.clone().unwrap_or_default())?;
+        worksheet.write_string(row, 10, claim.remark.clone().unwrap_or_default())?;
+        worksheet.write_string(row, 11, claim.updated_at.clone().unwrap_or_default())?;
+    }
+
+    worksheet.set_column_width(0, 10)?;
+    worksheet.set_column_width(1, 20)?;
+    worksheet.set_column_width(2, 12)?;
+    worksheet.set_column_width(3, 14)?;
+    worksheet.set_column_width(4, 28)?;
+    worksheet.set_column_width(6, 14)?;
+    worksheet.set_column_width(10, 24)?;
+    worksheet.set_column_width(11, 22)?;
+
+    workbook.save(path)?;
+    Ok(true)
+}
+
 // ==================== Financial Analysis Export ====================
 
 pub fn export_department_cost_analysis(
@@ -1401,5 +1464,58 @@ fn status_text(status: &str) -> &str {
         "warning" => "提醒",
         "blocking" => "阻塞",
         _ => status,
+    }
+}
+
+fn reimbursement_status_text(status: &str) -> &str {
+    match status {
+        "draft" => "草稿",
+        "submitted" => "已提交",
+        "approved" => "已审批",
+        "rejected" => "已驳回",
+        "void" => "已作废",
+        _ => status,
+    }
+}
+
+fn payment_status_text(status: &str) -> &str {
+    match status {
+        "unpaid" => "未付款",
+        "paid" => "已付款",
+        _ => status,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_export_reimbursement_claim_list_creates_file() {
+        let path = std::env::temp_dir().join(format!(
+            "salary-reimbursement-export-{}.xlsx",
+            uuid::Uuid::new_v4()
+        ));
+        let claims = vec![ReimbursementClaim {
+            id: 1,
+            claim_no: "BX2026080001".into(),
+            employee_id: Some(1),
+            employee_name: Some("张三".into()),
+            department: Some("销售部".into()),
+            belong_month: "2026-08".into(),
+            title: "差旅报销".into(),
+            total_amount: 128.5,
+            invoice_count: 2,
+            status: "approved".into(),
+            payment_status: "paid".into(),
+            payment_date: Some("2026-08-31".into()),
+            remark: Some("测试".into()),
+            created_at: Some("2026-08-01T00:00:00Z".into()),
+            updated_at: Some("2026-08-31T00:00:00Z".into()),
+        }];
+
+        export_reimbursement_claim_list(&claims, &path.to_string_lossy()).unwrap();
+        assert!(path.exists());
+        let _ = std::fs::remove_file(path);
     }
 }

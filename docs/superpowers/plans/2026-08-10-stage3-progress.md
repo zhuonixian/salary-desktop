@@ -83,3 +83,39 @@
   - 先在 Windows/Tauri 环境手工验证数据安全页面。
   - 后续进入 `3.2 正式月结`。
 - 提交：待完成。
+
+### 2026-08-10 03:43
+
+- 目标：落地第三阶段 `3.2 正式月结`，补齐关账、反月结、锁账保护、月结包导出和功能回归。
+- 完成：
+  - 新增 `month_closes` 表和幂等字段迁移。
+  - 新增 Tauri 命令：`get_month_close_status`、`close_month`、`reopen_month`、`export_month_close_package`。
+  - 月结前复用月结检查项；阻塞项存在时禁止正式月结，报销未审批/未付款改为阻塞。
+  - 正式月结后禁止修改该月工资、考勤、OCR 批次、发票、报销和付款状态；反月结后恢复编辑。
+  - 正式月结与反月结状态更新和操作日志写入放入同一事务。
+  - 月结包导出包含月结报告、工资明细、银行代发、发票清单、报销清单和 `manifest.json`。
+  - 月结工作台新增状态 Tag、正式月结、反月结、导出月结包入口。
+  - 通过 subagent 做后端与集成回归审查，并按发现补齐 OCR 锁账、删除类锁账测试和整包导出测试。
+- 修改文件：
+  - `src-tauri/src/commands.rs`
+  - `src-tauri/src/db.rs`
+  - `src-tauri/src/excel.rs`
+  - `src-tauri/src/invoice.rs`
+  - `src-tauri/src/lib.rs`
+  - `src-tauri/src/models.rs`
+  - `src/api/index.ts`
+  - `src/pages/MonthClose.tsx`
+  - `src/types/index.ts`
+  - `docs/superpowers/plans/2026-08-10-stage3-progress.md`
+- 测试：
+  - `npx tsc --noEmit`：通过。
+  - `npm run build`：通过；仍有既有 Vite chunk 体积提示。
+  - `npm run lint`：通过。
+  - `cd src-tauri && cargo fmt --check`：通过。
+  - `cd src-tauri && cargo check`：通过；仍有既有 unused/dead_code warning。
+  - `cd src-tauri && cargo test --lib`：通过，42 个测试。
+- 未完成：
+  - Windows exe 下月结、反月结、月结包 Excel 文件打开的手工验收。
+  - `3.3 付款批次`、`3.4 银行流水匹配`、`3.5 预算与异常`。
+- 下轮入口：进入 `3.3 付款批次`，新增 `payment_batches` / `payment_items` 并接入工资代发与报销付款。
+- 提交：待完成。

@@ -313,9 +313,33 @@ export interface MonthCloseCheckItem {
   action_route?: string;
 }
 
+export type MonthCloseStatus = 'open' | 'closed' | 'reopened';
+
+export interface MonthCloseRecord {
+  id: number;
+  month: string;
+  status: MonthCloseStatus;
+  summary_json?: string;
+  checks_json?: string;
+  closed_at?: string;
+  closed_by?: string;
+  reopened_at?: string;
+  reopen_reason?: string;
+  remark?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface MonthClosePackageResult {
+  success: boolean;
+  output_dir: string;
+  files: string[];
+}
+
 export interface MonthCloseWorkbench {
   summary: MonthCloseSummary;
   checks: MonthCloseCheckItem[];
+  month_close?: MonthCloseRecord;
 }
 
 // ==================== 财务分析 ====================

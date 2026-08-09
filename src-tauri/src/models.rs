@@ -284,6 +284,42 @@ pub struct MonthCloseCheckItem {
 pub struct MonthCloseWorkbench {
     pub summary: MonthCloseSummary,
     pub checks: Vec<MonthCloseCheckItem>,
+    pub month_close: Option<MonthCloseRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonthCloseRecord {
+    pub id: i64,
+    pub month: String,
+    pub status: String,
+    pub summary_json: Option<String>,
+    pub checks_json: Option<String>,
+    pub closed_at: Option<String>,
+    pub closed_by: Option<String>,
+    pub reopened_at: Option<String>,
+    pub reopen_reason: Option<String>,
+    pub remark: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonthCloseInput {
+    pub month: String,
+    pub remark: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonthReopenInput {
+    pub month: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonthClosePackageResult {
+    pub success: bool,
+    pub output_dir: String,
+    pub files: Vec<String>,
 }
 
 // ==================== Financial Analysis ====================

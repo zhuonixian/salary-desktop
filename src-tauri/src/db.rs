@@ -226,9 +226,53 @@ fn create_tables(conn: &Connection) -> AppResult<()> {
         CREATE INDEX IF NOT EXISTS idx_reimbursement_claims_employee ON reimbursement_claims(employee_id);
         CREATE INDEX IF NOT EXISTS idx_reimbursement_claims_status ON reimbursement_claims(status, payment_status);
         CREATE INDEX IF NOT EXISTS idx_reimbursement_claim_invoices_invoice ON reimbursement_claim_invoices(invoice_id);
+
+        CREATE TABLE IF NOT EXISTS month_closes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            month TEXT UNIQUE NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open',
+            summary_json TEXT,
+            checks_json TEXT,
+            closed_at TEXT,
+            closed_by TEXT,
+            reopened_at TEXT,
+            reopen_reason TEXT,
+            remark TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_month_closes_status ON month_closes(status);
         ",
     )?;
+    migrate_existing_schema(conn)?;
 
+    Ok(())
+}
+
+fn migrate_existing_schema(conn: &Connection) -> AppResult<()> {
+    ensure_column(conn, "month_closes", "summary_json", "TEXT")?;
+    ensure_column(conn, "month_closes", "checks_json", "TEXT")?;
+    ensure_column(conn, "month_closes", "closed_at", "TEXT")?;
+    ensure_column(conn, "month_closes", "closed_by", "TEXT")?;
+    ensure_column(conn, "month_closes", "reopened_at", "TEXT")?;
+    ensure_column(conn, "month_closes", "reopen_reason", "TEXT")?;
+    ensure_column(conn, "month_closes", "remark", "TEXT")?;
+    ensure_column(conn, "month_closes", "created_at", "TEXT")?;
+    ensure_column(conn, "month_closes", "updated_at", "TEXT")?;
+    Ok(())
+}
+
+fn ensure_column(conn: &Connection, table: &str, column: &str, column_type: &str) -> AppResult<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for existing in columns {
+        if existing? == column {
+            return Ok(());
+        }
+    }
+    conn.execute_batch(&format!(
+        "ALTER TABLE {table} ADD COLUMN {column} {column_type}"
+    ))?;
     Ok(())
 }
 
@@ -576,6 +620,10 @@ fn get_attendance_record(conn: &Connection, id: i64) -> AppResult<AttendanceReco
     .map_err(|e| AppError::NotFound(format!("考勤记录ID={id}未找到: {e}")))
 }
 
+pub fn get_attendance_record_month(conn: &Connection, id: i64) -> AppResult<String> {
+    Ok(get_attendance_record(conn, id)?.salary_month)
+}
+
 pub fn create_attendance_record(
     conn: &Connection,
     data: &AttendanceRecordInput,
@@ -586,6 +634,7 @@ pub fn create_attendance_record(
     if data.employee_no.trim().is_empty() {
         return Err(AppError::InvalidParam("员工工号必填".into()));
     }
+    ensure_month_open(conn, &data.salary_month)?;
 
     let now = Utc::now().to_rfc3339();
     conn.execute(
@@ -621,6 +670,12 @@ pub fn upsert_attendance_record(
     conn: &Connection,
     data: &AttendanceRecordInput,
 ) -> AppResult<bool> {
+    if let Some(id) = data.id {
+        let old_month = get_attendance_record_month(conn, id)?;
+        ensure_month_open(conn, &old_month)?;
+    }
+    ensure_month_open(conn, &data.salary_month)?;
+
     let now = Utc::now().to_rfc3339();
     let expected_days = data.expected_days.unwrap_or(0.0);
     let actual_days = data.actual_days.unwrap_or(0.0);
@@ -690,6 +745,12 @@ pub fn update_attendance_record(
     id: i64,
     data: &AttendanceRecordInput,
 ) -> AppResult<bool> {
+    let old_month = get_attendance_record_month(conn, id)?;
+    ensure_month_open(conn, &old_month)?;
+    if !data.salary_month.trim().is_empty() {
+        ensure_month_open(conn, &data.salary_month)?;
+    }
+
     let now = Utc::now().to_rfc3339();
     let expected_days = data.expected_days.unwrap_or(0.0);
     let actual_days = data.actual_days.unwrap_or(0.0);
@@ -742,6 +803,12 @@ pub fn update_attendance_record(
 }
 
 pub fn delete_attendance_record(conn: &Connection, id: i64) -> AppResult<bool> {
+    let old_month = match get_attendance_record_month(conn, id) {
+        Ok(month) => month,
+        Err(AppError::NotFound(_)) => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    ensure_month_open(conn, &old_month)?;
     let updated = conn.execute("DELETE FROM attendance_records WHERE id = ?1", params![id])?;
     Ok(updated > 0)
 }
@@ -853,6 +920,7 @@ pub fn calculate_tax(conn: &Connection, taxable_income: f64) -> AppResult<f64> {
 // ==================== Salary Results CRUD ====================
 
 pub fn save_salary_result(conn: &Connection, result: &SalaryResult) -> AppResult<()> {
+    ensure_month_open(conn, &result.salary_month)?;
     let now = Utc::now().to_rfc3339();
 
     // Try update existing, insert if not found
@@ -934,6 +1002,15 @@ pub fn get_salary_results(conn: &Connection, month: &str) -> AppResult<Vec<Salar
         .map_err(AppError::from)
 }
 
+pub fn get_salary_result_month(conn: &Connection, id: i64) -> AppResult<String> {
+    conn.query_row(
+        "SELECT salary_month FROM salary_monthly_results WHERE id = ?1",
+        params![id],
+        |row| row.get(0),
+    )
+    .map_err(|e| AppError::NotFound(format!("工资结果ID={id}未找到: {e}")))
+}
+
 pub fn get_salary_result_by_employee(
     conn: &Connection,
     month: &str,
@@ -978,6 +1055,9 @@ pub fn update_salary_result(
     id: i64,
     data: &SalaryResultUpdate,
 ) -> AppResult<bool> {
+    let month = get_salary_result_month(conn, id)?;
+    ensure_month_open(conn, &month)?;
+
     let now = Utc::now().to_rfc3339();
     let mut updates = Vec::new();
     let mut param_idx = 1;
@@ -1042,6 +1122,7 @@ pub fn update_salary_result(
 }
 
 pub fn lock_salary_results(conn: &Connection, month: &str) -> AppResult<bool> {
+    ensure_month_open(conn, month)?;
     let updated = conn.execute(
         "UPDATE salary_monthly_results SET locked = 1, status = 'locked', updated_at = ?1 WHERE salary_month = ?2 AND locked = 0",
         params![Utc::now().to_rfc3339(), month],
@@ -1050,6 +1131,7 @@ pub fn lock_salary_results(conn: &Connection, month: &str) -> AppResult<bool> {
 }
 
 pub fn review_salary_results(conn: &Connection, month: &str) -> AppResult<bool> {
+    ensure_month_open(conn, month)?;
     let updated = conn.execute(
         "UPDATE salary_monthly_results SET status = 'reviewed', updated_at = ?1 WHERE salary_month = ?2 AND locked = 0",
         params![Utc::now().to_rfc3339(), month],
@@ -1060,6 +1142,9 @@ pub fn review_salary_results(conn: &Connection, month: &str) -> AppResult<bool> 
 // ==================== OCR ====================
 
 pub fn save_ocr_batch(conn: &Connection, batch: &OcrBatch) -> AppResult<i64> {
+    if let Some(month) = batch.salary_month.as_deref() {
+        ensure_month_open(conn, month)?;
+    }
     let now = Utc::now().to_rfc3339();
     conn.execute(
         "INSERT INTO ocr_batches (batch_name, salary_month, image_path, raw_text, parsed_json, status, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -1379,7 +1464,12 @@ pub fn get_month_close_workbench(conn: &Connection, month: &str) -> AppResult<Mo
         paid_reimbursement_amount,
     };
     let checks = build_month_close_checks(&summary);
-    Ok(MonthCloseWorkbench { summary, checks })
+    let month_close = get_month_close_record(conn, month)?;
+    Ok(MonthCloseWorkbench {
+        summary,
+        checks,
+        month_close,
+    })
 }
 
 fn build_month_close_checks(summary: &MonthCloseSummary) -> Vec<MonthCloseCheckItem> {
@@ -1514,7 +1604,7 @@ fn build_month_close_checks(summary: &MonthCloseSummary) -> Vec<MonthCloseCheckI
             {
                 "ok"
             } else {
-                "warning"
+                "blocking"
             }
             .to_string(),
             count: summary.pending_reimbursement_count + summary.unpaid_reimbursement_count,
@@ -1531,6 +1621,142 @@ fn build_month_close_checks(summary: &MonthCloseSummary) -> Vec<MonthCloseCheckI
             action_route: Some("/reimbursements".to_string()),
         },
     ]
+}
+
+pub fn get_month_close_record(
+    conn: &Connection,
+    month: &str,
+) -> AppResult<Option<MonthCloseRecord>> {
+    let result = conn.query_row(
+        "SELECT id, month, status, summary_json, checks_json, closed_at, closed_by,
+                reopened_at, reopen_reason, remark, created_at, updated_at
+         FROM month_closes WHERE month = ?1",
+        params![month],
+        |row| {
+            Ok(MonthCloseRecord {
+                id: row.get(0)?,
+                month: row.get(1)?,
+                status: row.get(2)?,
+                summary_json: row.get(3)?,
+                checks_json: row.get(4)?,
+                closed_at: row.get(5)?,
+                closed_by: row.get(6)?,
+                reopened_at: row.get(7)?,
+                reopen_reason: row.get(8)?,
+                remark: row.get(9)?,
+                created_at: row.get(10)?,
+                updated_at: row.get(11)?,
+            })
+        },
+    );
+    match result {
+        Ok(record) => Ok(Some(record)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(rusqlite::Error::SqliteFailure(_, Some(message)))
+            if message.contains("no such table: month_closes") =>
+        {
+            Ok(None)
+        }
+        Err(e) => Err(AppError::from(e)),
+    }
+}
+
+pub fn is_month_closed(conn: &Connection, month: &str) -> AppResult<bool> {
+    Ok(get_month_close_record(conn, month)?
+        .map(|record| record.status == "closed")
+        .unwrap_or(false))
+}
+
+pub fn ensure_month_open(conn: &Connection, month: &str) -> AppResult<()> {
+    if month.trim().is_empty() {
+        return Ok(());
+    }
+    if is_month_closed(conn, month)? {
+        Err(AppError::InvalidParam(format!(
+            "{month} 已正式月结，请先反月结后再修改"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+pub fn close_month(
+    conn: &Connection,
+    month: &str,
+    operator: &str,
+    remark: Option<&str>,
+) -> AppResult<MonthCloseRecord> {
+    if month.trim().is_empty() {
+        return Err(AppError::InvalidParam("月结月份必填".into()));
+    }
+    if is_month_closed(conn, month)? {
+        return Err(AppError::InvalidParam(format!("{month} 已正式月结")));
+    }
+
+    let workbench = get_month_close_workbench(conn, month)?;
+    let blockers: Vec<String> = workbench
+        .checks
+        .iter()
+        .filter(|item| item.status == "blocking")
+        .map(|item| item.title.clone())
+        .collect();
+    if !blockers.is_empty() {
+        return Err(AppError::InvalidParam(format!(
+            "存在阻塞检查项，不能正式月结: {}",
+            blockers.join("、")
+        )));
+    }
+
+    let now = Utc::now().to_rfc3339();
+    let summary_json = serde_json::to_string(&workbench.summary)?;
+    let checks_json = serde_json::to_string(&workbench.checks)?;
+    conn.execute(
+        "INSERT INTO month_closes
+            (month, status, summary_json, checks_json, closed_at, closed_by, reopened_at,
+             reopen_reason, remark, created_at, updated_at)
+         VALUES (?1, 'closed', ?2, ?3, ?4, ?5, NULL, NULL, ?6, ?7, ?8)
+         ON CONFLICT(month) DO UPDATE SET
+            status='closed',
+            summary_json=excluded.summary_json,
+            checks_json=excluded.checks_json,
+            closed_at=excluded.closed_at,
+            closed_by=excluded.closed_by,
+            remark=excluded.remark,
+            updated_at=excluded.updated_at",
+        params![
+            month.trim(),
+            summary_json,
+            checks_json,
+            now,
+            operator,
+            remark,
+            now,
+            now
+        ],
+    )?;
+    get_month_close_record(conn, month)?.ok_or_else(|| AppError::NotFound("月结记录未找到".into()))
+}
+
+pub fn reopen_month(conn: &Connection, month: &str, reason: &str) -> AppResult<MonthCloseRecord> {
+    if reason.trim().is_empty() {
+        return Err(AppError::InvalidParam("反月结原因必填".into()));
+    }
+    let existing = get_month_close_record(conn, month)?
+        .ok_or_else(|| AppError::NotFound(format!("{month} 尚未正式月结")))?;
+    if existing.status != "closed" {
+        return Err(AppError::InvalidParam(format!(
+            "{month} 当前不是已月结状态"
+        )));
+    }
+
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE month_closes
+         SET status='reopened', reopened_at=?1, reopen_reason=?2, updated_at=?3
+         WHERE month=?4 AND status='closed'",
+        params![now, reason.trim(), now, month],
+    )?;
+    get_month_close_record(conn, month)?.ok_or_else(|| AppError::NotFound("月结记录未找到".into()))
 }
 
 // ==================== Financial Analysis ====================
@@ -2300,6 +2526,10 @@ pub fn get_invoice(conn: &Connection, id: i64) -> AppResult<Invoice> {
         .map_err(|e| AppError::NotFound(format!("发票ID={id}未找到: {e}")))
 }
 
+pub fn get_invoice_belong_month(conn: &Connection, id: i64) -> AppResult<Option<String>> {
+    Ok(get_invoice(conn, id)?.belong_month)
+}
+
 fn normalize_invoice_code(code: Option<&str>) -> String {
     code.map(|s| s.trim().to_lowercase())
         .filter(|s| !s.is_empty())
@@ -2330,6 +2560,9 @@ pub fn insert_invoice(
     data: &InvoiceInput,
     image_path: &str,
 ) -> AppResult<Invoice> {
+    if let Some(month) = data.belong_month.as_deref() {
+        ensure_month_open(conn, month)?;
+    }
     let now = Utc::now().to_rfc3339();
     let data = normalized_invoice_input(data);
     conn.execute(
@@ -2355,6 +2588,12 @@ pub fn update_invoice(
     let now = Utc::now().to_rfc3339();
     let data = normalized_invoice_input(data);
     let existing = get_invoice(conn, id)?;
+    if let Some(month) = existing.belong_month.as_deref() {
+        ensure_month_open(conn, month)?;
+    }
+    if let Some(month) = data.belong_month.as_deref() {
+        ensure_month_open(conn, month)?;
+    }
     let image_path = new_image_path.unwrap_or(existing.image_path.as_deref().unwrap_or(""));
     let existing_code = existing
         .invoice_code
@@ -2410,6 +2649,9 @@ pub fn update_invoice(
 }
 
 pub fn soft_delete_invoice(conn: &Connection, id: i64) -> AppResult<bool> {
+    if let Some(month) = get_invoice_belong_month(conn, id)? {
+        ensure_month_open(conn, &month)?;
+    }
     let now = Utc::now().to_rfc3339();
     let updated = conn.execute(
         "UPDATE invoices SET status='void', updated_at=?1 WHERE id=?2 AND status != 'void'",
@@ -2562,6 +2804,10 @@ pub fn get_reimbursement_claim(conn: &Connection, id: i64) -> AppResult<Reimburs
     .map_err(|e| AppError::NotFound(format!("报销单ID={id}未找到: {e}")))
 }
 
+pub fn get_reimbursement_claim_month(conn: &Connection, id: i64) -> AppResult<String> {
+    Ok(get_reimbursement_claim(conn, id)?.belong_month)
+}
+
 pub fn get_reimbursement_invoices(
     conn: &Connection,
     claim_id: i64,
@@ -2592,6 +2838,11 @@ pub fn save_reimbursement_claim(
     conn: &Connection,
     data: &ReimbursementClaimInput,
 ) -> AppResult<ReimbursementClaim> {
+    ensure_month_open(conn, &data.belong_month)?;
+    if let Some(id) = data.id {
+        let old_month = get_reimbursement_claim_month(conn, id)?;
+        ensure_month_open(conn, &old_month)?;
+    }
     let employee_id = data
         .employee_id
         .ok_or_else(|| AppError::InvalidParam("请选择报销人".into()))?;
@@ -2696,6 +2947,7 @@ pub fn update_reimbursement_claim_status(
     payment_date: Option<String>,
 ) -> AppResult<bool> {
     let existing = get_reimbursement_claim(conn, id)?;
+    ensure_month_open(conn, &existing.belong_month)?;
     let new_status = status.unwrap_or(existing.status);
     let new_payment_status = payment_status.unwrap_or(existing.payment_status);
     let now = Utc::now().to_rfc3339();
@@ -2709,6 +2961,8 @@ pub fn update_reimbursement_claim_status(
 }
 
 pub fn soft_delete_reimbursement_claim(conn: &Connection, id: i64) -> AppResult<bool> {
+    let old_month = get_reimbursement_claim_month(conn, id)?;
+    ensure_month_open(conn, &old_month)?;
     let now = Utc::now().to_rfc3339();
     let updated = conn.execute(
         "UPDATE reimbursement_claims SET status='void', updated_at=?1 WHERE id=?2 AND status != 'void'",
@@ -3106,6 +3360,207 @@ mod tests {
         assert_eq!(workbench.summary.reimbursement_count, 1);
         assert_eq!(workbench.summary.approved_reimbursement_amount, 500.0);
         assert_eq!(workbench.summary.paid_reimbursement_amount, 0.0);
+    }
+
+    fn make_august_closable(conn: &Connection) {
+        conn.execute(
+            "INSERT INTO attendance_records
+                (salary_month, employee_no, name, expected_days, actual_days, late_count, early_leave_count, absent_days, created_at, updated_at)
+             VALUES
+                ('2026-08', 'E002', '李四', 22, 22, 0, 0, 0, '2026-08-31', '2026-08-31')",
+            [],
+        )
+        .unwrap();
+        lock_salary_results(conn, "2026-08").unwrap();
+        conn.execute(
+            "UPDATE reimbursement_claims SET payment_status='paid', payment_date='2026-08-31' WHERE id=2",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_close_month_rejects_blocking_checks() {
+        let conn = setup_financial_db();
+        let err = close_month(&conn, "2026-08", "system", None).unwrap_err();
+        assert!(
+            matches!(err, AppError::InvalidParam(_)),
+            "expected InvalidParam for blocking month close, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_close_month_success_writes_snapshot() {
+        let conn = setup_financial_db();
+        make_august_closable(&conn);
+
+        let record = close_month(&conn, "2026-08", "system", Some("月结测试")).unwrap();
+        assert_eq!(record.status, "closed");
+        assert!(record
+            .summary_json
+            .as_deref()
+            .unwrap_or("")
+            .contains("2026-08"));
+        assert!(record
+            .checks_json
+            .as_deref()
+            .unwrap_or("")
+            .contains("salary_calculated"));
+        assert!(record.closed_at.is_some());
+        assert_eq!(record.remark.as_deref(), Some("月结测试"));
+
+        assert!(is_month_closed(&conn, "2026-08").unwrap());
+    }
+
+    #[test]
+    fn test_close_month_is_not_repeated() {
+        let conn = setup_financial_db();
+        make_august_closable(&conn);
+        close_month(&conn, "2026-08", "system", None).unwrap();
+
+        let err = close_month(&conn, "2026-08", "system", None).unwrap_err();
+        assert!(matches!(err, AppError::InvalidParam(_)));
+    }
+
+    #[test]
+    fn test_reopen_month_requires_closed_and_reason() {
+        let conn = setup_financial_db();
+
+        let open_err = reopen_month(&conn, "2026-08", "调整").unwrap_err();
+        assert!(matches!(open_err, AppError::NotFound(_)));
+
+        make_august_closable(&conn);
+        close_month(&conn, "2026-08", "system", None).unwrap();
+
+        let empty_reason = reopen_month(&conn, "2026-08", " ").unwrap_err();
+        assert!(matches!(empty_reason, AppError::InvalidParam(_)));
+
+        let reopened = reopen_month(&conn, "2026-08", "补录调整").unwrap();
+        assert_eq!(reopened.status, "reopened");
+        assert_eq!(reopened.reopen_reason.as_deref(), Some("补录调整"));
+        assert!(!is_month_closed(&conn, "2026-08").unwrap());
+    }
+
+    #[test]
+    fn test_closed_month_blocks_core_writes_and_reopened_allows() {
+        let conn = setup_financial_db();
+        make_august_closable(&conn);
+        close_month(&conn, "2026-08", "system", None).unwrap();
+
+        let attendance_err = create_attendance_record(
+            &conn,
+            &AttendanceRecordInput {
+                id: None,
+                salary_month: "2026-08".into(),
+                employee_no: "E001".into(),
+                name: Some("张三".into()),
+                expected_days: Some(22.0),
+                actual_days: Some(22.0),
+                late_count: Some(0),
+                early_leave_count: Some(0),
+                personal_leave_days: Some(0.0),
+                sick_leave_days: Some(0.0),
+                absent_days: Some(0.0),
+                overtime_hours: Some(0.0),
+                source_type: None,
+                ocr_batch_id: None,
+                remark: None,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(attendance_err, AppError::InvalidParam(_)));
+
+        let salary_id: i64 = conn
+            .query_row(
+                "SELECT id FROM salary_monthly_results WHERE salary_month='2026-08' LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let salary_err = update_salary_result(
+            &conn,
+            salary_id,
+            &SalaryResultUpdate {
+                overtime_salary: Some(10.0),
+                meal_allowance: None,
+                transport_allowance: None,
+                other_allowance: None,
+                other_deduction: None,
+                remark: None,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(salary_err, AppError::InvalidParam(_)));
+
+        let invoice_err =
+            insert_invoice(&conn, &sample_input("LOCK", "001"), "/locked.pdf").unwrap_err();
+        assert!(matches!(invoice_err, AppError::InvalidParam(_)));
+
+        let invoice_delete_err = soft_delete_invoice(&conn, 1).unwrap_err();
+        assert!(matches!(invoice_delete_err, AppError::InvalidParam(_)));
+
+        let reimbursement_err = update_reimbursement_claim_status(
+            &conn,
+            1,
+            Some("approved".into()),
+            Some("paid".into()),
+            Some("2026-08-31".into()),
+        )
+        .unwrap_err();
+        assert!(matches!(reimbursement_err, AppError::InvalidParam(_)));
+
+        let reimbursement_delete_err = soft_delete_reimbursement_claim(&conn, 1).unwrap_err();
+        assert!(matches!(
+            reimbursement_delete_err,
+            AppError::InvalidParam(_)
+        ));
+
+        let ocr_batch_err = save_ocr_batch(
+            &conn,
+            &OcrBatch {
+                id: 0,
+                batch_name: Some("锁账 OCR".into()),
+                salary_month: Some("2026-08".into()),
+                image_path: None,
+                raw_text: None,
+                parsed_json: None,
+                status: "pending".into(),
+                created_at: None,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(ocr_batch_err, AppError::InvalidParam(_)));
+
+        reopen_month(&conn, "2026-08", "测试反月结").unwrap();
+        assert!(update_salary_result(
+            &conn,
+            salary_id,
+            &SalaryResultUpdate {
+                overtime_salary: Some(10.0),
+                meal_allowance: None,
+                transport_allowance: None,
+                other_allowance: None,
+                other_deduction: None,
+                remark: None,
+            },
+        )
+        .unwrap());
+
+        assert!(save_ocr_batch(
+            &conn,
+            &OcrBatch {
+                id: 0,
+                batch_name: Some("反月结 OCR".into()),
+                salary_month: Some("2026-08".into()),
+                image_path: None,
+                raw_text: None,
+                parsed_json: None,
+                status: "pending".into(),
+                created_at: None,
+            },
+        )
+        .is_ok());
     }
 
     #[test]
