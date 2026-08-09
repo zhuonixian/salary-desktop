@@ -1094,6 +1094,51 @@ pub fn ignore_bank_transaction(
 }
 
 #[tauri::command]
+pub fn query_budgets(
+    query: BudgetQuery,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<Budget>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    db::query_budgets(&conn, &query)
+}
+
+#[tauri::command]
+pub fn save_budget(
+    data: BudgetInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Budget, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let budget = db::save_budget(&conn, &data)?;
+    db::log_operation(
+        &conn,
+        "save_budget",
+        &format!("保存{}预算，金额{:.2}", budget.month, budget.budget_amount),
+        "system",
+        data.remark.as_deref(),
+    )?;
+    Ok(budget)
+}
+
+#[tauri::command]
+pub fn delete_budget(
+    id: i64,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let result = db::delete_budget(&conn, id)?;
+    if result {
+        db::log_operation(
+            &conn,
+            "delete_budget",
+            &format!("删除预算ID={id}"),
+            "system",
+            None,
+        )?;
+    }
+    Ok(result)
+}
+
+#[tauri::command]
 pub fn query_operation_logs(
     query: OperationLogQuery,
     state: tauri::State<'_, Mutex<Connection>>,

@@ -266,6 +266,8 @@ pub struct MonthCloseSummary {
     pub unpaid_reimbursement_count: i32,
     pub pending_payment_batch_count: i32,
     pub unmatched_paid_batch_count: i32,
+    pub duplicate_amount_count: i32,
+    pub over_budget_count: i32,
     pub total_salary_cost: f64,
     pub total_invoice_amount: f64,
     pub approved_reimbursement_amount: f64,
@@ -511,6 +513,45 @@ pub struct EmployeeCostView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Budget {
+    pub id: i64,
+    pub month: String,
+    pub department: Option<String>,
+    pub expense_type_code: Option<String>,
+    pub expense_type_name: Option<String>,
+    pub budget_amount: f64,
+    pub remark: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BudgetInput {
+    pub id: Option<i64>,
+    pub month: String,
+    pub department: Option<String>,
+    pub expense_type_code: Option<String>,
+    pub budget_amount: f64,
+    pub remark: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BudgetQuery {
+    pub month: Option<String>,
+    pub department: Option<String>,
+    pub expense_type_code: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BudgetExecution {
+    pub budget: Budget,
+    pub actual_amount: f64,
+    pub usage_percent: f64,
+    pub over_amount: f64,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MonthlyComparison {
     pub month: String,
     pub gross_salary: f64,
@@ -530,6 +571,7 @@ pub struct FinancialAnalysisReport {
     pub department_costs: Vec<DepartmentCostAnalysis>,
     pub expense_trends: Vec<ExpenseTypeTrend>,
     pub employee_costs: Vec<EmployeeCostView>,
+    pub budget_executions: Vec<BudgetExecution>,
     pub monthly_comparison: Vec<MonthlyComparison>,
 }
 

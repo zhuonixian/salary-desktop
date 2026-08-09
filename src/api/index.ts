@@ -38,6 +38,9 @@ import type {
   BankTransactionMatch,
   BankTransactionMatchInput,
   BankTransactionQuery,
+  Budget,
+  BudgetInput,
+  BudgetQuery,
   FinancialAnalysisQuery,
   FinancialAnalysisReport,
   OperationLog,
@@ -161,6 +164,8 @@ const emptyMonthCloseSummary = (month = '') => ({
   unpaid_reimbursement_count: 0,
   pending_payment_batch_count: 0,
   unmatched_paid_batch_count: 0,
+  duplicate_amount_count: 0,
+  over_budget_count: 0,
   total_salary_cost: 0,
   total_invoice_amount: 0,
   approved_reimbursement_amount: 0,
@@ -260,6 +265,16 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
     case 'cancel_bank_transaction_match':
     case 'ignore_bank_transaction':
       return true;
+    case 'query_budgets':
+      return [];
+    case 'save_budget':
+      return {
+        id: Number((args?.data as { id?: number } | undefined)?.id ?? Date.now()),
+        month: String((args?.data as { month?: string } | undefined)?.month ?? ''),
+        budget_amount: Number((args?.data as { budget_amount?: number } | undefined)?.budget_amount ?? 0),
+      };
+    case 'delete_budget':
+      return true;
     case 'get_financial_analysis': {
       const query = args?.query as FinancialAnalysisQuery | undefined;
       return {
@@ -268,6 +283,7 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
         department_costs: [],
         expense_trends: [],
         employee_costs: [],
+        budget_executions: [],
         monthly_comparison: [],
       };
     }
@@ -570,6 +586,18 @@ export async function cancelBankTransactionMatch(transactionId: number): Promise
 
 export async function ignoreBankTransaction(data: BankTransactionIgnoreInput): Promise<boolean> {
   return invoke<boolean>('ignore_bank_transaction', { data });
+}
+
+export async function queryBudgets(query: BudgetQuery): Promise<Budget[]> {
+  return invoke<Budget[]>('query_budgets', { query });
+}
+
+export async function saveBudget(data: BudgetInput): Promise<Budget> {
+  return invoke<Budget>('save_budget', { data });
+}
+
+export async function deleteBudget(id: number): Promise<boolean> {
+  return invoke<boolean>('delete_budget', { id });
 }
 
 export async function getFinancialAnalysis(query: FinancialAnalysisQuery): Promise<FinancialAnalysisReport> {

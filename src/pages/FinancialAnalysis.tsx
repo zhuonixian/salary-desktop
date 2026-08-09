@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Button, Card, Col, DatePicker, Empty, Row, Select, Space, Spin, Statistic, Table, Tabs, Tag, message } from 'antd';
+import { Alert, Button, Card, Col, DatePicker, Empty, Form, Input, InputNumber, Modal, Popconfirm, Progress, Row, Select, Space, Spin, Statistic, Table, Tabs, Tag, message } from 'antd';
 import {
   BarChartOutlined,
   DownloadOutlined,
@@ -13,12 +13,16 @@ import { save } from '@tauri-apps/plugin-dialog';
 import dayjs from 'dayjs';
 import type { Dayjs } from 'dayjs';
 import {
+  deleteBudget,
   exportDepartmentCostReport,
   exportExpenseAnalysisReport,
   exportMonthCloseReport,
   getFinancialAnalysis,
+  saveBudget,
 } from '@/api';
 import type {
+  BudgetExecution,
+  BudgetInput,
   DepartmentCostAnalysis,
   EmployeeCostView,
   ExpenseTypeTrend,
@@ -55,6 +59,9 @@ const FinancialAnalysis: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [exporting, setExporting] = useState<string | null>(null);
   const [report, setReport] = useState<FinancialAnalysisReport | null>(null);
+  const [budgetModalOpen, setBudgetModalOpen] = useState(false);
+  const [savingBudget, setSavingBudget] = useState(false);
+  const [budgetForm] = Form.useForm<BudgetInput & { scope: 'total' | 'department' | 'expense' }>();
 
   const query = useMemo<FinancialAnalysisQuery>(() => ({
     month: month.format('YYYY-MM'),
@@ -81,6 +88,25 @@ const FinancialAnalysis: React.FC = () => {
     const previous = report?.monthly_comparison.find((item) => item.month !== query.month);
     return { current, previous };
   }, [report, query.month]);
+
+  const budgetSummary = useMemo(() => {
+    const rows = report?.budget_executions ?? [];
+    const overRows = rows.filter((item) => item.status === 'over');
+    return {
+      overCount: overRows.length,
+      overAmount: overRows.reduce((sum, item) => sum + item.over_amount, 0),
+      maxUsage: rows.reduce((max, item) => Math.max(max, item.usage_percent), 0),
+    };
+  }, [report]);
+
+  const departmentOptions = useMemo(() => Array.from(new Set([
+    ...(report?.department_costs ?? []).map((item) => item.department),
+    ...(report?.budget_executions ?? []).map((item) => item.budget.department).filter(Boolean) as string[],
+  ])).map((department) => ({ value: department, label: department })), [report]);
+
+  const expenseTypeOptions = useMemo(() => Array.from(new Map(
+    (report?.expense_trends ?? []).map((item) => [item.expense_type_code, item.expense_type_name]),
+  )).map(([value, label]) => ({ value, label })), [report]);
 
   const handleExport = async (
     type: 'department' | 'expense' | 'monthClose',
@@ -183,6 +209,104 @@ const FinancialAnalysis: React.FC = () => {
     })),
   ];
 
+  const budgetColumns = [
+    {
+      title: '预算范围',
+      key: 'scope',
+      width: 180,
+      render: (_: unknown, row: BudgetExecution) => {
+        if (row.budget.expense_type_code) return `费用类型：${row.budget.expense_type_name ?? row.budget.expense_type_code}`;
+        if (row.budget.department) return `部门：${row.budget.department}`;
+        return '全月总预算';
+      },
+    },
+    { title: '预算金额', dataIndex: ['budget', 'budget_amount'], key: 'budget_amount', width: 130, align: 'right' as const, render: fmtMoney },
+    { title: '实际发生', dataIndex: 'actual_amount', key: 'actual_amount', width: 130, align: 'right' as const, render: fmtMoney },
+    {
+      title: '执行率',
+      dataIndex: 'usage_percent',
+      key: 'usage_percent',
+      width: 180,
+      render: (value: number) => (
+        <Progress
+          percent={Number(value.toFixed(1))}
+          size="small"
+          status={value > 100 ? 'exception' : value >= 80 ? 'active' : 'normal'}
+        />
+      ),
+    },
+    { title: '超出金额', dataIndex: 'over_amount', key: 'over_amount', width: 120, align: 'right' as const, render: (value: number) => value > 0 ? <span style={{ color: '#cf1322' }}>¥{fmtMoney(value)}</span> : '-' },
+    { title: '状态', dataIndex: 'status', key: 'status', width: 100, render: (status: string) => <Tag color={status === 'over' ? 'red' : 'green'}>{status === 'over' ? '超预算' : '正常'}</Tag> },
+    {
+      title: '操作',
+      key: 'actions',
+      width: 150,
+      render: (_: unknown, row: BudgetExecution) => (
+        <Space size={6}>
+          <Button size="small" onClick={() => openBudgetModal(row)}>
+            编辑
+          </Button>
+          <Popconfirm
+            title="确认删除该预算?"
+            okText="删除"
+            cancelText="取消"
+            onConfirm={() => handleDeleteBudget(row.budget.id)}
+          >
+            <Button size="small" danger>
+              删除
+            </Button>
+          </Popconfirm>
+        </Space>
+      ),
+    },
+  ];
+
+  const openBudgetModal = (row?: BudgetExecution) => {
+    const budget = row?.budget;
+    budgetForm.setFieldsValue({
+      id: budget?.id,
+      month: budget?.month ?? query.month,
+      scope: budget?.expense_type_code ? 'expense' : budget?.department ? 'department' : 'total',
+      department: budget?.department,
+      expense_type_code: budget?.expense_type_code,
+      budget_amount: budget?.budget_amount ?? 0,
+      remark: budget?.remark,
+    });
+    setBudgetModalOpen(true);
+  };
+
+  const handleSaveBudget = async () => {
+    const values = await budgetForm.validateFields();
+    setSavingBudget(true);
+    try {
+      await saveBudget({
+        id: values.id,
+        month: values.month,
+        department: values.scope === 'department' ? values.department : undefined,
+        expense_type_code: values.scope === 'expense' ? values.expense_type_code : undefined,
+        budget_amount: values.budget_amount,
+        remark: values.remark,
+      });
+      message.success('预算已保存');
+      setBudgetModalOpen(false);
+      await fetchData();
+    } catch (e: unknown) {
+      message.error('保存预算失败: ' + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setSavingBudget(false);
+    }
+  };
+
+  const handleDeleteBudget = async (id: number) => {
+    try {
+      await deleteBudget(id);
+      message.success('预算已删除');
+      await fetchData();
+    } catch (e: unknown) {
+      message.error('删除预算失败: ' + (e instanceof Error ? e.message : String(e)));
+    }
+  };
+
   return (
     <div>
       <div className="page-header">
@@ -251,8 +375,52 @@ const FinancialAnalysis: React.FC = () => {
           </Col>
         </Row>
 
+        <Row gutter={[16, 16]} className="mb-16">
+          <Col xs={24} md={8}>
+            <Card className="stat-card"><Statistic title="超预算项数" value={budgetSummary.overCount} suffix="项" valueStyle={{ color: budgetSummary.overCount > 0 ? '#cf1322' : '#389e0d' }} /></Card>
+          </Col>
+          <Col xs={24} md={8}>
+            <Card className="stat-card"><Statistic title="超预算金额" value={fmtMoney(budgetSummary.overAmount)} prefix="¥" valueStyle={{ color: budgetSummary.overAmount > 0 ? '#cf1322' : '#389e0d' }} /></Card>
+          </Col>
+          <Col xs={24} md={8}>
+            <Card className="stat-card"><Statistic title="最高执行率" value={`${budgetSummary.maxUsage.toFixed(1)}%`} /></Card>
+          </Col>
+        </Row>
+
+        {budgetSummary.overCount > 0 && (
+          <Alert
+            className="mb-16"
+            type="warning"
+            showIcon
+            message={`${budgetSummary.overCount} 项预算已超支，合计超出 ¥${fmtMoney(budgetSummary.overAmount)}`}
+          />
+        )}
+
         <Tabs
           items={[
+            {
+              key: 'budget',
+              label: '预算执行',
+              children: (
+                <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                    <div style={{ fontWeight: 600 }}>预算执行表</div>
+                    <Button type="primary" onClick={() => openBudgetModal()}>
+                      新增预算
+                    </Button>
+                  </div>
+                  <Card>
+                    <Table
+                      rowKey={(row) => row.budget.id}
+                      columns={budgetColumns}
+                      dataSource={report?.budget_executions ?? []}
+                      pagination={false}
+                      scroll={{ x: 1080 }}
+                    />
+                  </Card>
+                </Space>
+              ),
+            },
             {
               key: 'department',
               label: '部门成本分析',
@@ -331,6 +499,60 @@ const FinancialAnalysis: React.FC = () => {
           ]}
         />
       </Spin>
+
+      <Modal
+        title="预算配置"
+        open={budgetModalOpen}
+        okText="保存"
+        cancelText="取消"
+        confirmLoading={savingBudget}
+        onOk={handleSaveBudget}
+        onCancel={() => setBudgetModalOpen(false)}
+      >
+        <Form form={budgetForm} layout="vertical">
+          <Form.Item name="id" hidden>
+            <Input />
+          </Form.Item>
+          <Form.Item label="月份" name="month" rules={[{ required: true, message: '请输入预算月份' }]}>
+            <Input placeholder="YYYY-MM" />
+          </Form.Item>
+          <Form.Item label="预算范围" name="scope" rules={[{ required: true, message: '请选择预算范围' }]}>
+            <Select
+              options={[
+                { value: 'total', label: '全月总预算' },
+                { value: 'department', label: '部门预算' },
+                { value: 'expense', label: '费用类型预算' },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item noStyle shouldUpdate={(prev, next) => prev.scope !== next.scope}>
+            {({ getFieldValue }) => {
+              const scope = getFieldValue('scope');
+              if (scope === 'department') {
+                return (
+                  <Form.Item label="部门" name="department" rules={[{ required: true, message: '请选择部门' }]}>
+                    <Select showSearch options={departmentOptions} />
+                  </Form.Item>
+                );
+              }
+              if (scope === 'expense') {
+                return (
+                  <Form.Item label="费用类型" name="expense_type_code" rules={[{ required: true, message: '请选择费用类型' }]}>
+                    <Select showSearch options={expenseTypeOptions} />
+                  </Form.Item>
+                );
+              }
+              return null;
+            }}
+          </Form.Item>
+          <Form.Item label="预算金额" name="budget_amount" rules={[{ required: true, message: '请输入预算金额' }]}>
+            <InputNumber min={0} precision={2} style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item label="备注" name="remark">
+            <Input.TextArea rows={3} />
+          </Form.Item>
+        </Form>
+      </Modal>
     </div>
   );
 };

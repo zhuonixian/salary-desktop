@@ -319,6 +319,20 @@ fn create_tables(conn: &Connection) -> AppResult<()> {
         CREATE UNIQUE INDEX IF NOT EXISTS idx_bank_matches_active_batch
             ON bank_transaction_matches(payment_batch_id)
             WHERE status = 'active';
+
+        CREATE TABLE IF NOT EXISTS budgets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            month TEXT NOT NULL,
+            department TEXT,
+            expense_type_code TEXT,
+            budget_amount REAL NOT NULL,
+            remark TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_budgets_scope
+            ON budgets(month, COALESCE(department,''), COALESCE(expense_type_code,''));
+        CREATE INDEX IF NOT EXISTS idx_budgets_month ON budgets(month);
         ",
     )?;
     migrate_existing_schema(conn)?;
@@ -351,6 +365,9 @@ fn migrate_existing_schema(conn: &Connection) -> AppResult<()> {
     )?;
     ensure_column(conn, "reimbursement_claims", "payment_batch_id", "INTEGER")?;
     ensure_column(conn, "bank_transactions", "ignore_reason", "TEXT")?;
+    ensure_column(conn, "budgets", "remark", "TEXT")?;
+    ensure_column(conn, "budgets", "created_at", "TEXT")?;
+    ensure_column(conn, "budgets", "updated_at", "TEXT")?;
     Ok(())
 }
 
@@ -1531,6 +1548,22 @@ pub fn get_month_close_workbench(conn: &Connection, month: &str) -> AppResult<Mo
         params![month],
         |row| row.get(0),
     )?;
+    let duplicate_amount_count: i64 = conn.query_row(
+        "SELECT COUNT(*)
+         FROM (
+           SELECT employee_id, total_amount, COUNT(*) AS c
+           FROM reimbursement_claims
+           WHERE belong_month = ?1 AND status = 'approved'
+           GROUP BY employee_id, total_amount
+           HAVING c > 1
+         )",
+        params![month],
+        |row| row.get(0),
+    )?;
+    let over_budget_count = get_budget_executions(conn, month)?
+        .into_iter()
+        .filter(|item| item.status == "over")
+        .count() as i64;
     let total_salary_cost: f64 = conn
         .query_row(
             "SELECT COALESCE(SUM(gross_salary), 0) FROM salary_monthly_results WHERE salary_month = ?1",
@@ -1579,6 +1612,8 @@ pub fn get_month_close_workbench(conn: &Connection, month: &str) -> AppResult<Mo
         unpaid_reimbursement_count: unpaid_reimbursement_count as i32,
         pending_payment_batch_count: pending_payment_batch_count as i32,
         unmatched_paid_batch_count: unmatched_paid_batch_count as i32,
+        duplicate_amount_count: duplicate_amount_count as i32,
+        over_budget_count: over_budget_count as i32,
         total_salary_cost,
         total_invoice_amount,
         approved_reimbursement_amount,
@@ -1780,6 +1815,43 @@ fn build_month_close_checks(summary: &MonthCloseSummary) -> Vec<MonthCloseCheckI
                 )
             },
             action_route: Some("/bank-transactions".to_string()),
+        },
+        MonthCloseCheckItem {
+            key: "budget_overrun".to_string(),
+            title: "预算异常".to_string(),
+            status: if summary.over_budget_count == 0 {
+                "ok"
+            } else {
+                "warning"
+            }
+            .to_string(),
+            count: summary.over_budget_count,
+            description: if summary.over_budget_count == 0 {
+                "预算执行未超出已配置额度".to_string()
+            } else {
+                format!("{} 项预算已超支", summary.over_budget_count)
+            },
+            action_route: Some("/financial-analysis".to_string()),
+        },
+        MonthCloseCheckItem {
+            key: "duplicate_amounts".to_string(),
+            title: "重复金额检查".to_string(),
+            status: if summary.duplicate_amount_count == 0 {
+                "ok"
+            } else {
+                "warning"
+            }
+            .to_string(),
+            count: summary.duplicate_amount_count,
+            description: if summary.duplicate_amount_count == 0 {
+                "未发现同报销人同金额的重复报销组合".to_string()
+            } else {
+                format!(
+                    "{} 组同报销人同金额报销需要复核",
+                    summary.duplicate_amount_count
+                )
+            },
+            action_route: Some("/reimbursements".to_string()),
         },
     ]
 }
@@ -2775,8 +2847,232 @@ pub fn get_financial_analysis(
         department_costs: get_department_cost_analysis(conn, &query.month)?,
         expense_trends: get_expense_type_trends(conn, &trend_months)?,
         employee_costs: get_employee_cost_views(conn, &query.month)?,
+        budget_executions: get_budget_executions(conn, &query.month)?,
         monthly_comparison: get_monthly_comparison(conn, &comparison_months)?,
     })
+}
+
+// ==================== Budgets ====================
+
+fn row_to_budget(row: &rusqlite::Row<'_>) -> rusqlite::Result<Budget> {
+    Ok(Budget {
+        id: row.get(0)?,
+        month: row.get(1)?,
+        department: row.get(2)?,
+        expense_type_code: row.get(3)?,
+        expense_type_name: row.get(4)?,
+        budget_amount: row.get(5)?,
+        remark: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+    })
+}
+
+pub fn query_budgets(conn: &Connection, query: &BudgetQuery) -> AppResult<Vec<Budget>> {
+    let mut where_clauses = vec!["1=1".to_string()];
+    let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let mut idx = 1;
+
+    if let Some(month) = query
+        .month
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        where_clauses.push(format!("b.month = ?{idx}"));
+        params_vec.push(Box::new(month.clone()));
+        idx += 1;
+    }
+    if let Some(department) = query
+        .department
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        where_clauses.push(format!("COALESCE(b.department, '') = ?{idx}"));
+        params_vec.push(Box::new(department.clone()));
+        idx += 1;
+    }
+    if let Some(expense_type_code) = query
+        .expense_type_code
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        where_clauses.push(format!("COALESCE(b.expense_type_code, '') = ?{idx}"));
+        params_vec.push(Box::new(expense_type_code.clone()));
+    }
+
+    let sql = format!(
+        "SELECT b.id, b.month, b.department, b.expense_type_code, t.name,
+                b.budget_amount, b.remark, b.created_at, b.updated_at
+         FROM budgets b
+         LEFT JOIN invoice_expense_types t ON t.code = b.expense_type_code
+         WHERE {}
+         ORDER BY b.month DESC, COALESCE(b.department, ''), COALESCE(t.name, b.expense_type_code, '')",
+        where_clauses.join(" AND ")
+    );
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+        params_vec.iter().map(|param| param.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_refs.as_slice(), row_to_budget)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
+pub fn save_budget(conn: &Connection, input: &BudgetInput) -> AppResult<Budget> {
+    let month = input.month.trim();
+    if month.is_empty() {
+        return Err(AppError::InvalidParam("预算月份必填".into()));
+    }
+    if input.budget_amount < 0.0 {
+        return Err(AppError::InvalidParam("预算金额不能为负数".into()));
+    }
+    ensure_month_open(conn, month)?;
+    let now = Utc::now().to_rfc3339();
+    let department = input.department.as_ref().and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    });
+    let expense_type_code = input.expense_type_code.as_ref().and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    });
+
+    if let Some(id) = input.id {
+        conn.execute(
+            "UPDATE budgets
+             SET month=?1, department=?2, expense_type_code=?3, budget_amount=?4, remark=?5, updated_at=?6
+             WHERE id=?7",
+            params![
+                month,
+                department,
+                expense_type_code,
+                input.budget_amount,
+                input.remark,
+                now,
+                id
+            ],
+        )?;
+        get_budget(conn, id)
+    } else {
+        let existing_id = conn.query_row(
+            "SELECT id FROM budgets
+             WHERE month=?1 AND COALESCE(department,'')=COALESCE(?2,'')
+             AND COALESCE(expense_type_code,'')=COALESCE(?3,'')",
+            params![month, department, expense_type_code],
+            |row| row.get(0),
+        );
+        let id = match existing_id {
+            Ok(id) => {
+                conn.execute(
+                    "UPDATE budgets
+                     SET budget_amount=?1, remark=?2, updated_at=?3
+                     WHERE id=?4",
+                    params![input.budget_amount, input.remark, now, id],
+                )?;
+                id
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                conn.execute(
+                    "INSERT INTO budgets
+                        (month, department, expense_type_code, budget_amount, remark, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        month,
+                        department,
+                        expense_type_code,
+                        input.budget_amount,
+                        input.remark,
+                        now,
+                        now
+                    ],
+                )?;
+                conn.last_insert_rowid()
+            }
+            Err(e) => return Err(AppError::from(e)),
+        };
+        get_budget(conn, id)
+    }
+}
+
+pub fn delete_budget(conn: &Connection, id: i64) -> AppResult<bool> {
+    let budget = get_budget(conn, id)?;
+    ensure_month_open(conn, &budget.month)?;
+    let updated = conn.execute("DELETE FROM budgets WHERE id=?1", params![id])?;
+    Ok(updated > 0)
+}
+
+fn get_budget(conn: &Connection, id: i64) -> AppResult<Budget> {
+    conn.query_row(
+        "SELECT b.id, b.month, b.department, b.expense_type_code, t.name,
+                b.budget_amount, b.remark, b.created_at, b.updated_at
+         FROM budgets b
+         LEFT JOIN invoice_expense_types t ON t.code = b.expense_type_code
+         WHERE b.id=?1",
+        params![id],
+        row_to_budget,
+    )
+    .map_err(|e| AppError::NotFound(format!("预算ID={id}未找到: {e}")))
+}
+
+pub fn get_budget_executions(conn: &Connection, month: &str) -> AppResult<Vec<BudgetExecution>> {
+    let budgets = query_budgets(
+        conn,
+        &BudgetQuery {
+            month: Some(month.to_string()),
+            ..Default::default()
+        },
+    )?;
+    let department_costs = get_department_cost_analysis(conn, month)?;
+    let expense_trends = get_expense_type_trends(conn, &[month.to_string()])?;
+
+    let mut result = Vec::new();
+    for budget in budgets {
+        let actual_amount = budget_actual_amount(&budget, &department_costs, &expense_trends);
+        let usage_percent = if budget.budget_amount <= 0.0 {
+            0.0
+        } else {
+            actual_amount / budget.budget_amount * 100.0
+        };
+        let over_amount = (actual_amount - budget.budget_amount).max(0.0);
+        let status = if budget.budget_amount > 0.0 && actual_amount > budget.budget_amount {
+            "over"
+        } else {
+            "ok"
+        };
+        result.push(BudgetExecution {
+            budget,
+            actual_amount,
+            usage_percent,
+            over_amount,
+            status: status.to_string(),
+        });
+    }
+    result.sort_by(|a, b| {
+        b.usage_percent
+            .partial_cmp(&a.usage_percent)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Ok(result)
+}
+
+fn budget_actual_amount(
+    budget: &Budget,
+    department_costs: &[DepartmentCostAnalysis],
+    expense_trends: &[ExpenseTypeTrend],
+) -> f64 {
+    if let Some(expense_type_code) = budget.expense_type_code.as_deref() {
+        return expense_trends
+            .iter()
+            .filter(|item| item.expense_type_code == expense_type_code)
+            .map(|item| item.invoice_amount + item.reimbursement_amount)
+            .sum();
+    }
+    if let Some(department) = budget.department.as_deref() {
+        return department_costs
+            .iter()
+            .find(|item| item.department == department)
+            .map(|item| item.total_cost)
+            .unwrap_or(0.0);
+    }
+    department_costs.iter().map(|item| item.total_cost).sum()
 }
 
 fn get_department_cost_analysis(
@@ -4363,6 +4659,107 @@ mod tests {
             .find(|row| row.month == "2026-08")
             .unwrap();
         assert_eq!(august.reimbursement_amount, 800.0);
+    }
+
+    #[test]
+    fn test_budget_execution_and_month_close_warnings() {
+        let conn = setup_financial_db();
+        let budget = save_budget(
+            &conn,
+            &BudgetInput {
+                id: None,
+                month: "2026-08".into(),
+                department: Some("销售部".into()),
+                expense_type_code: None,
+                budget_amount: 10_000.0,
+                remark: Some("销售部预算".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(budget.department.as_deref(), Some("销售部"));
+
+        let updated = save_budget(
+            &conn,
+            &BudgetInput {
+                id: None,
+                month: "2026-08".into(),
+                department: Some("销售部".into()),
+                expense_type_code: None,
+                budget_amount: 11_000.0,
+                remark: Some("更新预算".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.id, budget.id);
+        assert_eq!(updated.budget_amount, 11_000.0);
+
+        let report = get_financial_analysis(
+            &conn,
+            &FinancialAnalysisQuery {
+                month: "2026-08".into(),
+                months: Some(3),
+            },
+        )
+        .unwrap();
+        assert_eq!(report.budget_executions.len(), 1);
+        assert_eq!(report.budget_executions[0].actual_amount, 12_800.0);
+        assert_eq!(report.budget_executions[0].over_amount, 1_800.0);
+        assert_eq!(report.budget_executions[0].status, "over");
+
+        conn.execute(
+            "INSERT INTO reimbursement_claims
+                (id, claim_no, employee_id, belong_month, title, total_amount, invoice_count, status, payment_status, created_at, updated_at)
+             VALUES (3, 'BX202608003', 1, '2026-08', '重复金额测试', 300, 0, 'approved', 'paid', '2026-08-20', '2026-08-20')",
+            [],
+        )
+        .unwrap();
+        let workbench = get_month_close_workbench(&conn, "2026-08").unwrap();
+        assert_eq!(workbench.summary.over_budget_count, 1);
+        assert_eq!(workbench.summary.duplicate_amount_count, 1);
+        assert!(workbench
+            .checks
+            .iter()
+            .any(|item| item.key == "budget_overrun" && item.status == "warning"));
+        assert!(workbench
+            .checks
+            .iter()
+            .any(|item| item.key == "duplicate_amounts" && item.status == "warning"));
+    }
+
+    #[test]
+    fn test_closed_month_blocks_budget_writes() {
+        let conn = setup_financial_db();
+        let budget = save_budget(
+            &conn,
+            &BudgetInput {
+                id: None,
+                month: "2026-08".into(),
+                department: None,
+                expense_type_code: None,
+                budget_amount: 30_000.0,
+                remark: None,
+            },
+        )
+        .unwrap();
+        make_august_closable(&conn);
+        close_month(&conn, "2026-08", "system", None).unwrap();
+
+        let save_err = save_budget(
+            &conn,
+            &BudgetInput {
+                id: Some(budget.id),
+                month: "2026-08".into(),
+                department: None,
+                expense_type_code: None,
+                budget_amount: 31_000.0,
+                remark: None,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(save_err, AppError::InvalidParam(_)));
+
+        let delete_err = delete_budget(&conn, budget.id).unwrap_err();
+        assert!(matches!(delete_err, AppError::InvalidParam(_)));
     }
 
     #[test]

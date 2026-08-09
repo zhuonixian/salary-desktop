@@ -226,3 +226,38 @@
   - `3.5 预算与异常`。
 - 下轮入口：进入 `3.5 预算与异常`。
 - 提交：待完成。
+
+### 2026-08-10 04:48
+
+- 目标：落地第三阶段 `3.5 预算与异常`，在本地财务分析和月结检查中补齐预算提醒。
+- 完成：
+  - 新增 `budgets` 表，支持按月份维护全月总预算、部门预算、费用类型预算。
+  - 新增预算后端能力：查询预算、保存/更新预算、删除预算；已正式月结月份禁止修改预算。
+  - 财务分析报告新增 `budget_executions`，按预算范围计算实际发生、执行率、超出金额和状态。
+  - 财务分析页新增“预算执行”Tab，支持新增、编辑、删除预算，并展示执行率进度、超预算项数、超预算金额、最高执行率和超预算提示。
+  - 月结检查新增“预算异常”和“重复金额检查”；现有未分类发票、异常考勤、未匹配付款等检查共同形成异常提醒。
+  - 操作日志增加预算保存和删除中文映射。
+  - 使用 subagent 分别审查后端和前端/API 方案，最终采用“不落异常表、动态计算预算异常”的最小闭环。
+- 修改文件：
+  - `src-tauri/src/models.rs`
+  - `src-tauri/src/db.rs`
+  - `src-tauri/src/commands.rs`
+  - `src-tauri/src/lib.rs`
+  - `src/types/index.ts`
+  - `src/api/index.ts`
+  - `src/pages/FinancialAnalysis.tsx`
+  - `src/pages/OperationLogs.tsx`
+  - `docs/superpowers/plans/2026-08-10-stage3-progress.md`
+- 测试：
+  - `npx tsc --noEmit`：通过。
+  - `npm run lint`：通过。
+  - `npm run build`：通过；仍有既有 Vite chunk 体积提示。
+  - `cd src-tauri && cargo fmt --check`：通过。
+  - `cd src-tauri && cargo check`：通过；仍有既有 unused/dead_code warning。
+  - `cd src-tauri && cargo test --lib`：通过，50 个测试。
+  - `npm run tauri build`：通过，生成 Linux deb/rpm/AppImage。
+- 未完成：
+  - Windows exe 下预算新增、编辑、删除、超预算提醒和月结检查跳转的手工验收。
+  - 复杂预算阈值、预算版本快照、异常列表持久化。
+- 下轮入口：第三阶段主线功能已完成，后续可进入手工验收、Windows 发布或后续增强池。
+- 提交：待完成。

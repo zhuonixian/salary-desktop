@@ -297,6 +297,9 @@ export interface MonthCloseSummary {
   pending_reimbursement_count: number;
   unpaid_reimbursement_count: number;
   pending_payment_batch_count: number;
+  unmatched_paid_batch_count: number;
+  duplicate_amount_count: number;
+  over_budget_count: number;
   total_salary_cost: number;
   total_invoice_amount: number;
   approved_reimbursement_amount: number;
@@ -518,6 +521,41 @@ export interface EmployeeCostView {
   total_cost: number;
 }
 
+export interface Budget {
+  id: number;
+  month: string;
+  department?: string;
+  expense_type_code?: string;
+  expense_type_name?: string;
+  budget_amount: number;
+  remark?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface BudgetInput {
+  id?: number;
+  month: string;
+  department?: string;
+  expense_type_code?: string;
+  budget_amount: number;
+  remark?: string;
+}
+
+export interface BudgetQuery {
+  month?: string;
+  department?: string;
+  expense_type_code?: string;
+}
+
+export interface BudgetExecution {
+  budget: Budget;
+  actual_amount: number;
+  usage_percent: number;
+  over_amount: number;
+  status: 'ok' | 'over';
+}
+
 export interface MonthlyComparison {
   month: string;
   gross_salary: number;
@@ -536,6 +574,7 @@ export interface FinancialAnalysisReport {
   department_costs: DepartmentCostAnalysis[];
   expense_trends: ExpenseTypeTrend[];
   employee_costs: EmployeeCostView[];
+  budget_executions: BudgetExecution[];
   monthly_comparison: MonthlyComparison[];
 }
 

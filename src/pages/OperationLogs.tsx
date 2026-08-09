@@ -44,6 +44,8 @@ const operationTypeLabels: Record<string, string> = {
   confirm_bank_transaction_match: '确认流水匹配',
   cancel_bank_transaction_match: '取消流水匹配',
   ignore_bank_transaction: '忽略银行流水',
+  save_budget: '保存预算',
+  delete_budget: '删除预算',
 };
 
 const getOperationLabel = (value?: string) =>
