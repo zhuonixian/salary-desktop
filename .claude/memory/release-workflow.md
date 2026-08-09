@@ -49,14 +49,39 @@ gh release edit v0.X.Y --repo zhuonixian/salary-desktop --draft=false
 
 ## 下载到本地 dist/
 
+优先使用 GitHub API 按 asset ID 下载。原因：自动创建的 release 通常是 draft，`browser_download_url` 可能是 `untagged-*`，普通 `gh release download --pattern "*.exe"` 可能长时间卡住或留下半截文件。
+
 ```bash
-cd /home/zhang/workspace/Project/salary/salary-desktop/dist
+cd /home/zhang/workspace/Project/salary/salary-desktop
 # 用代理（GitHub 下载国内常超时）
 export http_proxy=http://127.0.0.1:18080 https_proxy=http://127.0.0.1:18080
-gh release download vX.Y.Z --repo zhuonixian/salary-desktop --pattern "*.exe" --clobber
+export HTTP_PROXY=http://127.0.0.1:18080 HTTPS_PROXY=http://127.0.0.1:18080
+
+TAG=vX.Y.Z
+ASSET_NAME=salary-desktop_0.1.0_x64-setup.exe
+ASSET_ID=$(gh api repos/zhuonixian/salary-desktop/releases --paginate \
+  --jq ".[] | select(.tag_name == \"$TAG\") | .assets[] | select(.name == \"$ASSET_NAME\") | .id")
+EXPECTED_SHA=$(gh release view "$TAG" --repo zhuonixian/salary-desktop --json assets \
+  --jq ".assets[] | select(.name == \"$ASSET_NAME\") | .digest" | sed 's/^sha256://')
+
+gh api -H 'Accept: application/octet-stream' \
+  "repos/zhuonixian/salary-desktop/releases/assets/$ASSET_ID" \
+  > "dist/$ASSET_NAME.part"
+sha256sum "dist/$ASSET_NAME.part"
+test "$(sha256sum "dist/$ASSET_NAME.part" | awk '{print $1}')" = "$EXPECTED_SHA"
+mv "dist/$ASSET_NAME.part" "dist/$ASSET_NAME"
+stat -c '%n %s bytes' "dist/$ASSET_NAME"
+```
+
+普通下载方式仅作为备选，且必须校验大小和 SHA256；如果命令长时间无输出，先检查是否留下半截文件，不要直接信任：
+
+```bash
+cd /home/zhang/workspace/Project/salary/salary-desktop
+export http_proxy=http://127.0.0.1:18080 https_proxy=http://127.0.0.1:18080
+gh release download vX.Y.Z --repo zhuonixian/salary-desktop --pattern "*.exe" --dir dist --clobber
 
 # 校验
-sha256sum *.exe
+sha256sum dist/*.exe
 gh release view vX.Y.Z --repo zhuonixian/salary-desktop --json assets \
   --jq '.assets[] | select(.name | endswith("setup.exe")) | .digest'
 ```

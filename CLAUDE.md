@@ -34,6 +34,7 @@ npm run lint                             # ESLint
 - **OCR token**：`baidu_access_token` 缓存到 `app_settings`，110 错误自动清缓存重试一次
 - **Tauri asset 协议**：`app.security.assetProtocol` 已启用，前端用 `convertFileSrc()` 渲染本地图片/PDF
 - **未签名 Windows 构建**：SmartScreen 拦截，首次运行需手动绕过（见 `docs/windows-install-guide.md`）
+- **Release 物料下载**：draft release 的普通下载可能卡住或拿到半截文件；优先按 `.claude/memory/release-workflow.md` 用 `gh api` 获取 asset 数值 ID 下载到 `dist/`，并用 SHA256 对 GitHub digest 校验。
 
 ## Memory References
 
