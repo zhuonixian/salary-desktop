@@ -1,4 +1,5 @@
 mod commands;
+mod data_safety;
 mod db;
 mod errors;
 mod excel;
@@ -131,6 +132,12 @@ pub fn run() {
         commands::export_expense_analysis_report,
         commands::export_month_close_report,
         commands::query_operation_logs,
+        commands::get_data_safety_status,
+        commands::backup_database,
+        commands::restore_database,
+        commands::verify_database,
+        commands::compact_database,
+        commands::open_app_data_dir,
         commands::get_ocr_settings,
         commands::save_ocr_settings,
         commands::generate_punch_card_template,

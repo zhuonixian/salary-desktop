@@ -10,6 +10,7 @@ import {
   SettingOutlined,
   CalculatorOutlined,
   ExportOutlined,
+  DatabaseOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
   FormOutlined,
@@ -36,6 +37,7 @@ import MonthClose from '@/pages/MonthClose';
 import OperationLogs from '@/pages/OperationLogs';
 import Reimbursements from '@/pages/Reimbursements';
 import FinancialAnalysis from '@/pages/FinancialAnalysis';
+import DataSafety from '@/pages/DataSafety';
 
 const { Sider, Header, Content } = Layout;
 
@@ -85,6 +87,7 @@ const menuItems: MenuProps['items'] = [
     children: [
       { key: '/export', label: '导出中心', icon: <ExportOutlined /> },
       { key: '/logs', label: '操作日志', icon: <AuditOutlined /> },
+      { key: '/data-safety', label: '数据安全', icon: <DatabaseOutlined /> },
     ],
   },
   { key: '/rules', label: '系统设置', icon: <SettingOutlined /> },
@@ -198,6 +201,7 @@ const AppLayout: React.FC = () => {
             <Route path="/salary" element={<SalaryCalculate />} />
             <Route path="/export" element={<ExportCenter />} />
             <Route path="/logs" element={<OperationLogs />} />
+            <Route path="/data-safety" element={<DataSafety />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </Content>

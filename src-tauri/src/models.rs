@@ -510,3 +510,56 @@ pub struct ReimbursementInvoice {
     pub total_amount: f64,
     pub issue_date: Option<String>,
 }
+
+// ==================== Data Safety ====================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataTableCount {
+    pub table_name: String,
+    pub label: String,
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataSafetyStatus {
+    pub app_data_dir: String,
+    pub database_path: String,
+    pub database_exists: bool,
+    pub database_size: u64,
+    pub invoice_dir: String,
+    pub invoice_dir_exists: bool,
+    pub invoice_dir_size: u64,
+    pub last_backup_at: Option<String>,
+    pub last_backup_path: Option<String>,
+    pub last_restore_at: Option<String>,
+    pub table_counts: Vec<DataTableCount>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataBackupResult {
+    pub success: bool,
+    pub backup_dir: String,
+    pub database_path: String,
+    pub invoice_dir: String,
+    pub manifest_path: String,
+    pub database_size: u64,
+    pub invoice_dir_size: u64,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataRestoreResult {
+    pub success: bool,
+    pub restored_at: String,
+    pub restored_from: String,
+    pub safety_backup_dir: String,
+    pub restart_recommended: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataSafetyCheckResult {
+    pub ok: bool,
+    pub checked_at: String,
+    pub integrity_check: String,
+    pub messages: Vec<String>,
+}

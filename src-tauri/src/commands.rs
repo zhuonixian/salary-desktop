@@ -1,15 +1,23 @@
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use rusqlite::Connection;
 use tauri::Manager;
 
+use crate::data_safety;
 use crate::db;
 use crate::errors::AppError;
 use crate::excel;
 use crate::models::*;
 use crate::ocr;
 use crate::salary;
+
+fn app_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, AppError> {
+    app.path()
+        .app_data_dir()
+        .map_err(|e| AppError::General(format!("获取应用数据目录失败: {e}")))
+}
 
 // ==================== Employee Commands ====================
 
@@ -648,6 +656,98 @@ pub fn query_operation_logs(
 ) -> Result<Vec<OperationLog>, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     db::query_operation_logs(&conn, &query)
+}
+
+// ==================== Data Safety Commands ====================
+
+#[tauri::command]
+pub fn get_data_safety_status(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<DataSafetyStatus, AppError> {
+    let app_data_dir = app_data_dir(&app)?;
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    data_safety::get_status(&conn, &app_data_dir)
+}
+
+#[tauri::command]
+pub fn backup_database(
+    target_dir: String,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<DataBackupResult, AppError> {
+    let app_data_dir = app_data_dir(&app)?;
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let result = data_safety::backup_database(&conn, &app_data_dir, target_dir.as_ref())?;
+    db::set_setting(&conn, "last_data_backup_at", &result.created_at)?;
+    db::set_setting(&conn, "last_data_backup_path", &result.backup_dir)?;
+    db::log_operation(
+        &conn,
+        "backup_database",
+        &format!("备份数据库到{}", result.backup_dir),
+        "system",
+        None,
+    )?;
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn restore_database(
+    backup_dir: String,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<DataRestoreResult, AppError> {
+    let app_data_dir = app_data_dir(&app)?;
+    let mut conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let result = data_safety::restore_database(&mut conn, &app_data_dir, backup_dir.as_ref())?;
+    db::log_operation(
+        &conn,
+        "restore_database",
+        &format!("从{}恢复数据库", result.restored_from),
+        "system",
+        Some(&format!("自动保护备份: {}", result.safety_backup_dir)),
+    )?;
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn verify_database(
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<DataSafetyCheckResult, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let result = data_safety::verify_database(&conn)?;
+    db::log_operation(
+        &conn,
+        "verify_database",
+        if result.ok {
+            "数据库体检通过"
+        } else {
+            "数据库体检发现异常"
+        },
+        "system",
+        Some(&result.messages.join("\n")),
+    )?;
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn compact_database(state: tauri::State<'_, Mutex<Connection>>) -> Result<bool, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    data_safety::compact_database(&conn)?;
+    db::log_operation(
+        &conn,
+        "compact_database",
+        "压缩并整理数据库",
+        "system",
+        None,
+    )?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn open_app_data_dir(app: tauri::AppHandle) -> Result<bool, AppError> {
+    let app_data_dir = app_data_dir(&app)?;
+    data_safety::open_app_data_dir(&app_data_dir)
 }
 
 // ==================== OCR Settings Commands ====================

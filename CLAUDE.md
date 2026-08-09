@@ -45,6 +45,11 @@ npm run lint                             # ESLint
 - [发版流程](.claude/memory/release-workflow.md) — git tag → GitHub Actions → gh release → SmartScreen
 - [命令清单](.claude/memory/commands-reference.md) — 完整开发/测试/发版命令
 - [架构模块](.claude/memory/architecture.md) — 后端模块职责 + 数据流
+- [第三阶段计划](.claude/memory/stage3-local-finance.md) — 本地数据安全、正式月结、付款批次、银行流水、预算异常；完整计划见 `docs/superpowers/plans/2026-08-10-stage3-local-finance.md`
+
+## 第三阶段开发
+
+第三阶段以本地轻量财务管理为目标，优先做数据安全中心和正式月结，再推进付款批次、银行流水匹配、预算异常。开发时先读 `.claude/memory/stage3-local-finance.md` 和 `docs/superpowers/plans/2026-08-10-stage3-progress.md`；涉及多模块开发时用 subagent 按互不重叠文件范围协作，由主 agent 统一合并、测试、commit、push。
 
 ## 编码约定
 

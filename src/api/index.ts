@@ -27,6 +27,10 @@ import type {
   FinancialAnalysisReport,
   OperationLog,
   OperationLogQuery,
+  DataSafetyStatus,
+  DataBackupResult,
+  DataRestoreResult,
+  DataSafetyCheckResult,
   ReimbursementClaim,
   ReimbursementClaimInput,
   ReimbursementInvoice,
@@ -176,6 +180,38 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
     }
     case 'get_ocr_settings':
       return { ocr_mode: 'online', ocr_provider: 'baidu', baidu_api_key: '', baidu_secret_key: '' };
+    case 'get_data_safety_status':
+      return {
+        app_data_dir: '',
+        database_path: '',
+        database_exists: true,
+        database_size: 0,
+        invoice_dir: '',
+        invoice_dir_exists: true,
+        invoice_dir_size: 0,
+        table_counts: [],
+      };
+    case 'backup_database':
+      return {
+        success: true,
+        backup_dir: String(args?.targetDir ?? ''),
+        database_path: '',
+        invoice_dir: '',
+        manifest_path: '',
+        database_size: 0,
+        invoice_dir_size: 0,
+        created_at: new Date().toISOString(),
+      };
+    case 'restore_database':
+      return {
+        success: true,
+        restored_at: new Date().toISOString(),
+        restored_from: String(args?.backupDir ?? ''),
+        safety_backup_dir: '',
+        restart_recommended: true,
+      };
+    case 'verify_database':
+      return { ok: true, checked_at: new Date().toISOString(), integrity_check: 'ok', messages: ['前端预览模式'] };
     case 'ocr_recognize':
     case 'ocr_recognize_punch_card':
       return { batch_id: 0, records: [], raw_text: '' };
@@ -392,6 +428,30 @@ export async function exportMonthCloseReport(query: FinancialAnalysisQuery, save
 
 export async function queryOperationLogs(query: OperationLogQuery): Promise<OperationLog[]> {
   return invoke<OperationLog[]>('query_operation_logs', { query });
+}
+
+export async function getDataSafetyStatus(): Promise<DataSafetyStatus> {
+  return invoke<DataSafetyStatus>('get_data_safety_status');
+}
+
+export async function backupDatabase(targetDir: string): Promise<DataBackupResult> {
+  return invoke<DataBackupResult>('backup_database', { targetDir });
+}
+
+export async function restoreDatabase(backupDir: string): Promise<DataRestoreResult> {
+  return invoke<DataRestoreResult>('restore_database', { backupDir });
+}
+
+export async function verifyDatabase(): Promise<DataSafetyCheckResult> {
+  return invoke<DataSafetyCheckResult>('verify_database');
+}
+
+export async function compactDatabase(): Promise<boolean> {
+  return invoke<boolean>('compact_database');
+}
+
+export async function openAppDataDir(): Promise<boolean> {
+  return invoke<boolean>('open_app_data_dir');
 }
 
 // ==================== 员工管理 ====================

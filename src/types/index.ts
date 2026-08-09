@@ -231,6 +231,54 @@ export interface OperationLogQuery {
   limit?: number;
 }
 
+// ==================== 数据安全 ====================
+
+export interface DataTableCount {
+  table_name: string;
+  label: string;
+  count: number;
+}
+
+export interface DataSafetyStatus {
+  app_data_dir: string;
+  database_path: string;
+  database_exists: boolean;
+  database_size: number;
+  invoice_dir: string;
+  invoice_dir_exists: boolean;
+  invoice_dir_size: number;
+  last_backup_at?: string;
+  last_backup_path?: string;
+  last_restore_at?: string;
+  table_counts: DataTableCount[];
+}
+
+export interface DataBackupResult {
+  success: boolean;
+  backup_dir: string;
+  database_path: string;
+  invoice_dir: string;
+  manifest_path: string;
+  database_size: number;
+  invoice_dir_size: number;
+  created_at: string;
+}
+
+export interface DataRestoreResult {
+  success: boolean;
+  restored_at: string;
+  restored_from: string;
+  safety_backup_dir: string;
+  restart_recommended: boolean;
+}
+
+export interface DataSafetyCheckResult {
+  ok: boolean;
+  checked_at: string;
+  integrity_check: string;
+  messages: string[];
+}
+
 // ==================== 月结工作台 ====================
 
 export interface MonthCloseSummary {
