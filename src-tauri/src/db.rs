@@ -547,6 +547,76 @@ pub fn get_attendance_records(conn: &Connection, month: &str) -> AppResult<Vec<A
         .map_err(AppError::from)
 }
 
+fn get_attendance_record(conn: &Connection, id: i64) -> AppResult<AttendanceRecord> {
+    conn.query_row(
+        "SELECT id, salary_month, employee_no, name, expected_days, actual_days, late_count, early_leave_count, personal_leave_days, sick_leave_days, absent_days, overtime_hours, source_type, ocr_batch_id, remark, created_at, updated_at FROM attendance_records WHERE id = ?1",
+        params![id],
+        |row| {
+            Ok(AttendanceRecord {
+                id: row.get(0)?,
+                salary_month: row.get(1)?,
+                employee_no: row.get(2)?,
+                name: row.get(3)?,
+                expected_days: row.get(4)?,
+                actual_days: row.get(5)?,
+                late_count: row.get(6)?,
+                early_leave_count: row.get(7)?,
+                personal_leave_days: row.get(8)?,
+                sick_leave_days: row.get(9)?,
+                absent_days: row.get(10)?,
+                overtime_hours: row.get(11)?,
+                source_type: row.get(12)?,
+                ocr_batch_id: row.get(13)?,
+                remark: row.get(14)?,
+                created_at: row.get(15)?,
+                updated_at: row.get(16)?,
+            })
+        },
+    )
+    .map_err(|e| AppError::NotFound(format!("考勤记录ID={id}未找到: {e}")))
+}
+
+pub fn create_attendance_record(
+    conn: &Connection,
+    data: &AttendanceRecordInput,
+) -> AppResult<AttendanceRecord> {
+    if data.salary_month.trim().is_empty() {
+        return Err(AppError::InvalidParam("考勤月份必填".into()));
+    }
+    if data.employee_no.trim().is_empty() {
+        return Err(AppError::InvalidParam("员工工号必填".into()));
+    }
+
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO attendance_records
+         (salary_month, employee_no, name, expected_days, actual_days, late_count, early_leave_count,
+          personal_leave_days, sick_leave_days, absent_days, overtime_hours, source_type,
+          ocr_batch_id, remark, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+        params![
+            data.salary_month.trim(),
+            data.employee_no.trim(),
+            data.name,
+            data.expected_days.unwrap_or(0.0),
+            data.actual_days.unwrap_or(0.0),
+            data.late_count.unwrap_or(0),
+            data.early_leave_count.unwrap_or(0),
+            data.personal_leave_days.unwrap_or(0.0),
+            data.sick_leave_days.unwrap_or(0.0),
+            data.absent_days.unwrap_or(0.0),
+            data.overtime_hours.unwrap_or(0.0),
+            data.source_type,
+            data.ocr_batch_id,
+            data.remark,
+            now,
+            now
+        ],
+    )?;
+
+    get_attendance_record(conn, conn.last_insert_rowid())
+}
+
 pub fn upsert_attendance_record(
     conn: &Connection,
     data: &AttendanceRecordInput,
@@ -668,6 +738,11 @@ pub fn update_attendance_record(
         ],
     )?;
 
+    Ok(updated > 0)
+}
+
+pub fn delete_attendance_record(conn: &Connection, id: i64) -> AppResult<bool> {
+    let updated = conn.execute("DELETE FROM attendance_records WHERE id = ?1", params![id])?;
     Ok(updated > 0)
 }
 
@@ -1277,7 +1352,7 @@ pub fn get_month_close_workbench(conn: &Connection, month: &str) -> AppResult<Mo
     let paid_reimbursement_amount: f64 = conn
         .query_row(
             "SELECT COALESCE(SUM(total_amount), 0) FROM reimbursement_claims
-             WHERE belong_month = ?1 AND payment_status = 'paid'",
+             WHERE belong_month = ?1 AND status != 'void' AND payment_status = 'paid'",
             params![month],
             |row| row.get(0),
         )
@@ -1548,7 +1623,7 @@ fn get_department_cost_analysis(
                 COALESCE(SUM(r.total_amount), 0)
              FROM reimbursement_claims r
              LEFT JOIN employees e ON e.id = r.employee_id
-             WHERE r.belong_month = ?1 AND r.status != 'void'
+             WHERE r.belong_month = ?1 AND r.status = 'approved'
              GROUP BY COALESCE(NULLIF(TRIM(e.department), ''), '未分配')",
         )?;
         let rows = stmt.query_map(params![month], |row| {
@@ -1663,7 +1738,7 @@ fn get_expense_type_trends(
              JOIN invoices i ON i.id = ri.invoice_id
              LEFT JOIN invoice_expense_types t ON t.code = i.expense_type_code
              WHERE r.belong_month >= ?1 AND r.belong_month <= ?2
-               AND r.status != 'void'
+               AND r.status = 'approved'
                AND i.status != 'void'
              GROUP BY r.belong_month, COALESCE(NULLIF(TRIM(i.expense_type_code), ''), 'uncategorized'), COALESCE(t.name, '未归类')",
         )?;
@@ -1870,7 +1945,7 @@ fn get_employee_cost_views(conn: &Connection, month: &str) -> AppResult<Vec<Empl
         let mut stmt = conn.prepare(
             "SELECT employee_id, COALESCE(SUM(total_amount), 0)
              FROM reimbursement_claims
-             WHERE belong_month = ?1 AND status != 'void' AND employee_id IS NOT NULL
+             WHERE belong_month = ?1 AND status = 'approved' AND employee_id IS NOT NULL
              GROUP BY employee_id",
         )?;
         let rows = stmt.query_map(params![month], |row| {
@@ -1986,7 +2061,7 @@ fn get_monthly_comparison(
             .unwrap_or(0.0);
         let reimbursement_amount: f64 = conn
             .query_row(
-                "SELECT COALESCE(SUM(total_amount), 0) FROM reimbursement_claims WHERE belong_month = ?1 AND status != 'void'",
+                "SELECT COALESCE(SUM(total_amount), 0) FROM reimbursement_claims WHERE belong_month = ?1 AND status = 'approved'",
                 params![month],
                 |row| row.get(0),
             )
@@ -2550,7 +2625,7 @@ pub fn save_reimbursement_claim(
 
     let now = Utc::now().to_rfc3339();
     let claim_id = if let Some(id) = data.id {
-        conn.execute(
+        let updated = conn.execute(
             "UPDATE reimbursement_claims
              SET employee_id=?1, belong_month=?2, title=?3, total_amount=?4, invoice_count=?5,
                  status=?6, payment_status=?7, payment_date=?8, remark=?9, updated_at=?10
@@ -2569,6 +2644,9 @@ pub fn save_reimbursement_claim(
                 id
             ],
         )?;
+        if updated == 0 {
+            return Err(AppError::NotFound(format!("报销单ID={id}未找到或已作废")));
+        }
         conn.execute(
             "DELETE FROM reimbursement_claim_invoices WHERE claim_id = ?1",
             params![id],
@@ -2956,6 +3034,117 @@ mod tests {
     }
 
     #[test]
+    fn test_financial_analysis_excludes_unapproved_reimbursements() {
+        let conn = setup_financial_db();
+        conn.execute_batch(
+            "
+            INSERT INTO invoices
+                (id, invoice_code, invoice_number, total_amount, expense_type_code, employee_id, belong_month, status, created_at, updated_at)
+            VALUES
+                (4, 'A', '004', 700, 'office', 1, '2026-08', 'normal', '2026-08-10', '2026-08-10');
+
+            INSERT INTO reimbursement_claims
+                (id, claim_no, employee_id, belong_month, title, total_amount, invoice_count, status, payment_status, created_at, updated_at)
+            VALUES
+                (3, 'BX202608003', 1, '2026-08', '驳回报销', 700, 1, 'rejected', 'unpaid', '2026-08-15', '2026-08-15');
+
+            INSERT INTO reimbursement_claim_invoices (claim_id, invoice_id, created_at)
+            VALUES (3, 4, '2026-08-15');
+            ",
+        )
+        .unwrap();
+
+        let report = get_financial_analysis(
+            &conn,
+            &FinancialAnalysisQuery {
+                month: "2026-08".into(),
+                months: Some(3),
+            },
+        )
+        .unwrap();
+
+        let sales = report
+            .department_costs
+            .iter()
+            .find(|row| row.department == "销售部")
+            .unwrap();
+        assert_eq!(sales.invoice_amount, 1000.0);
+        assert_eq!(sales.reimbursement_amount, 300.0);
+
+        let employee = report
+            .employee_costs
+            .iter()
+            .find(|row| row.employee_no == "E001")
+            .unwrap();
+        assert_eq!(employee.invoice_amount, 1000.0);
+        assert_eq!(employee.reimbursement_amount, 300.0);
+
+        let office_august = report
+            .expense_trends
+            .iter()
+            .find(|row| row.month == "2026-08" && row.expense_type_code == "office")
+            .unwrap();
+        assert_eq!(office_august.invoice_count, 2);
+        assert_eq!(office_august.invoice_amount, 1000.0);
+        assert_eq!(office_august.reimbursement_amount, 300.0);
+
+        let august = report
+            .monthly_comparison
+            .iter()
+            .find(|row| row.month == "2026-08")
+            .unwrap();
+        assert_eq!(august.reimbursement_amount, 800.0);
+    }
+
+    #[test]
+    fn test_month_close_excludes_void_paid_reimbursements() {
+        let conn = setup_financial_db();
+        assert!(soft_delete_reimbursement_claim(&conn, 1).unwrap());
+
+        let workbench = get_month_close_workbench(&conn, "2026-08").unwrap();
+
+        assert_eq!(workbench.summary.reimbursement_count, 1);
+        assert_eq!(workbench.summary.approved_reimbursement_amount, 500.0);
+        assert_eq!(workbench.summary.paid_reimbursement_amount, 0.0);
+    }
+
+    #[test]
+    fn test_update_void_reimbursement_claim_is_rejected_without_relinking() {
+        let conn = setup_financial_db();
+        assert!(soft_delete_reimbursement_claim(&conn, 1).unwrap());
+
+        let err = save_reimbursement_claim(
+            &conn,
+            &ReimbursementClaimInput {
+                id: Some(1),
+                employee_id: Some(1),
+                belong_month: "2026-08".into(),
+                title: "作废后编辑".into(),
+                invoice_ids: vec![1],
+                status: Some("draft".into()),
+                payment_status: Some("unpaid".into()),
+                payment_date: None,
+                remark: None,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, AppError::NotFound(_)),
+            "expected NotFound for void claim update, got {:?}",
+            err
+        );
+
+        let link_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM reimbursement_claim_invoices WHERE claim_id = 1 AND invoice_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(link_count, 1);
+    }
+
+    #[test]
     fn test_update_attendance_keeps_identity_when_input_is_blank() {
         let conn = setup_financial_db();
 
@@ -2998,6 +3187,38 @@ mod tests {
         assert_eq!(saved.salary_month, "2026-08");
         assert_eq!(saved.employee_no, "E001");
         assert_eq!(saved.actual_days, 22.0);
+    }
+
+    #[test]
+    fn test_create_and_delete_attendance_record() {
+        let conn = setup_financial_db();
+        let created = create_attendance_record(
+            &conn,
+            &AttendanceRecordInput {
+                id: None,
+                salary_month: "2026-09".into(),
+                employee_no: "E002".into(),
+                name: Some("李四".into()),
+                expected_days: Some(22.0),
+                actual_days: Some(22.0),
+                late_count: Some(0),
+                early_leave_count: Some(0),
+                personal_leave_days: Some(0.0),
+                sick_leave_days: Some(0.0),
+                absent_days: Some(0.0),
+                overtime_hours: Some(1.5),
+                source_type: Some("manual".into()),
+                ocr_batch_id: None,
+                remark: Some("手工新增".into()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(created.salary_month, "2026-09");
+        assert_eq!(created.employee_no, "E002");
+        assert_eq!(created.overtime_hours, 1.5);
+        assert!(delete_attendance_record(&conn, created.id).unwrap());
+        assert!(!delete_attendance_record(&conn, created.id).unwrap());
     }
 
     #[test]

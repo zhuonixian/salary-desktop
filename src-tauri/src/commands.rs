@@ -273,6 +273,15 @@ pub fn save_attendance_records(
 }
 
 #[tauri::command]
+pub fn create_attendance_record(
+    data: AttendanceRecordInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<AttendanceRecord, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    db::create_attendance_record(&conn, &data)
+}
+
+#[tauri::command]
 pub fn update_attendance_record(
     id: i64,
     data: AttendanceRecordInput,
@@ -280,6 +289,15 @@ pub fn update_attendance_record(
 ) -> Result<bool, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     db::update_attendance_record(&conn, id, &data)
+}
+
+#[tauri::command]
+pub fn delete_attendance_record(
+    id: i64,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    db::delete_attendance_record(&conn, id)
 }
 
 // ==================== Salary Rules Commands ====================
