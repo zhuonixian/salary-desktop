@@ -575,6 +575,7 @@ pub fn confirm_ocr_results(
 pub fn get_ocr_settings(conn: &Connection) -> AppResult<OcrSettings> {
     Ok(OcrSettings {
         ocr_mode: get_setting(conn, "ocr_mode")?.unwrap_or_else(|| "local".to_string()),
+        ocr_provider: get_setting(conn, "ocr_provider")?.unwrap_or_else(|| "baidu".to_string()),
         baidu_api_key: get_setting(conn, "baidu_api_key")?.unwrap_or_default(),
         baidu_secret_key: get_setting(conn, "baidu_secret_key")?.unwrap_or_default(),
     })
@@ -583,6 +584,9 @@ pub fn get_ocr_settings(conn: &Connection) -> AppResult<OcrSettings> {
 pub fn save_ocr_settings(conn: &Connection, data: &OcrSettingsInput) -> AppResult<bool> {
     if let Some(ref v) = data.ocr_mode {
         set_setting(conn, "ocr_mode", v)?;
+    }
+    if let Some(ref v) = data.ocr_provider {
+        set_setting(conn, "ocr_provider", v)?;
     }
     if let Some(ref v) = data.baidu_api_key {
         set_setting(conn, "baidu_api_key", v)?;

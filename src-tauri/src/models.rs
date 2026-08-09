@@ -214,6 +214,7 @@ pub struct DashboardSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OcrSettings {
     pub ocr_mode: String,
+    pub ocr_provider: String,
     pub baidu_api_key: String,
     pub baidu_secret_key: String,
 }
@@ -221,6 +222,7 @@ pub struct OcrSettings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OcrSettingsInput {
     pub ocr_mode: Option<String>,
+    pub ocr_provider: Option<String>,
     pub baidu_api_key: Option<String>,
     pub baidu_secret_key: Option<String>,
 }

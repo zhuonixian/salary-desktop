@@ -1,16 +1,18 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
-  Card, Button, Table, Input, Row, Col, Divider, message, Spin, List, Tag, Radio, Modal,
+  Card, Button, Table, Input, Row, Col, Divider, message, Spin, List, Tag, Radio, Alert,
 } from 'antd';
 import {
   ScanOutlined, CheckCircleOutlined, HistoryOutlined, FolderOpenOutlined, SettingOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { open } from '@tauri-apps/plugin-dialog';
-import { ocrRecognize, getOcrBatches, confirmOcrResult, getOcrSettings, saveOcrSettings } from '@/api';
+import { useNavigate } from 'react-router-dom';
+import { ocrRecognize, getOcrBatches, confirmOcrResult, getOcrSettings } from '@/api';
 import type { AttendanceRecordInput, OcrBatch } from '@/types';
 
 const OcrCenter: React.FC = () => {
+  const navigate = useNavigate();
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [month] = useState(dayjs());
   const [recognizing, setRecognizing] = useState(false);
@@ -22,11 +24,8 @@ const OcrCenter: React.FC = () => {
   const [batches, setBatches] = useState<OcrBatch[]>([]);
   const [batchLoading, setBatchLoading] = useState(false);
 
-  // OCR mode and settings
   const [ocrMode, setOcrMode] = useState<'local' | 'online'>('online');
-  const [showSettings, setShowSettings] = useState(false);
-  const [apiKey, setApiKey] = useState('');
-  const [secretKey, setSecretKey] = useState('');
+  const [ocrProvider, setOcrProvider] = useState('baidu');
 
   const fetchBatches = useCallback(async () => {
     setBatchLoading(true);
@@ -45,8 +44,7 @@ const OcrCenter: React.FC = () => {
     try {
       const settings = await getOcrSettings();
       setOcrMode(settings.ocr_mode as 'local' | 'online');
-      setApiKey(settings.baidu_api_key);
-      setSecretKey(settings.baidu_secret_key);
+      setOcrProvider(settings.ocr_provider);
     } catch {
       // Use defaults
     }
@@ -92,21 +90,6 @@ const OcrCenter: React.FC = () => {
       message.error('识别失败: ' + msg);
     } finally {
       setRecognizing(false);
-    }
-  };
-
-  const handleSaveSettings = async () => {
-    try {
-      await saveOcrSettings({
-        ocr_mode: ocrMode,
-        baidu_api_key: apiKey,
-        baidu_secret_key: secretKey,
-      });
-      message.success('设置已保存');
-      setShowSettings(false);
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      message.error('保存失败: ' + msg);
     }
   };
 
@@ -198,7 +181,6 @@ const OcrCenter: React.FC = () => {
       <Row gutter={24}>
         <Col xs={24} lg={10}>
           <Card title="上传与识别" style={{ marginBottom: 24 }}>
-            {/* OCR Mode Selector */}
             <div style={{ marginBottom: 16, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <Radio.Group
                 value={ocrMode}
@@ -210,17 +192,23 @@ const OcrCenter: React.FC = () => {
                 <Radio.Button value="online">在线识别</Radio.Button>
                 <Radio.Button value="local">本地识别</Radio.Button>
               </Radio.Group>
-              {ocrMode === 'online' && (
-                <Button
-                  type="text"
-                  icon={<SettingOutlined />}
-                  onClick={() => setShowSettings(true)}
-                  size="small"
-                >
-                  设置
-                </Button>
-              )}
+              <Button
+                type="text"
+                icon={<SettingOutlined />}
+                onClick={() => navigate('/rules?tab=system')}
+                size="small"
+              >
+                系统设置
+              </Button>
             </div>
+            {ocrMode === 'online' && (
+              <Alert
+                showIcon
+                type="info"
+                style={{ marginBottom: 16 }}
+                title={`当前在线 OCR 平台：${ocrProvider === 'baidu' ? '百度 OCR' : ocrProvider}`}
+              />
+            )}
 
             <div style={{ textAlign: 'center', padding: '20px 0' }}>
               <Button
@@ -338,43 +326,6 @@ const OcrCenter: React.FC = () => {
         />
       </Card>
 
-      {/* Baidu OCR Settings Modal */}
-      <Modal
-        title="在线 OCR 设置"
-        open={showSettings}
-        onOk={handleSaveSettings}
-        onCancel={() => setShowSettings(false)}
-        okText="保存"
-        cancelText="取消"
-      >
-        <div style={{ marginBottom: 16 }}>
-          <label style={{ display: 'block', marginBottom: 4, fontWeight: 500 }}>
-            百度 OCR API Key
-          </label>
-          <Input
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-            placeholder="输入百度云 API Key"
-          />
-        </div>
-        <div style={{ marginBottom: 16 }}>
-          <label style={{ display: 'block', marginBottom: 4, fontWeight: 500 }}>
-            百度 OCR Secret Key
-          </label>
-          <Input.Password
-            value={secretKey}
-            onChange={(e) => setSecretKey(e.target.value)}
-            placeholder="输入百度云 Secret Key"
-          />
-        </div>
-        <p style={{ color: '#999', fontSize: 12, lineHeight: 1.8 }}>
-          1. 前往 smartapp.baidu.com 注册百度智能云账号
-          <br />
-          2. 创建应用，获取 API Key 和 Secret Key
-          <br />
-          3. 免费额度：1000次/月
-        </p>
-      </Modal>
     </div>
   );
 };

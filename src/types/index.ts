@@ -179,12 +179,14 @@ export interface OcrResult {
 
 export interface OcrSettings {
   ocr_mode: 'local' | 'online';
+  ocr_provider: 'baidu';
   baidu_api_key: string;
   baidu_secret_key: string;
 }
 
 export interface OcrSettingsInput {
   ocr_mode?: 'local' | 'online';
+  ocr_provider?: 'baidu';
   baidu_api_key?: string;
   baidu_secret_key?: string;
 }

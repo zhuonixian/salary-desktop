@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { HashRouter, Routes, Route, useNavigate, useLocation } from 'react-router-dom';
 import { Layout, Menu, DatePicker } from 'antd';
+import type { MenuProps } from 'antd';
 import {
   DashboardOutlined,
   TeamOutlined,
@@ -17,6 +18,7 @@ import {
   CheckSquareOutlined,
   WalletOutlined,
   BarChartOutlined,
+  AppstoreOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import type { Dayjs } from 'dayjs';
@@ -37,27 +39,82 @@ import FinancialAnalysis from '@/pages/FinancialAnalysis';
 
 const { Sider, Header, Content } = Layout;
 
-const menuItems = [
-  { key: '/', label: '首页仪表盘', icon: <DashboardOutlined /> },
-  { key: '/employees', label: '员工管理', icon: <TeamOutlined /> },
-  { key: '/attendance', label: '考勤管理', icon: <CalendarOutlined /> },
-  { key: '/punch-card', label: '打卡表管理', icon: <FormOutlined /> },
-  { key: '/ocr', label: 'OCR识别中心', icon: <ScanOutlined /> },
-  { key: '/invoices', label: '发票管理', icon: <FileTextOutlined /> },
-  { key: '/reimbursements', label: '报销管理', icon: <WalletOutlined /> },
-  { key: '/month-close', label: '月结工作台', icon: <CheckSquareOutlined /> },
-  { key: '/financial-analysis', label: '财务分析', icon: <BarChartOutlined /> },
-  { key: '/rules', label: '规则配置', icon: <SettingOutlined /> },
-  { key: '/salary', label: '工资计算', icon: <CalculatorOutlined /> },
-  { key: '/export', label: '导出中心', icon: <ExportOutlined /> },
-  { key: '/logs', label: '操作日志', icon: <AuditOutlined /> },
+const menuItems: MenuProps['items'] = [
+  {
+    key: 'workbench',
+    label: '工作台',
+    icon: <DashboardOutlined />,
+    children: [
+      { key: '/', label: '首页仪表盘', icon: <DashboardOutlined /> },
+      { key: '/month-close', label: '月结工作台', icon: <CheckSquareOutlined /> },
+      { key: '/financial-analysis', label: '财务分析', icon: <BarChartOutlined /> },
+    ],
+  },
+  {
+    key: 'people-attendance',
+    label: '人员考勤',
+    icon: <TeamOutlined />,
+    children: [
+      { key: '/employees', label: '员工管理', icon: <TeamOutlined /> },
+      { key: '/attendance', label: '考勤管理', icon: <CalendarOutlined /> },
+      { key: '/punch-card', label: '打卡表管理', icon: <FormOutlined /> },
+      { key: '/ocr', label: 'OCR识别中心', icon: <ScanOutlined /> },
+    ],
+  },
+  {
+    key: 'salary-payroll',
+    label: '薪酬核算',
+    icon: <CalculatorOutlined />,
+    children: [
+      { key: '/salary', label: '工资计算', icon: <CalculatorOutlined /> },
+      { key: '/rules', label: '系统设置', icon: <SettingOutlined /> },
+    ],
+  },
+  {
+    key: 'invoice-reimbursement',
+    label: '票据报销',
+    icon: <WalletOutlined />,
+    children: [
+      { key: '/invoices', label: '发票管理', icon: <FileTextOutlined /> },
+      { key: '/reimbursements', label: '报销管理', icon: <WalletOutlined /> },
+    ],
+  },
+  {
+    key: 'output-audit',
+    label: '输出审计',
+    icon: <AppstoreOutlined />,
+    children: [
+      { key: '/export', label: '导出中心', icon: <ExportOutlined /> },
+      { key: '/logs', label: '操作日志', icon: <AuditOutlined /> },
+    ],
+  },
 ];
+
+const menuPathToGroupKey = new Map<string, string>();
+for (const item of menuItems) {
+  if (!item || !('children' in item) || !item.children) continue;
+  for (const child of item.children) {
+    if (!child || !('key' in child) || typeof child.key !== 'string') continue;
+    menuPathToGroupKey.set(child.key, String(item.key));
+  }
+}
+
+const defaultOpenKeys = menuItems
+  .map((item) => String(item?.key ?? ''))
+  .filter(Boolean);
 
 const AppLayout: React.FC = () => {
   const [collapsed, setCollapsed] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
   const [globalMonth, setGlobalMonth] = useState<Dayjs>(dayjs());
+  const [openKeys, setOpenKeys] = useState<string[]>(defaultOpenKeys);
+
+  useEffect(() => {
+    const groupKey = menuPathToGroupKey.get(location.pathname);
+    if (!groupKey || openKeys.includes(groupKey)) return;
+    setOpenKeys((keys) => [...keys, groupKey]);
+  }, [location.pathname, openKeys]);
 
   return (
     <Layout className="app-layout">
@@ -76,7 +133,9 @@ const AppLayout: React.FC = () => {
           theme="dark"
           mode="inline"
           selectedKeys={[location.pathname]}
+          openKeys={collapsed ? [] : openKeys}
           items={menuItems}
+          onOpenChange={(keys) => setOpenKeys(keys as string[])}
           onClick={({ key }) => navigate(key)}
           style={{ borderRight: 0 }}
         />

@@ -1,18 +1,22 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
-  Tabs, Form, InputNumber, Button, Table, message, Spin, Card, Popconfirm,
+  Tabs, Form, InputNumber, Button, Table, message, Spin, Card, Popconfirm, Select, Input, Alert,
 } from 'antd';
 import { SaveOutlined, PlusOutlined, DeleteOutlined } from '@ant-design/icons';
-import { getSalaryRule, saveSalaryRule, getTaxRules, saveTaxRules } from '@/api';
-import type { SalaryRule, TaxRule, TaxRuleInput } from '@/types';
+import { useSearchParams } from 'react-router-dom';
+import { getSalaryRule, saveSalaryRule, getTaxRules, saveTaxRules, getOcrSettings, saveOcrSettings } from '@/api';
+import type { OcrSettingsInput, SalaryRule, TaxRule, TaxRuleInput } from '@/types';
 
 const SalaryRules: React.FC = () => {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeTab = searchParams.get('tab') ?? 'attendance';
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
 
   // 考勤扣款规则 & 社保公积金
   const [ruleForm] = Form.useForm();
   const [ruleId, setRuleId] = useState<number>(0);
+  const [systemForm] = Form.useForm<OcrSettingsInput>();
 
   // 个税税率表
   const [taxRules, setTaxRules] = useState<TaxRuleInput[]>([]);
@@ -59,10 +63,21 @@ const SalaryRules: React.FC = () => {
     }
   }, []);
 
+  const fetchOcrSettings = useCallback(async () => {
+    try {
+      const settings = await getOcrSettings();
+      systemForm.setFieldsValue(settings);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      message.error('获取系统设置失败: ' + msg);
+    }
+  }, [systemForm]);
+
   useEffect(() => {
     fetchRule();
     fetchTaxRules();
-  }, [fetchRule, fetchTaxRules]);
+    fetchOcrSettings();
+  }, [fetchRule, fetchTaxRules, fetchOcrSettings]);
 
   const handleSaveRule = async () => {
     setSaving(true);
@@ -86,6 +101,25 @@ const SalaryRules: React.FC = () => {
       await saveTaxRules(taxRules);
       message.success('税率表保存成功');
       fetchTaxRules();
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      message.error('保存失败: ' + msg);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleSaveSystemSettings = async () => {
+    setSaving(true);
+    try {
+      const values = await systemForm.validateFields();
+      await saveOcrSettings({
+        ...values,
+        baidu_api_key: values.baidu_api_key?.trim(),
+        baidu_secret_key: values.baidu_secret_key?.trim(),
+      });
+      message.success('系统设置保存成功');
+      fetchOcrSettings();
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       message.error('保存失败: ' + msg);
@@ -282,16 +316,71 @@ const SalaryRules: React.FC = () => {
         </div>
       ),
     },
+    {
+      key: 'system',
+      label: '系统设置',
+      children: (
+        <Form
+          form={systemForm}
+          layout="vertical"
+          initialValues={{ ocr_mode: 'online', ocr_provider: 'baidu' }}
+          style={{ maxWidth: 680 }}
+        >
+          <Alert
+            showIcon
+            type="info"
+            style={{ marginBottom: 16 }}
+            title="OCR 接口配置为全局系统设置，OCR识别中心和打卡表识别会使用这里保存的配置。"
+          />
+          <Form.Item name="ocr_mode" label="默认识别模式" rules={[{ required: true }]}>
+            <Select
+              options={[
+                { label: '在线识别', value: 'online' },
+                { label: '本地识别', value: 'local' },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item name="ocr_provider" label="在线 OCR 平台" rules={[{ required: true }]}>
+            <Select
+              options={[
+                { label: '百度 OCR', value: 'baidu' },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item name="baidu_api_key" label="百度 OCR API Key">
+            <Input placeholder="输入百度智能云 API Key" />
+          </Form.Item>
+          <Form.Item name="baidu_secret_key" label="百度 OCR Secret Key">
+            <Input.Password placeholder="输入百度智能云 Secret Key" />
+          </Form.Item>
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 16 }}
+            title="目前在线识别默认使用百度 OCR；后续新增平台时会在“在线 OCR 平台”下拉框中扩展。"
+          />
+          <Form.Item>
+            <Button type="primary" icon={<SaveOutlined />} onClick={handleSaveSystemSettings} loading={saving}>
+              保存系统设置
+            </Button>
+          </Form.Item>
+        </Form>
+      ),
+    },
   ];
 
   return (
     <div>
       <div className="page-header">
-        <span className="page-title">规则配置</span>
+        <span className="page-title">系统设置</span>
       </div>
 
       <Card>
-        <Tabs items={tabItems} />
+        <Tabs
+          activeKey={activeTab}
+          items={tabItems}
+          onChange={(key) => setSearchParams(key === 'attendance' ? {} : { tab: key })}
+        />
       </Card>
     </div>
   );
