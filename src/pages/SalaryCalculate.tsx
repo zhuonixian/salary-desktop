@@ -13,14 +13,13 @@ import {
   getEmployees, getAttendanceRecords, getSalaryRule, getTaxRules,
 } from '@/api';
 import type { SalaryResult, SalaryResultUpdate, SalaryStatus } from '@/types';
+import { SensitiveText } from '@/components/SensitiveText';
 
 const statusColorMap: Record<SalaryStatus, string> = {
   '草稿': 'default',
   '已复核': 'blue',
   '已锁定': 'green',
 };
-
-const fmt = (val?: number | null) => (val ?? 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 const SalaryCalculate: React.FC = () => {
   const [month, setMonth] = useState<Dayjs>(dayjs());
@@ -162,60 +161,60 @@ const SalaryCalculate: React.FC = () => {
     { title: '姓名', dataIndex: 'employee_name', key: 'employee_name', width: 80, fixed: 'left' as const },
     { title: '部门', dataIndex: 'department', key: 'department', width: 80 },
     {
-      title: '基本工资', dataIndex: 'base_salary', key: 'base_salary', width: 100, align: 'right' as const,
-      render: (v: number) => fmt(v),
+      title: '基本工资', dataIndex: 'base_salary', key: 'base_salary', width: 110, align: 'right' as const,
+      render: (v: number) => <SensitiveText type="amount" value={v} />,
     },
     {
-      title: '岗位工资', dataIndex: 'position_salary', key: 'position_salary', width: 100, align: 'right' as const,
-      render: (v: number) => fmt(v),
+      title: '岗位工资', dataIndex: 'position_salary', key: 'position_salary', width: 110, align: 'right' as const,
+      render: (v: number) => <SensitiveText type="amount" value={v} />,
     },
     {
-      title: '绩效工资', dataIndex: 'performance_salary', key: 'performance_salary', width: 100, align: 'right' as const,
-      render: (v: number) => fmt(v),
+      title: '绩效工资', dataIndex: 'performance_salary', key: 'performance_salary', width: 110, align: 'right' as const,
+      render: (v: number) => <SensitiveText type="amount" value={v} />,
     },
     {
-      title: '加班工资', dataIndex: 'overtime_pay', key: 'overtime_pay', width: 100, align: 'right' as const,
-      render: (v: number) => fmt(v),
+      title: '加班工资', dataIndex: 'overtime_pay', key: 'overtime_pay', width: 110, align: 'right' as const,
+      render: (v: number) => <SensitiveText type="amount" value={v} />,
     },
     {
-      title: '餐补', dataIndex: 'meal_allowance', key: 'meal_allowance', width: 80, align: 'right' as const,
-      render: (v: number) => fmt(v),
+      title: '餐补', dataIndex: 'meal_allowance', key: 'meal_allowance', width: 90, align: 'right' as const,
+      render: (v: number) => <SensitiveText type="amount" value={v} />,
     },
     {
-      title: '交通补助', dataIndex: 'transport_allowance', key: 'transport_allowance', width: 90, align: 'right' as const,
-      render: (v: number) => fmt(v),
+      title: '交通补助', dataIndex: 'transport_allowance', key: 'transport_allowance', width: 100, align: 'right' as const,
+      render: (v: number) => <SensitiveText type="amount" value={v} />,
     },
     {
-      title: '其他补助', dataIndex: 'other_allowance', key: 'other_allowance', width: 90, align: 'right' as const,
-      render: (v: number) => fmt(v),
+      title: '其他补助', dataIndex: 'other_allowance', key: 'other_allowance', width: 100, align: 'right' as const,
+      render: (v: number) => <SensitiveText type="amount" value={v} />,
     },
     {
-      title: '应发工资', dataIndex: 'gross_salary', key: 'gross_salary', width: 110, align: 'right' as const,
-      render: (v: number) => <span style={{ fontWeight: 600 }}>{fmt(v)}</span>,
+      title: '应发工资', dataIndex: 'gross_salary', key: 'gross_salary', width: 120, align: 'right' as const,
+      render: (v: number) => <span style={{ fontWeight: 600 }}><SensitiveText type="amount" value={v} /></span>,
     },
     {
-      title: '社保扣款', dataIndex: 'social_insurance', key: 'social_insurance', width: 100, align: 'right' as const,
-      render: (v: number) => fmt(v),
+      title: '社保扣款', dataIndex: 'social_insurance', key: 'social_insurance', width: 110, align: 'right' as const,
+      render: (v: number) => <SensitiveText type="amount" value={v} />,
     },
     {
-      title: '公积金扣款', dataIndex: 'housing_fund', key: 'housing_fund', width: 100, align: 'right' as const,
-      render: (v: number) => fmt(v),
+      title: '公积金扣款', dataIndex: 'housing_fund', key: 'housing_fund', width: 110, align: 'right' as const,
+      render: (v: number) => <SensitiveText type="amount" value={v} />,
     },
     {
-      title: '考勤扣款', dataIndex: 'attendance_deduction', key: 'attendance_deduction', width: 100, align: 'right' as const,
-      render: (v: number) => fmt(v),
+      title: '考勤扣款', dataIndex: 'attendance_deduction', key: 'attendance_deduction', width: 110, align: 'right' as const,
+      render: (v: number) => <SensitiveText type="amount" value={v} />,
     },
     {
-      title: '个税', dataIndex: 'income_tax', key: 'income_tax', width: 90, align: 'right' as const,
-      render: (v: number) => fmt(v),
+      title: '个税', dataIndex: 'income_tax', key: 'income_tax', width: 100, align: 'right' as const,
+      render: (v: number) => <SensitiveText type="amount" value={v} />,
     },
     {
-      title: '其他扣款', dataIndex: 'other_deduction', key: 'other_deduction', width: 90, align: 'right' as const,
-      render: (v: number) => fmt(v),
+      title: '其他扣款', dataIndex: 'other_deduction', key: 'other_deduction', width: 100, align: 'right' as const,
+      render: (v: number) => <SensitiveText type="amount" value={v} />,
     },
     {
-      title: '实发工资', dataIndex: 'net_salary', key: 'net_salary', width: 110, align: 'right' as const, fixed: 'right' as const,
-      render: (v: number) => <span style={{ fontWeight: 600, color: '#52c41a' }}>{fmt(v)}</span>,
+      title: '实发工资', dataIndex: 'net_salary', key: 'net_salary', width: 120, align: 'right' as const, fixed: 'right' as const,
+      render: (v: number) => <span style={{ fontWeight: 600, color: '#52c41a' }}><SensitiveText type="amount" value={v} /></span>,
     },
     {
       title: '状态', dataIndex: 'status', key: 'status', width: 80, fixed: 'right' as const,
@@ -318,11 +317,11 @@ const SalaryCalculate: React.FC = () => {
                   <strong>合计</strong>
                 </Table.Summary.Cell>
                 <Table.Summary.Cell index={10} align="right">
-                  <strong>{fmt(totals.gross)}</strong>
+                  <strong><SensitiveText type="amount" value={totals.gross} /></strong>
                 </Table.Summary.Cell>
                 <Table.Summary.Cell index={11} colSpan={5} />
                 <Table.Summary.Cell index={16} align="right">
-                  <strong style={{ color: '#52c41a' }}>{fmt(totals.net)}</strong>
+                  <strong style={{ color: '#52c41a' }}><SensitiveText type="amount" value={totals.net} /></strong>
                 </Table.Summary.Cell>
                 <Table.Summary.Cell index={17} colSpan={2} />
               </Table.Summary.Row>

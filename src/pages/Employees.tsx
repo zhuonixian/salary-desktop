@@ -11,6 +11,7 @@ import {
   importEmployeesExcel, exportEmployeeImportTemplate,
 } from '@/api';
 import type { Employee, EmployeeInput, EmployeeStatus } from '@/types';
+import { SensitiveText } from '@/components/SensitiveText';
 
 const statusColorMap: Record<EmployeeStatus, string> = {
   '在职': 'green',
@@ -162,30 +163,36 @@ const Employees: React.FC = () => {
     { title: '姓名', dataIndex: 'name', key: 'name', width: 90 },
     { title: '部门', dataIndex: 'department', key: 'department', width: 100 },
     { title: '岗位', dataIndex: 'position', key: 'position', width: 100 },
-    { title: '手机号', dataIndex: 'phone', key: 'phone', width: 130 },
+    {
+      title: '手机号',
+      dataIndex: 'phone',
+      key: 'phone',
+      width: 150,
+      render: (v: string) => <SensitiveText type="phone" value={v} />,
+    },
     {
       title: '基本工资',
       dataIndex: 'base_salary',
       key: 'base_salary',
-      width: 110,
+      width: 130,
       align: 'right' as const,
-      render: (v: number) => v?.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+      render: (v: number) => <SensitiveText type="amount" value={v} />,
     },
     {
       title: '岗位工资',
       dataIndex: 'position_salary',
       key: 'position_salary',
-      width: 110,
+      width: 130,
       align: 'right' as const,
-      render: (v: number) => v?.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+      render: (v: number) => <SensitiveText type="amount" value={v} />,
     },
     {
       title: '绩效工资',
       dataIndex: 'performance_salary',
       key: 'performance_salary',
-      width: 110,
+      width: 130,
       align: 'right' as const,
-      render: (v: number) => v?.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+      render: (v: number) => <SensitiveText type="amount" value={v} />,
     },
     {
       title: '状态',

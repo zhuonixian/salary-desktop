@@ -46,6 +46,7 @@ import type {
   PaymentBatchType,
   PaymentItem,
 } from '@/types';
+import { SensitiveText } from '@/components/SensitiveText';
 
 const { TextArea } = Input;
 
@@ -62,9 +63,6 @@ const statusMeta: Record<PaymentBatchStatus, { text: string; color: string }> = 
 };
 
 const sourceText = (sourceType: string) => (sourceType === 'salary_result' ? '工资' : '报销');
-
-const fmtMoney = (value?: number | null) =>
-  (value ?? 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 const Payments: React.FC = () => {
   const [month, setMonth] = useState<Dayjs>(dayjs());
@@ -254,9 +252,9 @@ const Payments: React.FC = () => {
       title: '金额',
       dataIndex: 'total_amount',
       key: 'total_amount',
-      width: 120,
+      width: 130,
       align: 'right' as const,
-      render: (value: number) => fmtMoney(value),
+      render: (value: number) => <SensitiveText type="amount" value={value} />,
     },
     { title: '付款日期', dataIndex: 'payment_date', key: 'payment_date', width: 110 },
     { title: '备注', dataIndex: 'remark', key: 'remark', ellipsis: true },
@@ -322,15 +320,27 @@ const Payments: React.FC = () => {
     { title: '来源', dataIndex: 'source_type', key: 'source_type', width: 80, render: sourceText },
     { title: '来源ID', dataIndex: 'source_id', key: 'source_id', width: 80 },
     { title: '工号', dataIndex: 'employee_no', key: 'employee_no', width: 100 },
-    { title: '银行账号', dataIndex: 'bank_account', key: 'bank_account', width: 180 },
-    { title: '开户行', dataIndex: 'bank_name', key: 'bank_name', width: 160 },
+    {
+      title: '银行账号',
+      dataIndex: 'bank_account',
+      key: 'bank_account',
+      width: 200,
+      render: (value: string) => <SensitiveText type="bank_card" value={value} />,
+    },
+    {
+      title: '开户行',
+      dataIndex: 'bank_name',
+      key: 'bank_name',
+      width: 180,
+      render: (value: string) => <SensitiveText type="address" value={value} />,
+    },
     {
       title: '金额',
       dataIndex: 'amount',
       key: 'amount',
-      width: 120,
+      width: 130,
       align: 'right' as const,
-      render: (value: number) => fmtMoney(value),
+      render: (value: number) => <SensitiveText type="amount" value={value} />,
     },
     { title: '备注', dataIndex: 'remark', key: 'remark', width: 160 },
   ];
@@ -404,7 +414,7 @@ const Payments: React.FC = () => {
             <Card className="stat-card"><Statistic title="待付款" value={summary.exported} /></Card>
           </Col>
           <Col xs={24} sm={12} lg={6}>
-            <Card className="stat-card"><Statistic title="已付款金额" value={fmtMoney(summary.paidAmount)} prefix="¥" /></Card>
+            <Card className="stat-card"><Statistic title="已付款金额" value={<SensitiveText type="amount" value={summary.paidAmount} />} /></Card>
           </Col>
         </Row>
 
@@ -431,7 +441,7 @@ const Payments: React.FC = () => {
               <Col span={6}><Statistic title="类型" value={typeMeta[detail.batch.batch_type].text} /></Col>
               <Col span={6}><Statistic title="状态" value={statusMeta[detail.batch.status].text} /></Col>
               <Col span={6}><Statistic title="笔数" value={detail.batch.item_count} /></Col>
-              <Col span={6}><Statistic title="总金额" value={fmtMoney(detail.batch.total_amount)} prefix="¥" /></Col>
+              <Col span={6}><Statistic title="总金额" value={<SensitiveText type="amount" value={detail.batch.total_amount} />} /></Col>
             </Row>
             <Table<PaymentItem>
               rowKey="id"

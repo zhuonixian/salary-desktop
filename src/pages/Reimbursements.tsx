@@ -50,6 +50,7 @@ import type {
   ReimbursementInvoice,
   ReimbursementStatus,
 } from '@/types';
+import { SensitiveText } from '@/components/SensitiveText';
 
 const { TextArea } = Input;
 
@@ -65,9 +66,6 @@ const paymentMap: Record<PaymentStatus, { text: string; color: string }> = {
   unpaid: { text: '未付款', color: 'red' },
   paid: { text: '已付款', color: 'green' },
 };
-
-const fmtMoney = (value?: number | null) =>
-  (value ?? 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 const Reimbursements: React.FC = () => {
   const [claims, setClaims] = useState<ReimbursementClaim[]>([]);
@@ -268,9 +266,9 @@ const Reimbursements: React.FC = () => {
       title: '金额',
       dataIndex: 'total_amount',
       key: 'total_amount',
-      width: 120,
+      width: 130,
       align: 'right' as const,
-      render: (value: number) => `¥${fmtMoney(value)}`,
+      render: (value: number) => <SensitiveText type="amount" value={value} />,
     },
     { title: '发票', dataIndex: 'invoice_count', key: 'invoice_count', width: 80, align: 'right' as const },
     {
@@ -349,9 +347,9 @@ const Reimbursements: React.FC = () => {
       title: '金额',
       dataIndex: 'total_amount',
       key: 'total_amount',
-      width: 110,
+      width: 120,
       align: 'right' as const,
-      render: (value: number) => `¥${fmtMoney(value)}`,
+      render: (value: number) => <SensitiveText type="amount" value={value} />,
     },
   ];
 
@@ -370,7 +368,7 @@ const Reimbursements: React.FC = () => {
           <Card className="stat-card"><Statistic title="报销单数" value={claims.length} /></Card>
         </Col>
         <Col xs={24} sm={8}>
-          <Card className="stat-card"><Statistic title="报销金额" value={fmtMoney(totalAmount)} prefix="¥" /></Card>
+          <Card className="stat-card"><Statistic title="报销金额" value={<SensitiveText type="amount" value={totalAmount} />} /></Card>
         </Col>
         <Col xs={24} sm={8}>
           <Card className="stat-card"><Statistic title="待处理" value={pendingCount + unpaidCount} suffix={`审批 ${pendingCount} / 付款 ${unpaidCount}`} /></Card>
@@ -504,7 +502,7 @@ const Reimbursements: React.FC = () => {
           <Space>
             <strong>发票明细</strong>
             <Tag>{selectedInvoiceIds.length} 张</Tag>
-            <Tag color="blue">¥{fmtMoney(selectedTotal)}</Tag>
+            <Tag color="blue"><SensitiveText type="amount" value={selectedTotal} revealable={false} /></Tag>
           </Space>
           <Button size="small" onClick={fetchAvailableInvoices} loading={invoiceLoading}>重新加载</Button>
         </div>
@@ -536,7 +534,7 @@ const Reimbursements: React.FC = () => {
         {detailClaim && (
           <div>
             <Row gutter={16} className="mb-16">
-              <Col span={8}><Statistic title="金额" value={fmtMoney(detailClaim.total_amount)} prefix="¥" /></Col>
+              <Col span={8}><Statistic title="金额" value={<SensitiveText type="amount" value={detailClaim.total_amount} />} /></Col>
               <Col span={8}><Statistic title="发票张数" value={detailClaim.invoice_count} /></Col>
               <Col span={8}><Statistic title="付款状态" value={paymentMap[detailClaim.payment_status]?.text} /></Col>
             </Row>
