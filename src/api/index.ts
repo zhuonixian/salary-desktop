@@ -55,6 +55,10 @@ import type {
   ReimbursementQuery,
   ReimbursementStatus,
   PaymentStatus,
+  SecurityStatus,
+  UnlockResult,
+  RevealResult,
+  LegacyMigrationStatus,
 } from '@/types';
 
 type BackendDashboardSummary = {
@@ -994,4 +998,75 @@ export async function updateReimbursementClaimStatus(
 
 export async function deleteReimbursementClaim(id: number): Promise<boolean> {
   return invoke<boolean>('delete_reimbursement_claim', { id });
+}
+
+// ==================== 安全模块 ====================
+// 命名约定：invoke 参数 key 用 camelCase（Tauri 2 默认会自动转 snake_case），
+// 与本文件中 imagePath / batchId / paymentStatus 等既有调用一致。
+// changePassword 因为 `new` 是 JS 保留字,参数名加 P 后缀做别名。
+
+export async function isSecurityInitialized(): Promise<boolean> {
+  return invoke<boolean>('is_security_initialized');
+}
+
+export async function setupSecurity(
+  password: string,
+  recoveryCode: string,
+  securityQuestion: string,
+  answer: string,
+): Promise<void> {
+  await invoke<void>('setup_security', {
+    password,
+    recoveryCode,
+    securityQuestion,
+    answer,
+  });
+}
+
+export async function unlock(password: string): Promise<UnlockResult> {
+  return invoke<UnlockResult>('unlock', { password });
+}
+
+export async function lockApp(): Promise<void> {
+  await invoke<void>('lock');
+}
+
+export async function getSecurityStatus(): Promise<SecurityStatus> {
+  return invoke<SecurityStatus>('get_security_status');
+}
+
+export async function changePassword(oldPwd: string, newPwd: string): Promise<void> {
+  await invoke<void>('change_password', { old: oldPwd, new: newPwd });
+}
+
+export async function resetPasswordByRecovery(code: string, newPassword: string): Promise<void> {
+  await invoke<void>('reset_password_by_recovery', { code, newPassword });
+}
+
+export async function resetPasswordByQuestion(answer: string, newPassword: string): Promise<void> {
+  await invoke<void>('reset_password_by_question', { answer, newPassword });
+}
+
+export async function updateIdleSettings(enabled: boolean, seconds: number): Promise<void> {
+  await invoke<void>('update_idle_settings', { enabled, seconds });
+}
+
+export async function updateSensitiveRevealSettings(seconds: number): Promise<void> {
+  await invoke<void>('update_sensitive_reveal_settings', { seconds });
+}
+
+export async function revealSensitiveData(password: string): Promise<RevealResult> {
+  return invoke<RevealResult>('reveal_sensitive_data', { password });
+}
+
+export async function getDecryptedInvoiceUrl(invoiceId: number): Promise<string> {
+  return invoke<string>('get_decrypted_invoice_url', { invoiceId });
+}
+
+export async function getLegacyMigrationStatus(): Promise<LegacyMigrationStatus> {
+  return invoke<LegacyMigrationStatus>('get_legacy_migration_status');
+}
+
+export async function migrateLegacyResources(): Promise<void> {
+  await invoke<void>('migrate_legacy_resources');
 }

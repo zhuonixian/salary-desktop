@@ -726,3 +726,35 @@ export interface ReimbursementInvoice {
   total_amount: number;
   issue_date?: string;
 }
+
+// ==================== 安全模块 ====================
+
+// 字段与后端 src-tauri/src/models.rs SecurityStatus 1:1 对齐。
+// snake_case 命名是为了对齐 serde 序列化的 JSON 字段,避免映射层。
+export interface SecurityStatus {
+  initialized: boolean;
+  locked: boolean;
+  failed_attempts: number;
+  lock_until: string | null;
+  idle_lock_enabled: boolean;
+  idle_timeout_seconds: number;
+  sensitive_reveal_seconds: number;
+  migration_status: string | null;
+}
+
+export interface UnlockResult {
+  unlocked: boolean;
+  failed_attempts: number;
+  lock_until: string | null;
+}
+
+export interface RevealResult {
+  expires_at: string;
+}
+
+export interface LegacyMigrationStatus {
+  status: string;
+  total_invoices: number;
+  processed_invoices: number;
+  token_migrated: boolean;
+}
