@@ -17,7 +17,7 @@ import dayjs from 'dayjs';
 import type { Dayjs } from 'dayjs';
 import { useNavigate } from 'react-router-dom';
 import { closeMonth, exportMonthClosePackage, getMonthCloseWorkbench, reopenMonth } from '@/api';
-import { SensitiveText } from '@/components/SensitiveText';
+import { SensitiveStatistic } from '@/components/SensitiveStatistic';
 import type { MonthCloseCheckItem, MonthCloseWorkbench } from '@/types';
 
 const { TextArea } = Input;
@@ -279,17 +279,17 @@ const MonthClose: React.FC = () => {
         <Row gutter={[16, 16]} className="mb-16">
           <Col xs={24} md={8}>
             <Card className="stat-card">
-              <Statistic title="工资应发合计" value={<SensitiveText type="amount" value={summary?.total_salary_cost ?? 0} />} />
+              <SensitiveStatistic title="工资应发合计" value={summary?.total_salary_cost ?? 0} />
             </Card>
           </Col>
           <Col xs={24} md={8}>
             <Card className="stat-card">
-              <Statistic title="发票价税合计" value={<SensitiveText type="amount" value={summary?.total_invoice_amount ?? 0} />} />
+              <SensitiveStatistic title="发票价税合计" value={summary?.total_invoice_amount ?? 0} />
             </Card>
           </Col>
           <Col xs={24} md={8}>
             <Card className="stat-card">
-              <Statistic title="已付款报销" value={<SensitiveText type="amount" value={summary?.paid_reimbursement_amount ?? 0} />} />
+              <SensitiveStatistic title="已付款报销" value={summary?.paid_reimbursement_amount ?? 0} />
             </Card>
           </Col>
         </Row>

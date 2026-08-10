@@ -51,6 +51,7 @@ import type {
   ReimbursementStatus,
 } from '@/types';
 import { SensitiveText } from '@/components/SensitiveText';
+import { SensitiveStatistic } from '@/components/SensitiveStatistic';
 
 const { TextArea } = Input;
 
@@ -368,7 +369,7 @@ const Reimbursements: React.FC = () => {
           <Card className="stat-card"><Statistic title="报销单数" value={claims.length} /></Card>
         </Col>
         <Col xs={24} sm={8}>
-          <Card className="stat-card"><Statistic title="报销金额" value={<SensitiveText type="amount" value={totalAmount} />} /></Card>
+          <Card className="stat-card"><SensitiveStatistic title="报销金额" value={totalAmount} /></Card>
         </Col>
         <Col xs={24} sm={8}>
           <Card className="stat-card"><Statistic title="待处理" value={pendingCount + unpaidCount} suffix={`审批 ${pendingCount} / 付款 ${unpaidCount}`} /></Card>
@@ -534,7 +535,7 @@ const Reimbursements: React.FC = () => {
         {detailClaim && (
           <div>
             <Row gutter={16} className="mb-16">
-              <Col span={8}><Statistic title="金额" value={<SensitiveText type="amount" value={detailClaim.total_amount} />} /></Col>
+              <Col span={8}><SensitiveStatistic title="金额" value={detailClaim.total_amount} /></Col>
               <Col span={8}><Statistic title="发票张数" value={detailClaim.invoice_count} /></Col>
               <Col span={8}><Statistic title="付款状态" value={paymentMap[detailClaim.payment_status]?.text} /></Col>
             </Row>

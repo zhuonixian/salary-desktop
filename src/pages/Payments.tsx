@@ -47,6 +47,7 @@ import type {
   PaymentItem,
 } from '@/types';
 import { SensitiveText } from '@/components/SensitiveText';
+import { SensitiveStatistic } from '@/components/SensitiveStatistic';
 
 const { TextArea } = Input;
 
@@ -414,7 +415,7 @@ const Payments: React.FC = () => {
             <Card className="stat-card"><Statistic title="待付款" value={summary.exported} /></Card>
           </Col>
           <Col xs={24} sm={12} lg={6}>
-            <Card className="stat-card"><Statistic title="已付款金额" value={<SensitiveText type="amount" value={summary.paidAmount} />} /></Card>
+            <Card className="stat-card"><SensitiveStatistic title="已付款金额" value={summary.paidAmount} /></Card>
           </Col>
         </Row>
 
@@ -441,7 +442,7 @@ const Payments: React.FC = () => {
               <Col span={6}><Statistic title="类型" value={typeMeta[detail.batch.batch_type].text} /></Col>
               <Col span={6}><Statistic title="状态" value={statusMeta[detail.batch.status].text} /></Col>
               <Col span={6}><Statistic title="笔数" value={detail.batch.item_count} /></Col>
-              <Col span={6}><Statistic title="总金额" value={<SensitiveText type="amount" value={detail.batch.total_amount} />} /></Col>
+              <Col span={6}><SensitiveStatistic title="总金额" value={detail.batch.total_amount} /></Col>
             </Row>
             <Table<PaymentItem>
               rowKey="id"

@@ -21,6 +21,7 @@ import {
   saveBudget,
 } from '@/api';
 import { SensitiveText } from '@/components/SensitiveText';
+import { SensitiveStatistic } from '@/components/SensitiveStatistic';
 import type {
   BudgetExecution,
   BudgetInput,
@@ -381,7 +382,7 @@ const FinancialAnalysis: React.FC = () => {
             <Card className="stat-card"><Statistic title="超预算项数" value={budgetSummary.overCount} suffix="项" valueStyle={{ color: budgetSummary.overCount > 0 ? '#cf1322' : '#389e0d' }} /></Card>
           </Col>
           <Col xs={24} md={8}>
-            <Card className="stat-card"><Statistic title="超预算金额" value={<SensitiveText type="amount" value={budgetSummary.overAmount} />} valueStyle={{ color: budgetSummary.overAmount > 0 ? '#cf1322' : '#389e0d' }} /></Card>
+            <Card className="stat-card"><SensitiveStatistic title="超预算金额" value={budgetSummary.overAmount} valueStyle={{ color: budgetSummary.overAmount > 0 ? '#cf1322' : '#389e0d' }} /></Card>
           </Col>
           <Col xs={24} md={8}>
             <Card className="stat-card"><Statistic title="最高执行率" value={`${budgetSummary.maxUsage.toFixed(1)}%`} /></Card>
@@ -566,9 +567,9 @@ const MetricCard: React.FC<{
   tone: string;
 }> = ({ title, value = 0, previous = 0, icon, tone }) => (
   <Card className="stat-card" style={{ borderTop: `3px solid ${tone}` }}>
-    <Statistic
+    <SensitiveStatistic
       title={title}
-      value={<SensitiveText type="amount" value={value} />}
+      value={value}
       prefix={icon}
       valueStyle={{ color: tone }}
     />

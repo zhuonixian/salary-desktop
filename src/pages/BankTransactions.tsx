@@ -37,6 +37,7 @@ import {
   queryPaymentBatches,
 } from '@/api';
 import { SensitiveText } from '@/components/SensitiveText';
+import { SensitiveStatistic } from '@/components/SensitiveStatistic';
 import type {
   BankTransaction,
   BankTransactionStatus,
@@ -260,7 +261,7 @@ const BankTransactions: React.FC = () => {
           <Space size={4}>
             <span>{tx.matched_batch_no}</span>
             <span style={{ color: '#8c8c8c' }}>/</span>
-            <SensitiveText type="amount" value={tx.matched_amount} />
+            <SensitiveText type="amount" value={tx.matched_amount ?? 0} />
           </Space>
         ) : (tx.ignore_reason || '-'),
     },
@@ -365,7 +366,7 @@ const BankTransactions: React.FC = () => {
             <Card className="stat-card"><Statistic title="已匹配" value={summary.matched} /></Card>
           </Col>
           <Col xs={24} sm={12} lg={6}>
-            <Card className="stat-card"><Statistic title="支出金额" value={<SensitiveText type="amount" value={summary.expenseAmount} />} /></Card>
+            <Card className="stat-card"><SensitiveStatistic title="支出金额" value={summary.expenseAmount} /></Card>
           </Col>
         </Row>
 

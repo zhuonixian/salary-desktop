@@ -15,6 +15,7 @@ import dayjs from 'dayjs';
 import type { Dayjs } from 'dayjs';
 import { getDashboardSummary, getMonthCloseWorkbench } from '@/api';
 import { SensitiveText } from '@/components/SensitiveText';
+import { SensitiveStatistic } from '@/components/SensitiveStatistic';
 import type { DashboardSummary, MonthCloseCheckItem, MonthCloseWorkbench } from '@/types';
 
 type ChartDatum = {
@@ -248,22 +249,22 @@ const Dashboard: React.FC = () => {
         <Row gutter={[16, 16]} className="mb-16">
           <Col xs={24} sm={12} lg={6}>
             <Card className="stat-card">
-              <Statistic title="应发工资合计" value={<SensitiveText type="amount" value={data.total_gross_salary} />} prefix={<PayCircleOutlined />} valueStyle={{ color: '#1677ff' }} />
+              <SensitiveStatistic title="应发工资合计" value={data.total_gross_salary} prefix={<PayCircleOutlined />} valueStyle={{ color: '#1677ff' }} />
             </Card>
           </Col>
           <Col xs={24} sm={12} lg={6}>
             <Card className="stat-card">
-              <Statistic title="扣款合计" value={<SensitiveText type="amount" value={data.total_deduction} />} prefix={<MinusCircleOutlined />} valueStyle={{ color: '#d4380d' }} />
+              <SensitiveStatistic title="扣款合计" value={data.total_deduction} prefix={<MinusCircleOutlined />} valueStyle={{ color: '#d4380d' }} />
             </Card>
           </Col>
           <Col xs={24} sm={12} lg={6}>
             <Card className="stat-card">
-              <Statistic title="发票价税合计" value={<SensitiveText type="amount" value={closeSummary?.total_invoice_amount ?? 0} />} prefix={<FileTextOutlined />} valueStyle={{ color: '#13a8a8' }} />
+              <SensitiveStatistic title="发票价税合计" value={closeSummary?.total_invoice_amount ?? 0} prefix={<FileTextOutlined />} valueStyle={{ color: '#13a8a8' }} />
             </Card>
           </Col>
           <Col xs={24} sm={12} lg={6}>
             <Card className="stat-card">
-              <Statistic title="已付款报销" value={<SensitiveText type="amount" value={closeSummary?.paid_reimbursement_amount ?? 0} />} prefix={<WalletOutlined />} valueStyle={{ color: '#389e0d' }} />
+              <SensitiveStatistic title="已付款报销" value={closeSummary?.paid_reimbursement_amount ?? 0} prefix={<WalletOutlined />} valueStyle={{ color: '#389e0d' }} />
             </Card>
           </Col>
         </Row>

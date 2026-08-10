@@ -16,6 +16,7 @@ import {
   getEmployees, getDecryptedInvoiceUrl,
 } from '@/api';
 import { SensitiveText } from '@/components/SensitiveText';
+import { SensitiveStatistic } from '@/components/SensitiveStatistic';
 import type {
   Invoice, InvoiceInput, InvoiceOcrPreview, InvoiceQuery,
   InvoiceExpenseType, InvoiceExpenseTypeInput, Employee,
@@ -389,7 +390,7 @@ const Invoices: React.FC = () => {
 
       <Row gutter={16} style={{ marginBottom: 16 }}>
         <Col span={6}><Card><Statistic title="发票张数" value={list.length} /></Card></Col>
-        <Col span={6}><Card><Statistic title="价税合计" value={<SensitiveText type="amount" value={totalAmount} />} /></Card></Col>
+        <Col span={6}><Card><SensitiveStatistic title="价税合计" value={totalAmount} /></Card></Col>
         <Col span={6}><Card><Statistic title="本月去重拦截" value={duplicateCount} /></Card></Col>
       </Row>
 
