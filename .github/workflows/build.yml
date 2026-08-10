@@ -58,6 +58,8 @@ jobs:
           # WiX 要求 build metadata numeric-only 且 ≤65535，
           # 与我们用 +YYYYMMDD 表达日期的策略冲突。
           args: --bundles nsis
+
+  build-linux:
     if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     steps:
