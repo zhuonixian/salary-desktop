@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
+use base64::Engine;
 use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::Value;
@@ -50,23 +51,29 @@ pub fn ocr_recognize(
     mode: &str,
     conn: &Connection,
     resource_dir: Option<&std::path::Path>,
+    sec: Option<&crate::security::SecurityState>,
 ) -> AppResult<OcrResult> {
     match mode {
-        "online" => ocr_recognize_online(image_path, month, conn),
+        "online" => ocr_recognize_online(image_path, month, conn, sec),
         _ => ocr_recognize_local(image_path, month, conn, resource_dir),
     }
 }
 
 // ==================== Online OCR (Baidu API) ====================
 
-fn ocr_recognize_online(image_path: &str, month: &str, conn: &Connection) -> AppResult<OcrResult> {
+fn ocr_recognize_online(
+    image_path: &str,
+    month: &str,
+    conn: &Connection,
+    sec: Option<&crate::security::SecurityState>,
+) -> AppResult<OcrResult> {
     // Read and encode image
     let image_data =
         std::fs::read(image_path).map_err(|e| AppError::Ocr(format!("读取图片失败: {e}")))?;
     let image_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &image_data);
 
     // Get access token
-    let access_token = get_baidu_access_token(conn)?;
+    let access_token = fetch_valid_baidu_access_token(conn, sec)?;
 
     // Call Baidu OCR API
     let url = format!(
@@ -129,9 +136,89 @@ fn ocr_recognize_online(image_path: &str, month: &str, conn: &Connection) -> App
     })
 }
 
-pub(crate) fn get_baidu_access_token(conn: &Connection) -> AppResult<String> {
+/// 读取缓存的百度 access token。
+///
+/// 优先解密读 `baidu_access_token_enc + nonce`(需 DEK 已加载);
+/// 否则 fallback 到旧明文 key `baidu_access_token`,兼容未初始化安全模块或老库。
+pub(crate) fn get_baidu_access_token(
+    conn: &Connection,
+    sec: Option<&crate::security::SecurityState>,
+) -> AppResult<Option<String>> {
+    let enc = get_setting(conn, "baidu_access_token_enc")?;
+    let nonce = get_setting(conn, "baidu_access_token_nonce")?;
+
+    if let (Some(enc_b64), Some(nonce_b64), Some(sec)) = (enc, nonce, sec) {
+        if let Some(dek) = sec.dek() {
+            let cipher = base64::engine::general_purpose::STANDARD
+                .decode(enc_b64.as_bytes())
+                .map_err(|e| AppError::General(format!("base64 解码 token cipher 失败: {e}")))?;
+            let nonce_bytes = base64::engine::general_purpose::STANDARD
+                .decode(nonce_b64.as_bytes())
+                .map_err(|e| AppError::General(format!("base64 解码 token nonce 失败: {e}")))?;
+            if nonce_bytes.len() != 12 {
+                return Err(AppError::General("token nonce 长度异常".into()));
+            }
+            let mut n = [0u8; 12];
+            n.copy_from_slice(&nonce_bytes);
+            let plain = crate::security::decrypt_bytes(&cipher, &n, &dek)?;
+            return Ok(Some(
+                String::from_utf8(plain).map_err(|e| AppError::General(e.to_string()))?,
+            ));
+        }
+    }
+
+    // 旧明文路径(迁移前 / 未初始化安全模块)
+    let plain = get_setting(conn, "baidu_access_token")?;
+    Ok(plain.filter(|s| !s.is_empty()))
+}
+
+/// 写入百度 access token。
+///
+/// DEK 已加载 → 加密写 `baidu_access_token_enc + nonce`,删除旧明文 key;
+/// 否则 → 写旧明文 key(兼容未初始化场景)。
+pub(crate) fn set_baidu_access_token(
+    conn: &Connection,
+    token: &str,
+    sec: Option<&crate::security::SecurityState>,
+) -> AppResult<()> {
+    if let Some(sec) = sec {
+        if let Some(dek) = sec.dek() {
+            let (cipher, nonce) = crate::security::encrypt_bytes(token.as_bytes(), &dek)?;
+            let enc_b64 = base64::engine::general_purpose::STANDARD.encode(&cipher);
+            let nonce_b64 = base64::engine::general_purpose::STANDARD.encode(nonce);
+            set_setting(conn, "baidu_access_token_enc", &enc_b64)?;
+            set_setting(conn, "baidu_access_token_nonce", &nonce_b64)?;
+            // 删除旧明文 token(若存在)
+            conn.execute(
+                "DELETE FROM app_settings WHERE key = 'baidu_access_token'",
+                [],
+            )?;
+            return Ok(());
+        }
+    }
+    set_setting(conn, "baidu_access_token", token)?;
+    Ok(())
+}
+
+/// 清空缓存的百度 access token(110 错误重试场景)。
+/// 同时删除加密版与明文版,保证两条路径下次都重新拉取。
+pub(crate) fn clear_baidu_access_token(conn: &Connection) -> AppResult<()> {
+    conn.execute(
+        "DELETE FROM app_settings \
+         WHERE key IN ('baidu_access_token','baidu_access_token_enc','baidu_access_token_nonce','baidu_token_expires_at')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// 取一个未过期的 access token(优先缓存,过期则向百度刷新)。
+/// DEK 已加载时缓存走加密存储,否则走旧明文 key 兼容路径。
+pub(crate) fn fetch_valid_baidu_access_token(
+    conn: &Connection,
+    sec: Option<&crate::security::SecurityState>,
+) -> AppResult<String> {
     // Check cached token
-    if let Some(token) = get_setting(conn, "baidu_access_token")? {
+    if let Some(token) = get_baidu_access_token(conn, sec)? {
         if let Some(expires_str) = get_setting(conn, "baidu_token_expires_at")? {
             if let Ok(expires) = expires_str.parse::<i64>() {
                 // Refresh 1 day before expiry
@@ -174,7 +261,7 @@ pub(crate) fn get_baidu_access_token(conn: &Connection) -> AppResult<String> {
     let expires_in = token_resp.expires_in.unwrap_or(2592000);
     let expires_at = chrono::Utc::now().timestamp() + expires_in as i64;
 
-    set_setting(conn, "baidu_access_token", &token)?;
+    set_baidu_access_token(conn, &token, sec)?;
     set_setting(conn, "baidu_token_expires_at", &expires_at.to_string())?;
 
     Ok(token)
@@ -596,7 +683,7 @@ pub fn save_ocr_settings(conn: &Connection, data: &OcrSettingsInput) -> AppResul
     }
     // Clear cached token when credentials change
     if data.baidu_api_key.is_some() || data.baidu_secret_key.is_some() {
-        set_setting(conn, "baidu_access_token", "")?;
+        clear_baidu_access_token(conn)?;
     }
     Ok(true)
 }
@@ -611,6 +698,7 @@ pub fn ocr_recognize_punch_card(
     _shift_type: &str,
     mode: &str,
     conn: &Connection,
+    sec: Option<&crate::security::SecurityState>,
 ) -> AppResult<OcrResult> {
     if mode != "online" {
         return Err(AppError::Ocr("打卡表识别目前仅支持在线模式".to_string()));
@@ -622,7 +710,7 @@ pub fn ocr_recognize_punch_card(
     let image_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &image_data);
 
     // Get access token
-    let access_token = get_baidu_access_token(conn)?;
+    let access_token = fetch_valid_baidu_access_token(conn, sec)?;
 
     // Call Baidu accurate OCR API (returns location data per word)
     let url =
@@ -956,4 +1044,97 @@ fn compute_workdays(month: &str, days_in_month: u32) -> Vec<u32> {
         }
     }
     workdays
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::tests::setup_db;
+    use crate::security::{self, SecurityState};
+
+    /// setup_db 不创建 app_settings(只服务 security / invoice 测试),这里补上。
+    fn ensure_app_settings(conn: &rusqlite::Connection) {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT);",
+        )
+        .expect("create app_settings");
+    }
+
+    /// 构造一个已初始化安全模块、DEK 已加载的内存 DB + SecurityState。
+    fn fresh_with_dek() -> (rusqlite::Connection, SecurityState) {
+        let conn = setup_db();
+        ensure_app_settings(&conn);
+        let state = SecurityState::new();
+        security::setup(
+            &conn,
+            &state,
+            "Abcd1234",
+            "RC-AAAA-BBBB-CCCC-DDDD-EEEE-FFFF-GGGG",
+            "你小学班主任姓什么？",
+            "王",
+        )
+        .expect("setup");
+        (conn, state)
+    }
+
+    /// 写入加密 token 后读取，应得到原值；DB 中明文 key 不存在。
+    #[test]
+    fn token_round_trip_encrypted() {
+        let (conn, state) = fresh_with_dek();
+
+        set_baidu_access_token(&conn, "token-abc-123", Some(&state)).expect("set encrypted");
+        let got = get_baidu_access_token(&conn, Some(&state)).expect("get encrypted");
+        assert_eq!(got.as_deref(), Some("token-abc-123"));
+
+        // DB 中不应残留明文 token
+        let plain: Option<String> = conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'baidu_access_token'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .ok();
+        assert!(
+            plain.is_none(),
+            "加密存储后明文 token 必须被清除, 实际: {plain:?}"
+        );
+
+        // enc / nonce 必须存在
+        let enc_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM app_settings WHERE key IN ('baidu_access_token_enc','baidu_access_token_nonce')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(enc_count, 2, "enc + nonce 两条记录必须写入");
+    }
+
+    /// 未初始化（无 DEK）场景：写入与读取都走明文路径，保持向后兼容。
+    #[test]
+    fn token_fallback_to_plain_when_no_dek() {
+        let conn = setup_db(); // 无 security_state 行,无 DEK
+        ensure_app_settings(&conn);
+
+        // sec=None → 明文路径
+        set_baidu_access_token(&conn, "plain-token-xyz", None).expect("set plain");
+        // 明文 key 必须存在
+        let plain: String = conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'baidu_access_token'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap();
+        assert_eq!(plain, "plain-token-xyz");
+
+        // 读回应是同一份明文
+        let got = get_baidu_access_token(&conn, None).expect("get plain");
+        assert_eq!(got.as_deref(), Some("plain-token-xyz"));
+
+        // 即便传了 SecurityState 但 DEK 未加载,也应 fallback 到明文
+        let empty_sec = SecurityState::new();
+        let got2 = get_baidu_access_token(&conn, Some(&empty_sec)).expect("get with empty sec");
+        assert_eq!(got2.as_deref(), Some("plain-token-xyz"));
+    }
 }

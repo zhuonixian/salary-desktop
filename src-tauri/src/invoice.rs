@@ -25,8 +25,13 @@ pub(crate) struct BaiduVatInvoiceResponse {
 }
 
 pub trait InvoiceOcrDbOps {
-    fn get_baidu_access_token(&self) -> AppResult<String>;
-    fn clear_baidu_access_token(&self) -> AppResult<()>;
+    /// 取一个未过期的 access token。`sec` 为 Some 且 DEK 已加载时走加密路径。
+    fn get_baidu_access_token(
+        &self,
+        sec: Option<&SecurityState>,
+    ) -> AppResult<String>;
+    /// 清空缓存的 access token(同时删加密版与明文版)。
+    fn clear_baidu_access_token(&self, sec: Option<&SecurityState>) -> AppResult<()>;
     fn find_invoice_by_dedup_key(
         &self,
         code: Option<&str>,
@@ -35,14 +40,15 @@ pub trait InvoiceOcrDbOps {
 }
 
 impl InvoiceOcrDbOps for Connection {
-    fn get_baidu_access_token(&self) -> AppResult<String> {
-        ocr::get_baidu_access_token(self)
+    fn get_baidu_access_token(
+        &self,
+        sec: Option<&SecurityState>,
+    ) -> AppResult<String> {
+        ocr::fetch_valid_baidu_access_token(self, sec)
     }
 
-    fn clear_baidu_access_token(&self) -> AppResult<()> {
-        db::set_setting(self, "baidu_access_token", "")?;
-        db::set_setting(self, "baidu_token_expires_at", "")?;
-        Ok(())
+    fn clear_baidu_access_token(&self, _sec: Option<&SecurityState>) -> AppResult<()> {
+        ocr::clear_baidu_access_token(self)
     }
 
     fn find_invoice_by_dedup_key(
@@ -55,16 +61,17 @@ impl InvoiceOcrDbOps for Connection {
 }
 
 impl InvoiceOcrDbOps for Mutex<Connection> {
-    fn get_baidu_access_token(&self) -> AppResult<String> {
+    fn get_baidu_access_token(
+        &self,
+        sec: Option<&SecurityState>,
+    ) -> AppResult<String> {
         let conn = self.lock().map_err(|e| AppError::General(e.to_string()))?;
-        ocr::get_baidu_access_token(&conn)
+        ocr::fetch_valid_baidu_access_token(&conn, sec)
     }
 
-    fn clear_baidu_access_token(&self) -> AppResult<()> {
+    fn clear_baidu_access_token(&self, _sec: Option<&SecurityState>) -> AppResult<()> {
         let conn = self.lock().map_err(|e| AppError::General(e.to_string()))?;
-        db::set_setting(&conn, "baidu_access_token", "")?;
-        db::set_setting(&conn, "baidu_token_expires_at", "")?;
-        Ok(())
+        ocr::clear_baidu_access_token(&conn)
     }
 
     fn find_invoice_by_dedup_key(
@@ -92,17 +99,20 @@ impl From<AppError> for InvoiceOcrInnerError {
 
 /// 识别发票。PDF 直接走百度的 `pdf_file` 参数（不依赖系统 poppler），
 /// 图片走 `image` 参数。token 失效（错误码 110）自动清缓存重试一次。
+///
+/// `sec` 为 Some 且 DEK 已加载时,access token 走加密存储路径;否则走旧明文兼容路径。
 pub fn ocr_invoice<D: InvoiceOcrDbOps + ?Sized>(
     image_path: &str,
     db_ops: &D,
+    sec: Option<&SecurityState>,
 ) -> AppResult<InvoiceOcrPreview> {
-    match ocr_invoice_inner(image_path, db_ops) {
+    match ocr_invoice_inner(image_path, db_ops, sec) {
         Ok(preview) => Ok(preview),
         Err(InvoiceOcrInnerError::TokenInvalid(_e)) => {
             // 110 = Access token invalid or no longer valid
             // 通常发生在用户重置 secret 后旧 token 还在 DB 缓存里
-            db_ops.clear_baidu_access_token()?;
-            ocr_invoice_inner(image_path, db_ops)
+            db_ops.clear_baidu_access_token(sec)?;
+            ocr_invoice_inner(image_path, db_ops, sec)
                 .map_err(|retry_error| retry_error.into_app_error())
         }
         Err(InvoiceOcrInnerError::Other(e)) => Err(e),
@@ -120,11 +130,12 @@ impl InvoiceOcrInnerError {
 fn ocr_invoice_inner<D: InvoiceOcrDbOps + ?Sized>(
     image_path: &str,
     db_ops: &D,
+    sec: Option<&SecurityState>,
 ) -> Result<InvoiceOcrPreview, InvoiceOcrInnerError> {
     let file_data = std::fs::read(image_path).map_err(AppError::Io)?;
     let file_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &file_data);
 
-    let token = db_ops.get_baidu_access_token()?;
+    let token = db_ops.get_baidu_access_token(sec)?;
     let url = format!("{BAIDU_VAT_INVOICE_URL}?access_token={token}");
 
     // PDF 用 pdf_file + pdf_file_num=1；图片用 image

@@ -469,12 +469,20 @@ pub fn ocr_recognize(
     mode: Option<String>,
     app: tauri::AppHandle,
     state: tauri::State<'_, Mutex<Connection>>,
+    sec: tauri::State<'_, crate::security::SecurityState>,
 ) -> Result<OcrResult, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     db::ensure_month_open(&conn, &month)?;
     let resource_dir = app.path().resource_dir().ok();
     let mode = mode.as_deref().unwrap_or("local");
-    ocr::ocr_recognize(&image_path, &month, mode, &conn, resource_dir.as_deref())
+    ocr::ocr_recognize(
+        &image_path,
+        &month,
+        mode,
+        &conn,
+        resource_dir.as_deref(),
+        Some(sec.inner()),
+    )
 }
 
 #[tauri::command]
@@ -1162,12 +1170,15 @@ pub fn get_data_safety_status(
 #[tauri::command]
 pub fn backup_database(
     target_dir: String,
+    encrypt: bool,
     app: tauri::AppHandle,
     state: tauri::State<'_, Mutex<Connection>>,
+    sec: tauri::State<'_, crate::security::SecurityState>,
 ) -> Result<DataBackupResult, AppError> {
     let app_data_dir = app_data_dir(&app)?;
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
-    let result = data_safety::backup_database(&conn, &app_data_dir, target_dir.as_ref())?;
+    let result =
+        data_safety::backup_database(&conn, &app_data_dir, target_dir.as_ref(), encrypt, sec.inner())?;
     db::set_setting(&conn, "last_data_backup_at", &result.created_at)?;
     db::set_setting(&conn, "last_data_backup_path", &result.backup_dir)?;
     db::log_operation(
@@ -1185,10 +1196,12 @@ pub fn restore_database(
     backup_dir: String,
     app: tauri::AppHandle,
     state: tauri::State<'_, Mutex<Connection>>,
+    sec: tauri::State<'_, crate::security::SecurityState>,
 ) -> Result<DataRestoreResult, AppError> {
     let app_data_dir = app_data_dir(&app)?;
     let mut conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
-    let result = data_safety::restore_database(&mut conn, &app_data_dir, backup_dir.as_ref())?;
+    let result =
+        data_safety::restore_database(&mut conn, &app_data_dir, backup_dir.as_ref(), sec.inner())?;
     db::log_operation(
         &conn,
         "restore_database",
@@ -1285,11 +1298,12 @@ pub fn ocr_recognize_punch_card(
     shift_type: Option<String>,
     mode: Option<String>,
     conn: tauri::State<'_, Mutex<Connection>>,
+    sec: tauri::State<'_, crate::security::SecurityState>,
 ) -> Result<OcrResult, AppError> {
     let connection = conn.lock().map_err(|e| AppError::General(e.to_string()))?;
     let shift = shift_type.as_deref().unwrap_or("day");
     let m = mode.as_deref().unwrap_or("online");
-    ocr::ocr_recognize_punch_card(&image_path, &month, shift, m, &connection)
+    ocr::ocr_recognize_punch_card(&image_path, &month, shift, m, &connection, Some(sec.inner()))
 }
 
 // ==================== Invoice Commands ====================
@@ -1355,8 +1369,9 @@ pub fn ocr_invoice(
     image_path: String,
     _app: tauri::AppHandle,
     state: tauri::State<'_, Mutex<Connection>>,
+    sec: tauri::State<'_, crate::security::SecurityState>,
 ) -> Result<InvoiceOcrPreview, AppError> {
-    crate::invoice::ocr_invoice(&image_path, state.inner())
+    crate::invoice::ocr_invoice(&image_path, state.inner(), Some(sec.inner()))
 }
 
 #[tauri::command]

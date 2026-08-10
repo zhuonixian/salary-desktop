@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -12,6 +13,7 @@ use crate::errors::{AppError, AppResult};
 use crate::models::{
     DataBackupResult, DataRestoreResult, DataSafetyCheckResult, DataSafetyStatus, DataTableCount,
 };
+use crate::security::{self, SecurityState, BACKUP_MAGIC};
 
 const DATABASE_FILE: &str = "salary.db";
 const INVOICE_DIR: &str = "invoices";
@@ -52,16 +54,75 @@ pub fn backup_database(
     conn: &Connection,
     app_data_dir: &Path,
     target_dir: &Path,
+    encrypt: bool,
+    sec: &SecurityState,
 ) -> AppResult<DataBackupResult> {
-    create_backup(conn, app_data_dir, target_dir, "salary-backup")
+    let dir_result = create_backup(conn, app_data_dir, target_dir, "salary-backup")?;
+
+    if !encrypt {
+        return Ok(dir_result);
+    }
+
+    // 加密模式:把 backup_dir 整树打包成 packed payload,加密后写单个 .enc 文件,
+    // 然后删除临时 backup_dir。最终交付物是 .enc 文件。
+    let dek = sec
+        .dek()
+        .ok_or_else(|| AppError::InvalidParam("请先解锁应用".into()))?;
+    let backup_dir_path = PathBuf::from(&dir_result.backup_dir);
+
+    let payload = pack_backup_dir(&backup_dir_path)?;
+    let (cipher, nonce) = security::encrypt_bytes(&payload, &dek)?;
+
+    let safe_time = Utc::now().format("%Y%m%d-%H%M%S").to_string();
+    let enc_file_name = format!("salary-backup-{safe_time}-{}.enc", Uuid::new_v4().simple());
+    let enc_path = target_dir.join(&enc_file_name);
+
+    let mut buf = Vec::with_capacity(BACKUP_MAGIC.len() + 12 + cipher.len());
+    buf.extend_from_slice(BACKUP_MAGIC);
+    buf.extend_from_slice(&nonce);
+    buf.extend_from_slice(&cipher);
+    fs::write(&enc_path, &buf)?;
+
+    // 删除中间产物 backup_dir
+    let _ = fs::remove_dir_all(&backup_dir_path);
+
+    let created_at = dir_result.created_at.clone();
+    let total_size = file_size(&enc_path);
+    Ok(DataBackupResult {
+        success: true,
+        backup_dir: enc_path.to_string_lossy().to_string(),
+        database_path: enc_path.to_string_lossy().to_string(),
+        invoice_dir: enc_path.to_string_lossy().to_string(),
+        manifest_path: enc_path.to_string_lossy().to_string(),
+        database_size: total_size,
+        invoice_dir_size: 0,
+        created_at,
+    })
 }
 
 pub fn restore_database(
     conn: &mut Connection,
     app_data_dir: &Path,
-    backup_dir: &Path,
+    backup_path: &Path,
+    sec: &SecurityState,
 ) -> AppResult<DataRestoreResult> {
-    validate_backup(backup_dir)?;
+    // 1. 判断加密 / 明文。加密 → 先解密解包到临时 backup_dir,再走目录流程。
+    let effective_backup_dir: PathBuf = if is_encrypted_backup(backup_path)? {
+        let dek = sec
+            .dek()
+            .ok_or_else(|| AppError::InvalidParam("请先输入启动密码解锁应用".into()))?;
+        let temp_unpack = app_data_dir.join(format!(
+            "restore-unpack-{}",
+            Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&temp_unpack)?;
+        unpack_encrypted_backup(backup_path, &dek, &temp_unpack)?;
+        temp_unpack
+    } else {
+        backup_path.to_path_buf()
+    };
+
+    validate_backup(&effective_backup_dir)?;
 
     let auto_backup_parent = app_data_dir.join("backups");
     fs::create_dir_all(&auto_backup_parent)?;
@@ -73,9 +134,9 @@ pub fn restore_database(
     )?;
 
     let database_path = app_data_dir.join(DATABASE_FILE);
-    let backup_database_path = backup_dir.join(DATABASE_FILE);
+    let backup_database_path = effective_backup_dir.join(DATABASE_FILE);
     let invoice_dir = app_data_dir.join(INVOICE_DIR);
-    let backup_invoice_dir = backup_dir.join(INVOICE_DIR);
+    let backup_invoice_dir = effective_backup_dir.join(INVOICE_DIR);
 
     conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
     let old_conn = std::mem::replace(conn, Connection::open_in_memory()?);
@@ -99,16 +160,147 @@ pub fn restore_database(
     db::set_setting(
         conn,
         "last_data_restore_path",
-        &backup_dir.to_string_lossy(),
+        &backup_path.to_string_lossy(),
     )?;
+
+    // 解密恢复场景下,临时解包目录清理(已 copy 完毕)
+    if effective_backup_dir != backup_path {
+        let _ = fs::remove_dir_all(&effective_backup_dir);
+    }
 
     Ok(DataRestoreResult {
         success: true,
         restored_at,
-        restored_from: backup_dir.to_string_lossy().to_string(),
+        restored_from: backup_path.to_string_lossy().to_string(),
         safety_backup_dir: safety_backup.backup_dir,
         restart_recommended: true,
     })
+}
+
+/// 判断给定的文件是否是加密备份:是文件且前 8 字节 = BACKUP_MAGIC。
+fn is_encrypted_backup(path: &Path) -> AppResult<bool> {
+    if !path.is_file() {
+        return Ok(false);
+    }
+    let head = read_head(path, BACKUP_MAGIC.len())?;
+    Ok(head.as_slice() == BACKUP_MAGIC.as_slice())
+}
+
+fn read_head(path: &Path, n: usize) -> AppResult<Vec<u8>> {
+    use std::io::Read;
+    let mut f = fs::File::open(path)?;
+    let mut buf = vec![0u8; n];
+    let read = f.read(&mut buf)?;
+    buf.truncate(read);
+    Ok(buf)
+}
+
+/// 加密备份解密 → 解包到 out_dir。
+fn unpack_encrypted_backup(
+    enc_path: &Path,
+    dek: &[u8; 32],
+    out_dir: &Path,
+) -> AppResult<()> {
+    let data = fs::read(enc_path)?;
+    if data.len() < BACKUP_MAGIC.len() + 12 {
+        return Err(AppError::InvalidParam("加密备份文件损坏".into()));
+    }
+    let mut nonce = [0u8; 12];
+    nonce.copy_from_slice(&data[BACKUP_MAGIC.len()..BACKUP_MAGIC.len() + 12]);
+    let cipher = &data[BACKUP_MAGIC.len() + 12..];
+    let plain = security::decrypt_bytes(cipher, &nonce, dek)?;
+    unpack_payload(&plain, out_dir)
+}
+
+// ===== 备份打包格式(packed format) =====
+//
+// 不引入 zip 依赖,采用自描述的简单拼接格式。加密前整体打包,解密后整体解包。
+//
+// ```text
+// file_count: u32 LE
+// repeated for each file:
+//   relpath_len: u32 LE
+//   relpath_utf8: [u8; relpath_len]    (以 '/' 分隔, 不含前导 /)
+//   data_len:    u64 LE
+//   data:        [u8; data_len]
+// ```
+
+fn pack_backup_dir(backup_dir: &Path) -> AppResult<Vec<u8>> {
+    let mut files: Vec<(PathBuf, Vec<u8>)> = Vec::new();
+    collect_files(backup_dir, backup_dir, &mut files)?;
+
+    let mut out = Vec::new();
+    let count = files.len() as u32;
+    out.extend_from_slice(&count.to_le_bytes());
+    for (rel, data) in &files {
+        let rel_str = rel
+            .to_str()
+            .ok_or_else(|| AppError::General("备份文件路径含非 UTF-8 字符".into()))?
+            .replace('\\', "/");
+        let rel_bytes = rel_str.as_bytes();
+        out.extend_from_slice(&(rel_bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(rel_bytes);
+        out.extend_from_slice(&(data.len() as u64).to_le_bytes());
+        out.extend_from_slice(data);
+    }
+    Ok(out)
+}
+
+fn collect_files(root: &Path, current: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) -> AppResult<()> {
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+        let meta = entry.metadata()?;
+        if meta.is_dir() {
+            collect_files(root, &path, out)?;
+        } else {
+            let rel = path.strip_prefix(root).map_err(|e| AppError::General(e.to_string()))?.to_path_buf();
+            let data = fs::read(&path)?;
+            out.push((rel, data));
+        }
+    }
+    Ok(())
+}
+
+fn unpack_payload(payload: &[u8], out_dir: &Path) -> AppResult<()> {
+    fs::create_dir_all(out_dir)?;
+    let mut cursor = Cursor::new(payload);
+    use std::io::Read;
+    let mut count_buf = [0u8; 4];
+    cursor.read_exact(&mut count_buf)?;
+    let count = u32::from_le_bytes(count_buf);
+
+    for _ in 0..count {
+        let mut len_buf = [0u8; 4];
+        cursor.read_exact(&mut len_buf)?;
+        let relpath_len = u32::from_le_bytes(len_buf) as usize;
+        if relpath_len > 4096 {
+            return Err(AppError::General("备份 manifest 路径异常长".into()));
+        }
+        let mut relpath_buf = vec![0u8; relpath_len];
+        cursor.read_exact(&mut relpath_buf)?;
+        let relpath_str = std::str::from_utf8(&relpath_buf)
+            .map_err(|e| AppError::General(format!("备份路径 UTF-8 异常: {e}")))?;
+        // 防路径穿越:不允许 .. 段
+        if relpath_str.contains("..") || relpath_str.starts_with('/') {
+            return Err(AppError::InvalidParam(format!(
+                "备份包含非法路径: {relpath_str}"
+            )));
+        }
+
+        let mut data_len_buf = [0u8; 8];
+        cursor.read_exact(&mut data_len_buf)?;
+        let data_len = u64::from_le_bytes(data_len_buf) as usize;
+        let mut data = vec![0u8; data_len];
+        cursor.read_exact(&mut data)?;
+
+        let dst = out_dir.join(relpath_str);
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&dst, &data)?;
+    }
+    Ok(())
 }
 
 pub fn verify_database(conn: &Connection) -> AppResult<DataSafetyCheckResult> {
@@ -351,28 +543,54 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::security::{self, SecurityState};
 
     fn temp_dir(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("salary-desktop-{name}-{}", Uuid::new_v4().simple()))
     }
 
-    #[test]
-    fn test_backup_database_creates_manifest_and_consistent_db() {
-        let app_dir = temp_dir("backup-app");
-        let backup_parent = temp_dir("backup-out");
+    /// 构造一份有 1 个员工 + 1 张发票的 app_dir,返回 (app_dir, conn)。
+    fn seed_app(name: &str) -> (PathBuf, Connection) {
+        let app_dir = temp_dir(name);
         fs::create_dir_all(&app_dir).unwrap();
-        fs::create_dir_all(&backup_parent).unwrap();
         fs::create_dir_all(app_dir.join(INVOICE_DIR)).unwrap();
-        fs::write(app_dir.join(INVOICE_DIR).join("sample.txt"), "invoice").unwrap();
-
+        fs::write(
+            app_dir.join(INVOICE_DIR).join("sample.txt"),
+            "invoice content",
+        )
+        .unwrap();
         let conn = db::init_db(&app_dir.to_string_lossy()).unwrap();
         conn.execute(
-            "INSERT INTO employees (employee_no, name, status, created_at, updated_at) VALUES ('E001', '张三', 'active', 'now', 'now')",
+            "INSERT INTO employees (employee_no, name, status, created_at, updated_at) \
+             VALUES ('E001', '张三', 'active', 'now', 'now')",
             [],
         )
         .unwrap();
+        (app_dir, conn)
+    }
 
-        let result = backup_database(&conn, &app_dir, &backup_parent).unwrap();
+    fn init_security(conn: &Connection) -> SecurityState {
+        let state = SecurityState::new();
+        security::setup(
+            conn,
+            &state,
+            "Abcd1234",
+            "RC-AAAA-BBBB-CCCC-DDDD-EEEE-FFFF-GGGG",
+            "你小学班主任姓什么？",
+            "王",
+        )
+        .expect("setup");
+        state
+    }
+
+    #[test]
+    fn test_backup_database_creates_manifest_and_consistent_db() {
+        let (app_dir, conn) = seed_app("backup-app");
+        let backup_parent = temp_dir("backup-out");
+        fs::create_dir_all(&backup_parent).unwrap();
+        let sec = SecurityState::new(); // 未初始化, 仅占位
+
+        let result = backup_database(&conn, &app_dir, &backup_parent, false, &sec).unwrap();
         assert!(Path::new(&result.manifest_path).exists());
         assert!(Path::new(&result.database_path).exists());
         assert!(Path::new(&result.invoice_dir).join("sample.txt").exists());
@@ -385,6 +603,136 @@ mod tests {
 
         let _ = fs::remove_dir_all(app_dir);
         let _ = fs::remove_dir_all(backup_parent);
+    }
+
+    /// 加密备份的产物必须是单个 .enc 文件,且前 8 字节 = BACKUP_MAGIC。
+    #[test]
+    fn backup_with_encrypt_produces_enc_file_with_magic() {
+        let (app_dir, conn) = seed_app("backup-enc-app");
+        let backup_parent = temp_dir("backup-enc-out");
+        fs::create_dir_all(&backup_parent).unwrap();
+        let sec = init_security(&conn);
+
+        let result = backup_database(&conn, &app_dir, &backup_parent, true, &sec).unwrap();
+
+        // 加密模式下 backup_dir 字段指向最终 .enc 文件
+        let enc_path = Path::new(&result.backup_dir);
+        assert!(
+            enc_path.is_file(),
+            "加密备份应产出文件而非目录: {}",
+            enc_path.display()
+        );
+        let head = fs::read(enc_path).unwrap();
+        assert!(
+            head.len() >= 8,
+            "加密文件过短: {} bytes",
+            head.len()
+        );
+        assert_eq!(
+            &head[..8],
+            crate::security::BACKUP_MAGIC.as_slice(),
+            "加密备份必须以 BACKUP_MAGIC 开头"
+        );
+
+        let _ = fs::remove_dir_all(app_dir);
+        let _ = fs::remove_dir_all(backup_parent);
+    }
+
+    /// 旧版明文备份(目录形式)仍能被 restore_database 恢复。
+    #[test]
+    fn restore_handles_plain_backup() {
+        let (src_app, src_conn) = seed_app("plain-src");
+        let backup_parent = temp_dir("plain-backup");
+        let dst_app = temp_dir("plain-dst");
+        fs::create_dir_all(&backup_parent).unwrap();
+        fs::create_dir_all(&dst_app).unwrap();
+        let sec = SecurityState::new();
+
+        // 1. 用 src 数据库生成明文备份目录
+        let backup_result =
+            backup_database(&src_conn, &src_app, &backup_parent, false, &sec).unwrap();
+        let backup_dir = PathBuf::from(&backup_result.backup_dir);
+        assert!(backup_dir.is_dir(), "明文备份应是目录");
+
+        // 2. 在 dst_app 上初始化空 DB(便于验证恢复覆盖)
+        let mut dst_conn = db::init_db(&dst_app.to_string_lossy()).unwrap();
+
+        // 3. 恢复
+        let r = restore_database(&mut dst_conn, &dst_app, &backup_dir, &sec).unwrap();
+        assert!(r.success);
+
+        // 4. 验证 dst_app/salary.db 中有员工数据
+        let dst_db = dst_app.join(DATABASE_FILE);
+        let check_conn = Connection::open(&dst_db).unwrap();
+        let count: i64 = check_conn
+            .query_row("SELECT COUNT(*) FROM employees", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "明文备份恢复后必须有 1 条员工记录");
+
+        let _ = fs::remove_dir_all(src_app);
+        let _ = fs::remove_dir_all(backup_parent);
+        let _ = fs::remove_dir_all(dst_app);
+    }
+
+    /// 加密备份 + DEK 已加载 → 恢复成功。
+    #[test]
+    fn restore_handles_encrypted_backup() {
+        let (src_app, src_conn) = seed_app("enc-src");
+        let backup_parent = temp_dir("enc-backup");
+        let dst_app = temp_dir("enc-dst");
+        fs::create_dir_all(&backup_parent).unwrap();
+        fs::create_dir_all(&dst_app).unwrap();
+
+        let sec = init_security(&src_conn);
+
+        // 1. 加密备份
+        let backup_result =
+            backup_database(&src_conn, &src_app, &backup_parent, true, &sec).unwrap();
+        let enc_file = PathBuf::from(&backup_result.backup_dir);
+        assert!(enc_file.is_file(), "加密备份应产出 .enc 文件");
+
+        // 2. dst_app 上初始化空 DB,然后恢复(同一份 SecurityState,DEK 仍在内存)
+        let mut dst_conn = db::init_db(&dst_app.to_string_lossy()).unwrap();
+        let r = restore_database(&mut dst_conn, &dst_app, &enc_file, &sec).unwrap();
+        assert!(r.success);
+
+        // 3. 验证 dst_app/salary.db 中有员工数据
+        let dst_db = dst_app.join(DATABASE_FILE);
+        let check_conn = Connection::open(&dst_db).unwrap();
+        let count: i64 = check_conn
+            .query_row("SELECT COUNT(*) FROM employees", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "加密备份恢复后必须有 1 条员工记录");
+
+        let _ = fs::remove_dir_all(src_app);
+        let _ = fs::remove_dir_all(backup_parent);
+        let _ = fs::remove_dir_all(dst_app);
+    }
+
+    /// DEK 未加载时,加密备份恢复必须失败。
+    #[test]
+    fn restore_encrypted_without_dek_fails() {
+        let (src_app, src_conn) = seed_app("enc-nodek-src");
+        let backup_parent = temp_dir("enc-nodek-backup");
+        let dst_app = temp_dir("enc-nodek-dst");
+        fs::create_dir_all(&backup_parent).unwrap();
+        fs::create_dir_all(&dst_app).unwrap();
+
+        let sec_loaded = init_security(&src_conn);
+        // 加密备份
+        let backup_result =
+            backup_database(&src_conn, &src_app, &backup_parent, true, &sec_loaded).unwrap();
+        let enc_file = PathBuf::from(&backup_result.backup_dir);
+
+        // 切换到一个全新的 SecurityState(DEK 未加载)
+        let sec_locked = SecurityState::new();
+        let mut dst_conn = db::init_db(&dst_app.to_string_lossy()).unwrap();
+        let r = restore_database(&mut dst_conn, &dst_app, &enc_file, &sec_locked);
+        assert!(r.is_err(), "DEK 未加载时加密备份恢复必须失败");
+
+        let _ = fs::remove_dir_all(src_app);
+        let _ = fs::remove_dir_all(backup_parent);
+        let _ = fs::remove_dir_all(dst_app);
     }
 
     #[test]
