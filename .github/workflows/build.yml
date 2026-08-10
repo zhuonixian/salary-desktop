@@ -31,6 +31,19 @@ jobs:
       - name: Install frontend dependencies
         run: npm install
 
+      - name: Inject build date into version
+        shell: bash
+        run: |
+          BUILD_DATE=$(date +%Y%m%d)
+          TAG_NO_V=${GITHUB_REF_NAME#v}
+          echo "Injecting build date ${BUILD_DATE} into version ${TAG_NO_V}"
+          # Cargo.toml: version = "x.y.z" → "x.y.z+YYYYMMDD"
+          sed -i "s|^version = \".*\"|version = \"${TAG_NO_V}+${BUILD_DATE}\"|" src-tauri/Cargo.toml
+          # tauri.conf.json: "version": "x.y.z" → "x.y.z+YYYYMMDD"
+          sed -i "s|\"version\": \".*\"|\"version\": \"${TAG_NO_V}+${BUILD_DATE}\"|" src-tauri/tauri.conf.json
+          echo "--- Cargo.toml ---"; grep '^version' src-tauri/Cargo.toml
+          echo "--- tauri.conf.json ---"; grep '"version"' src-tauri/tauri.conf.json
+
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:

@@ -1,6 +1,6 @@
 [package]
 name = "salary-desktop"
-version = "0.1.0"
+version = "0.4.1"
 description = "工资核算桌面工具"
 authors = ["you"]
 license = ""
