@@ -8,8 +8,8 @@ mod legacy_migration;
 mod models;
 mod ocr;
 mod salary;
-mod security_commands;
 pub mod security;
+mod security_commands;
 
 use std::io::Write;
 use std::sync::Mutex;
@@ -55,6 +55,19 @@ pub fn run() {
     diag("setting up setup callback...");
     builder = builder.setup(|app| {
         diag("setup() callback entered");
+
+        // 启动时清理上次崩溃可能残留的发票预览目录（仅清理我们自己的子目录，
+        // 不触碰 temp_dir 顶层其它内容）。
+        let preview_dir = std::env::temp_dir().join("salary-desktop-preview");
+        if preview_dir.exists() {
+            diag(&format!(
+                "cleaning stale preview dir: {}",
+                preview_dir.display()
+            ));
+            if let Err(e) = std::fs::remove_dir_all(&preview_dir) {
+                diag(&format!("WARNING: remove_dir_all(preview_dir) failed: {e}"));
+            }
+        }
 
         // Initialize database
         let app_data_dir = match app.path().app_data_dir() {
@@ -201,5 +214,12 @@ pub fn run() {
     match builder.run(tauri::generate_context!()) {
         Ok(_) => diag("builder.run() returned normally"),
         Err(e) => diag(&format!("builder.run() ERROR: {e}")),
+    }
+
+    // 应用退出后清理发票预览目录，避免临时解密文件长期堆积。
+    let preview_dir = std::env::temp_dir().join("salary-desktop-preview");
+    if preview_dir.exists() {
+        diag("cleaning preview dir on exit");
+        let _ = std::fs::remove_dir_all(&preview_dir);
     }
 }

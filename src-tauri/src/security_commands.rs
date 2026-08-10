@@ -38,7 +38,14 @@ pub fn setup_security(
     sec: State<'_, SecurityState>,
 ) -> AppResult<()> {
     let conn = lock_conn(&state)?;
-    security::setup(&conn, &sec, &password, &recovery_code, &security_question, &answer)
+    security::setup(
+        &conn,
+        &sec,
+        &password,
+        &recovery_code,
+        &security_question,
+        &answer,
+    )
 }
 
 /// 用密码解锁。成功 → DEK 载入内存；失败 → 失败计数 +1，达到上限写 lock_until。

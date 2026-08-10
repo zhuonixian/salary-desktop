@@ -4494,7 +4494,8 @@ pub mod tests {
     #[test]
     fn test_insert_and_find_invoice() {
         let conn = setup_db();
-        let inv = insert_invoice(&conn, &sample_input("12345", "67890"), "/stored/x.pdf", 0).unwrap();
+        let inv =
+            insert_invoice(&conn, &sample_input("12345", "67890"), "/stored/x.pdf", 0).unwrap();
         assert_eq!(inv.invoice_code.as_deref(), Some("12345"));
         let found = find_invoice_by_dedup_key(&conn, Some("12345"), "67890").unwrap();
         assert!(found.is_some());
@@ -5603,11 +5604,9 @@ pub mod tests {
     fn legacy_migration_state_table_exists() {
         let conn = setup_db();
         let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM legacy_migration_state",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM legacy_migration_state", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(count, 0);
     }

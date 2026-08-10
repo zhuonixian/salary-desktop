@@ -345,15 +345,17 @@ mod tests {
 
         // 解密回原 token
         use base64::Engine;
-        let cipher = base64::engine::general_purpose::STANDARD.decode(&enc).unwrap();
-        let nonce_bytes =
-            base64::engine::general_purpose::STANDARD.decode(&nonce_b64).unwrap();
+        let cipher = base64::engine::general_purpose::STANDARD
+            .decode(&enc)
+            .unwrap();
+        let nonce_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&nonce_b64)
+            .unwrap();
         assert_eq!(nonce_bytes.len(), 12, "nonce 必须 12 字节");
         let mut nonce = [0u8; 12];
         nonce.copy_from_slice(&nonce_bytes);
         let dek = state.dek().unwrap();
-        let plain_token =
-            crate::security::decrypt_bytes(&cipher, &nonce, &dek).expect("decrypt");
+        let plain_token = crate::security::decrypt_bytes(&cipher, &nonce, &dek).expect("decrypt");
         assert_eq!(plain_token, b"token-PLAIN-xyz");
 
         // token_migrated=1

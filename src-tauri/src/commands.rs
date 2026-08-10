@@ -1177,8 +1177,13 @@ pub fn backup_database(
 ) -> Result<DataBackupResult, AppError> {
     let app_data_dir = app_data_dir(&app)?;
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
-    let result =
-        data_safety::backup_database(&conn, &app_data_dir, target_dir.as_ref(), encrypt, sec.inner())?;
+    let result = data_safety::backup_database(
+        &conn,
+        &app_data_dir,
+        target_dir.as_ref(),
+        encrypt,
+        sec.inner(),
+    )?;
     db::set_setting(&conn, "last_data_backup_at", &result.created_at)?;
     db::set_setting(&conn, "last_data_backup_path", &result.backup_dir)?;
     db::log_operation(
@@ -1303,7 +1308,14 @@ pub fn ocr_recognize_punch_card(
     let connection = conn.lock().map_err(|e| AppError::General(e.to_string()))?;
     let shift = shift_type.as_deref().unwrap_or("day");
     let m = mode.as_deref().unwrap_or("online");
-    ocr::ocr_recognize_punch_card(&image_path, &month, shift, m, &connection, Some(sec.inner()))
+    ocr::ocr_recognize_punch_card(
+        &image_path,
+        &month,
+        shift,
+        m,
+        &connection,
+        Some(sec.inner()),
+    )
 }
 
 // ==================== Invoice Commands ====================

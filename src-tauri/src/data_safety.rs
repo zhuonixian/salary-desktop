@@ -111,10 +111,7 @@ pub fn restore_database(
         let dek = sec
             .dek()
             .ok_or_else(|| AppError::InvalidParam("请先输入启动密码解锁应用".into()))?;
-        let temp_unpack = app_data_dir.join(format!(
-            "restore-unpack-{}",
-            Uuid::new_v4().simple()
-        ));
+        let temp_unpack = app_data_dir.join(format!("restore-unpack-{}", Uuid::new_v4().simple()));
         fs::create_dir_all(&temp_unpack)?;
         unpack_encrypted_backup(backup_path, &dek, &temp_unpack)?;
         temp_unpack
@@ -196,11 +193,7 @@ fn read_head(path: &Path, n: usize) -> AppResult<Vec<u8>> {
 }
 
 /// 加密备份解密 → 解包到 out_dir。
-fn unpack_encrypted_backup(
-    enc_path: &Path,
-    dek: &[u8; 32],
-    out_dir: &Path,
-) -> AppResult<()> {
+fn unpack_encrypted_backup(enc_path: &Path, dek: &[u8; 32], out_dir: &Path) -> AppResult<()> {
     let data = fs::read(enc_path)?;
     if data.len() < BACKUP_MAGIC.len() + 12 {
         return Err(AppError::InvalidParam("加密备份文件损坏".into()));
@@ -254,7 +247,10 @@ fn collect_files(root: &Path, current: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>)
         if meta.is_dir() {
             collect_files(root, &path, out)?;
         } else {
-            let rel = path.strip_prefix(root).map_err(|e| AppError::General(e.to_string()))?.to_path_buf();
+            let rel = path
+                .strip_prefix(root)
+                .map_err(|e| AppError::General(e.to_string()))?
+                .to_path_buf();
             let data = fs::read(&path)?;
             out.push((rel, data));
         }
@@ -623,11 +619,7 @@ mod tests {
             enc_path.display()
         );
         let head = fs::read(enc_path).unwrap();
-        assert!(
-            head.len() >= 8,
-            "加密文件过短: {} bytes",
-            head.len()
-        );
+        assert!(head.len() >= 8, "加密文件过短: {} bytes", head.len());
         assert_eq!(
             &head[..8],
             crate::security::BACKUP_MAGIC.as_slice(),

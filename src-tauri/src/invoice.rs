@@ -26,10 +26,7 @@ pub(crate) struct BaiduVatInvoiceResponse {
 
 pub trait InvoiceOcrDbOps {
     /// 取一个未过期的 access token。`sec` 为 Some 且 DEK 已加载时走加密路径。
-    fn get_baidu_access_token(
-        &self,
-        sec: Option<&SecurityState>,
-    ) -> AppResult<String>;
+    fn get_baidu_access_token(&self, sec: Option<&SecurityState>) -> AppResult<String>;
     /// 清空缓存的 access token(同时删加密版与明文版)。
     fn clear_baidu_access_token(&self, sec: Option<&SecurityState>) -> AppResult<()>;
     fn find_invoice_by_dedup_key(
@@ -40,10 +37,7 @@ pub trait InvoiceOcrDbOps {
 }
 
 impl InvoiceOcrDbOps for Connection {
-    fn get_baidu_access_token(
-        &self,
-        sec: Option<&SecurityState>,
-    ) -> AppResult<String> {
+    fn get_baidu_access_token(&self, sec: Option<&SecurityState>) -> AppResult<String> {
         ocr::fetch_valid_baidu_access_token(self, sec)
     }
 
@@ -61,10 +55,7 @@ impl InvoiceOcrDbOps for Connection {
 }
 
 impl InvoiceOcrDbOps for Mutex<Connection> {
-    fn get_baidu_access_token(
-        &self,
-        sec: Option<&SecurityState>,
-    ) -> AppResult<String> {
+    fn get_baidu_access_token(&self, sec: Option<&SecurityState>) -> AppResult<String> {
         let conn = self.lock().map_err(|e| AppError::General(e.to_string()))?;
         ocr::fetch_valid_baidu_access_token(&conn, sec)
     }
@@ -326,11 +317,7 @@ pub fn save_invoice(
     // 复制原图到应用目录
     let (target_path, image_encrypted) = match input.image_path.as_deref() {
         Some(src) if !src.is_empty() => {
-            let copied = copy_image_to_app_dir(
-                src,
-                input.belong_month.as_deref(),
-                app_data_dir,
-            )?;
+            let copied = copy_image_to_app_dir(src, input.belong_month.as_deref(), app_data_dir)?;
             let encrypted = encrypt_image_if_unlocked(&copied, sec)?;
             (Some(copied), encrypted)
         }
@@ -387,11 +374,7 @@ pub fn save_invoice_with_mutex(
 
     let (target_path, image_encrypted) = match input.image_path.as_deref() {
         Some(src) if !src.is_empty() => {
-            let copied = copy_image_to_app_dir(
-                src,
-                input.belong_month.as_deref(),
-                app_data_dir,
-            )?;
+            let copied = copy_image_to_app_dir(src, input.belong_month.as_deref(), app_data_dir)?;
             let encrypted = encrypt_image_if_unlocked(&copied, sec)?;
             (Some(copied), encrypted)
         }
@@ -584,10 +567,7 @@ pub(crate) fn copy_image_to_app_dir(
 /// 若传入 SecurityState 且 DEK 已加载，则对归档后的发票文件就地加密（先写 .enc.tmp 再 rename 替换）。
 /// 返回 1 表示加密成功；返回 0 表示未加密（DEK 未加载或无 sec）。
 /// 加密失败时返回原始错误，避免给用户留下"已加密"的假象。
-fn encrypt_image_if_unlocked(
-    archived_path: &str,
-    sec: Option<&SecurityState>,
-) -> AppResult<i64> {
+fn encrypt_image_if_unlocked(archived_path: &str, sec: Option<&SecurityState>) -> AppResult<i64> {
     let Some(sec) = sec else {
         return Ok(0);
     };
@@ -1041,12 +1021,8 @@ mod business_tests {
         // 用同一 DEK 应能解密回原文
         let dek = sec.dek().expect("dek present");
         let restored_tmp = tmp.join(format!("task7_dec_{}.bin", std::process::id()));
-        security::decrypt_file(
-            std::path::Path::new(archived),
-            &restored_tmp,
-            &dek,
-        )
-        .expect("decrypt_file must round-trip");
+        security::decrypt_file(std::path::Path::new(archived), &restored_tmp, &dek)
+            .expect("decrypt_file must round-trip");
         let restored = std::fs::read(&restored_tmp).unwrap();
         assert_eq!(restored, plain, "decrypted content must match original");
         let _ = std::fs::remove_file(&restored_tmp);

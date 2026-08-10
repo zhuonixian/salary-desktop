@@ -23,9 +23,9 @@ import {
 } from '@/api';
 import type { SecurityStatus } from '@/types';
 
-// 最大尝试次数与后端 security.rs MAX_FAILED_ATTEMPTS 对齐。
+// 最大尝试次数与后端 security.rs MAX_ATTEMPTS 对齐。
 // 这里仅用于错误消息文案，不参与锁定判定逻辑（以后端 lock_until 为准）。
-const MAX_FAILED_ATTEMPTS = 5;
+const MAX_ATTEMPTS = 5;
 
 export interface SecurityContextValue {
   isInitialized: boolean;
@@ -127,7 +127,7 @@ export function SecurityProvider({ children }: { children: ReactNode }) {
     } catch (err) {
       console.error('[SecurityContext] unlock 失败后刷新状态出错:', err);
     }
-    const remaining = Math.max(0, MAX_FAILED_ATTEMPTS - r.failed_attempts);
+    const remaining = Math.max(0, MAX_ATTEMPTS - r.failed_attempts);
     throw new Error(`密码错误，剩余 ${remaining} 次尝试`);
   }, [refreshStatus]);
 

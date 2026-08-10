@@ -1,9 +1,12 @@
 use crate::errors::{AppError, AppResult};
 use crate::models::UnlockResult;
-use aes_gcm::{aead::{Aead, KeyInit}, Aes256Gcm, Nonce};
+use aes_gcm::{
+    aead::{Aead, KeyInit},
+    Aes256Gcm, Nonce,
+};
 use argon2::{Algorithm, Argon2, Params, Version};
 use chrono::{TimeDelta, Utc};
-use rand::{RngCore, rngs::OsRng};
+use rand::{rngs::OsRng, RngCore};
 use rusqlite::{params, Connection};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
@@ -133,7 +136,8 @@ impl SecurityState {
     }
 
     fn inner(&self) -> &Mutex<SecurityInner> {
-        self.inner.get_or_init(|| Mutex::new(SecurityInner::default()))
+        self.inner
+            .get_or_init(|| Mutex::new(SecurityInner::default()))
     }
 
     pub fn is_dek_loaded(&self) -> bool {
@@ -144,10 +148,7 @@ impl SecurityState {
     }
 
     pub fn dek(&self) -> Option<ZeroizedKey> {
-        self.inner()
-            .lock()
-            .ok()
-            .and_then(|g| g.dek.clone())
+        self.inner().lock().ok().and_then(|g| g.dek.clone())
     }
 
     pub fn clear_dek(&self) {
@@ -175,9 +176,11 @@ const LOCK_SECS: i64 = 5 * 60;
 
 /// 判断是否已执行过 setup（security_state 中存在唯一一行）。
 pub fn is_initialized(conn: &Connection) -> bool {
-    conn.query_row("SELECT COUNT(*) FROM security_state", [], |r| r.get::<_, i64>(0))
-        .map(|c| c > 0)
-        .unwrap_or(false)
+    conn.query_row("SELECT COUNT(*) FROM security_state", [], |r| {
+        r.get::<_, i64>(0)
+    })
+    .map(|c| c > 0)
+    .unwrap_or(false)
 }
 
 /// 首次启用安全模块：派生 DEK + 三个 KEK（密码 / 找回码 / 答案），
@@ -362,7 +365,9 @@ fn rewrap_dek_for_new_password(
     new_password: &str,
 ) -> AppResult<()> {
     validate_password_strength(new_password)?;
-    let dek = state.dek().ok_or_else(|| AppError::General("DEK 未加载".into()))?;
+    let dek = state
+        .dek()
+        .ok_or_else(|| AppError::General("DEK 未加载".into()))?;
     let pw_salt = gen_salt();
     let pw_kek = derive_kek(new_password, &pw_salt)?;
     let (wrapped, nonce) = wrap_dek(&dek, &pw_kek)?;
@@ -416,8 +421,7 @@ pub fn change_password(
     let salt = hex::decode(&salt_hex).map_err(|e| AppError::General(e.to_string()))?;
     let kek = derive_kek(old, &salt)?;
     let wrapped = hex::decode(&wrapped_hex).map_err(|e| AppError::General(e.to_string()))?;
-    let nonce_bytes =
-        hex::decode(&nonce_hex).map_err(|e| AppError::General(e.to_string()))?;
+    let nonce_bytes = hex::decode(&nonce_hex).map_err(|e| AppError::General(e.to_string()))?;
     if nonce_bytes.len() != 12 {
         return Err(AppError::General("密码 nonce 损坏".into()));
     }
@@ -499,8 +503,7 @@ pub fn reset_password_by_recovery(
     let salt = hex::decode(&salt_hex).map_err(|e| AppError::General(e.to_string()))?;
     let kek = derive_kek(code, &salt)?;
     let wrapped = hex::decode(&wrapped_hex).map_err(|e| AppError::General(e.to_string()))?;
-    let nonce_bytes =
-        hex::decode(&nonce_hex).map_err(|e| AppError::General(e.to_string()))?;
+    let nonce_bytes = hex::decode(&nonce_hex).map_err(|e| AppError::General(e.to_string()))?;
     if nonce_bytes.len() != 12 {
         return Err(AppError::General("恢复码 nonce 损坏".into()));
     }
@@ -555,8 +558,7 @@ pub fn reset_password_by_question(
     let salt = hex::decode(&salt_hex).map_err(|e| AppError::General(e.to_string()))?;
     let kek = derive_kek(answer, &salt)?;
     let wrapped = hex::decode(&wrapped_hex).map_err(|e| AppError::General(e.to_string()))?;
-    let nonce_bytes =
-        hex::decode(&nonce_hex).map_err(|e| AppError::General(e.to_string()))?;
+    let nonce_bytes = hex::decode(&nonce_hex).map_err(|e| AppError::General(e.to_string()))?;
     if nonce_bytes.len() != 12 {
         return Err(AppError::General("安全问题 nonce 损坏".into()));
     }
