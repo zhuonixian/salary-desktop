@@ -54,8 +54,10 @@ jobs:
           releaseBody: 'See the assets to download this version.'
           releaseDraft: true
           prerelease: false
-
-  build-linux:
+          # 仅构建 NSIS installer（.exe），跳过 WiX/MSI：
+          # WiX 要求 build metadata numeric-only 且 ≤65535，
+          # 与我们用 +YYYYMMDD 表达日期的策略冲突。
+          args: --bundles nsis
     if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     steps:
