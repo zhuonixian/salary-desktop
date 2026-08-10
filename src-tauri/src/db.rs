@@ -4352,11 +4352,11 @@ fn generate_reimbursement_claim_no(month: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use rusqlite::Connection;
 
-    fn setup_db() -> Connection {
+    pub fn setup_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("
             CREATE TABLE employees (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT);

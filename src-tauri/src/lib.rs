@@ -88,6 +88,7 @@ pub fn run() {
         };
 
         app.manage(Mutex::new(conn));
+        app.manage(security::SecurityState::new());
         diag("setup() complete, all OK");
         Ok(())
     });
