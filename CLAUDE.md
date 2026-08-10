@@ -35,6 +35,10 @@ npm run lint                             # ESLint
 - **Tauri asset 协议**：`app.security.assetProtocol` 已启用，前端用 `convertFileSrc()` 渲染本地图片/PDF
 - **未签名 Windows 构建**：SmartScreen 拦截，首次运行需手动绕过（见 `docs/windows-install-guide.md`）
 - **Release 物料下载**：draft release 的普通下载可能卡住或拿到半截文件；优先按 `.claude/memory/release-workflow.md` 用 `gh api` 获取 asset 数值 ID 下载到 `dist/`，并用 SHA256 对 GitHub digest 校验。
+- **启动密码**：Argon2id 派生 KEK，三条 KEK（密码/恢复码/安全问题答案）包裹同一 DEK；改密/找回只重包裹不动发票
+- **资源加密**：发票图片就地 AES-GCM-256 加密归档（image_encrypted=1）；备份包可选加密（BACKUP_MAGIC + AES-GCM）；OCR token 加密入库
+- **三层密码体系**：启动密码 → 锁屏（闲置 5min 可配）→ 敏感数据解锁（5min 全局）
+- **Tauri 安全配置**：CSP 收紧、assetProtocol scope 限制 $APPDATA/$TEMP、withGlobalTauri=false
 
 ## Memory References
 
@@ -46,10 +50,15 @@ npm run lint                             # ESLint
 - [命令清单](.claude/memory/commands-reference.md) — 完整开发/测试/发版命令
 - [架构模块](.claude/memory/architecture.md) — 后端模块职责 + 数据流
 - [第三阶段计划](.claude/memory/stage3-local-finance.md) — 本地数据安全、正式月结、付款批次、银行流水、预算异常；完整计划见 `docs/superpowers/plans/2026-08-10-stage3-local-finance.md`
+- [第四阶段安全配置](.claude/memory/stage4-security.md) — 启动密码/锁屏/加密/脱敏/迁移；spec 见 `docs/superpowers/specs/2026-08-10-stage4-security-config-design.md`、plan 见 `docs/superpowers/plans/2026-08-10-stage4-security-config.md`
 
 ## 第三阶段开发
 
 第三阶段以本地轻量财务管理为目标，优先做数据安全中心和正式月结，再推进付款批次、银行流水匹配、预算异常。开发时先读 `.claude/memory/stage3-local-finance.md` 和 `docs/superpowers/plans/2026-08-10-stage3-progress.md`；涉及多模块开发时用 subagent 按互不重叠文件范围协作，由主 agent 统一合并、测试、commit、push。
+
+## 第四阶段开发
+
+第四阶段以本地单机应用访问安全为目标，按 KEK/DEK 加密 → 状态机 → 命令 → 前端 → 脱敏改造 → Tauri 配置收紧 → 全量回归顺序推进。开发时先读 `.claude/memory/stage4-security.md` 和 `docs/superpowers/plans/2026-08-10-stage4-progress.md`；spec 在 `docs/superpowers/specs/2026-08-10-stage4-security-config-design.md`。涉及多模块开发时用 subagent 按互不重叠文件范围协作，由主 agent 统一合并、测试、commit、push。
 
 ## 编码约定
 
