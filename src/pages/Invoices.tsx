@@ -9,6 +9,7 @@ import {
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { open, save } from '@tauri-apps/plugin-dialog';
+import { convertFileSrc } from '@tauri-apps/api/core';
 import {
   getInvoiceExpenseTypes, saveInvoiceExpenseType, deleteInvoiceExpenseType,
   ocrInvoice, saveInvoice, updateInvoice, deleteInvoice, queryInvoices, exportInvoiceList,
@@ -20,16 +21,24 @@ import type {
   InvoiceExpenseType, InvoiceExpenseTypeInput, Employee,
 } from '@/types';
 
-// 发票原图预览：通过 get_decrypted_invoice_url 命令统一处理加密/未加密图片。
-// encrypted=0 时后端返回原始 asset URL；encrypted=1 时后端解密后返回 blob URL。
-function InvoiceImage({ invoiceId, fallback }: { invoiceId: number; fallback?: string }) {
-  const [url, setUrl] = useState<string>(fallback ?? '');
+// 发票原图预览：后端 get_decrypted_invoice_url 统一返回文件系统绝对路径
+// （encrypted=0 直接返回原图路径；encrypted=1 解密落盘后返回临时文件路径）。
+// Tauri 2 webview 默认拦截 file:// 或裸 fs path，前端必须用 convertFileSrc
+// 包装成 asset 协议（tauri://localhost/... 或 asset://...）才能放进 <img>/<iframe>。
+function InvoiceImage({ invoiceId }: { invoiceId: number }) {
+  const [url, setUrl] = useState<string>('');
   useEffect(() => {
     let cancelled = false;
     if (invoiceId > 0) {
       getDecryptedInvoiceUrl(invoiceId)
-        .then((u) => { if (!cancelled) setUrl(u); })
-        .catch(() => { /* fallback 保持空 */ });
+        .then((path) => {
+          if (!cancelled && path) {
+            setUrl(convertFileSrc(path));
+          }
+        })
+        .catch(() => {
+          if (!cancelled) setUrl('');
+        });
     }
     return () => { cancelled = true; };
   }, [invoiceId]);
