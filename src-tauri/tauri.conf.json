@@ -22,7 +22,7 @@
         "fullscreen": false,
         "maximized": true,
         "center": true,
-        "devtools": true
+        "devtools": false
       }
     ],
     "security": {

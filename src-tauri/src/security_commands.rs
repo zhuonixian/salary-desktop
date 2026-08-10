@@ -5,6 +5,7 @@
 //!
 //! 命令命名遵循 snake_case；命令参数顺序约定：业务参数在前，`state`、`sec` 在后。
 
+use crate::db;
 use crate::errors::{AppError, AppResult};
 use crate::models::{LegacyMigrationStatus, RevealResult, SecurityStatus, UnlockResult};
 use crate::security::{self, SecurityState};
@@ -12,6 +13,9 @@ use chrono::Utc;
 use rusqlite::Connection;
 use std::sync::Mutex;
 use tauri::State;
+
+/// 安全事件的 operator 固定标识。出纳单人场景，没有账号体系。
+const SEC_OP_OPERATOR: &str = "security";
 
 /// 取连接锁的统一封装。两行写法比 macro 更直观，调用方拿到的就是 `MutexGuard`。
 fn lock_conn<'a>(
@@ -56,13 +60,56 @@ pub fn unlock(
     sec: State<'_, SecurityState>,
 ) -> AppResult<UnlockResult> {
     let conn = lock_conn(&state)?;
-    security::unlock(&conn, &sec, &password)
+    let r = security::unlock(&conn, &sec, &password);
+    match &r {
+        Ok(out) => {
+            let action = if out.unlocked {
+                "unlock_success"
+            } else {
+                "unlock_failed"
+            };
+            let detail = format!(
+                "{{\"unlocked\":{},\"failed_attempts\":{}}}",
+                out.unlocked, out.failed_attempts
+            );
+            let desc = if out.unlocked {
+                "密码解锁成功".to_string()
+            } else {
+                format!("密码解锁失败，累计失败 {} 次", out.failed_attempts)
+            };
+            let _ = db::log_operation(&conn, action, &desc, SEC_OP_OPERATOR, Some(&detail));
+        }
+        Err(e) => {
+            let detail = format!("{{\"error\":\"{}\"}}", json_escape(&e.to_string()));
+            let _ = db::log_operation(
+                &conn,
+                "unlock_failed",
+                "解锁过程异常",
+                SEC_OP_OPERATOR,
+                Some(&detail),
+            );
+        }
+    }
+    r
 }
 
 /// 锁屏：清空内存中的 DEK。DB 中密文不动。
 #[tauri::command]
-pub fn lock(sec: State<'_, SecurityState>) -> AppResult<()> {
+pub fn lock(
+    state: State<'_, Mutex<Connection>>,
+    sec: State<'_, SecurityState>,
+) -> AppResult<()> {
+    let conn = lock_conn(&state)?;
     security::lock(&sec);
+    let now = Utc::now().to_rfc3339();
+    let detail = format!("{{\"at\":\"{}\"}}", now);
+    let _ = db::log_operation(
+        &conn,
+        "lock",
+        "手动锁屏",
+        SEC_OP_OPERATOR,
+        Some(&detail),
+    );
     Ok(())
 }
 
@@ -123,7 +170,32 @@ pub fn change_password(
     sec: State<'_, SecurityState>,
 ) -> AppResult<()> {
     let conn = lock_conn(&state)?;
-    security::change_password(&conn, &sec, &old, &new)
+    let r = security::change_password(&conn, &sec, &old, &new);
+    match &r {
+        Ok(()) => {
+            let now = Utc::now().to_rfc3339();
+            let detail = format!("{{\"at\":\"{}\"}}", now);
+            let _ = db::log_operation(
+                &conn,
+                "change_password",
+                "修改密码成功",
+                SEC_OP_OPERATOR,
+                Some(&detail),
+            );
+        }
+        Err(e) => {
+            // 旧密码错误等失败也记录，便于审计暴力猜测
+            let detail = format!("{{\"error\":\"{}\"}}", json_escape(&e.to_string()));
+            let _ = db::log_operation(
+                &conn,
+                "change_password_failed",
+                "修改密码失败",
+                SEC_OP_OPERATOR,
+                Some(&detail),
+            );
+        }
+    }
+    r
 }
 
 /// 用恢复码重置密码。失败累计 3 次锁定 15 分钟。
@@ -135,7 +207,31 @@ pub fn reset_password_by_recovery(
     sec: State<'_, SecurityState>,
 ) -> AppResult<()> {
     let conn = lock_conn(&state)?;
-    security::reset_password_by_recovery(&conn, &sec, &code, &new_password)
+    let r = security::reset_password_by_recovery(&conn, &sec, &code, &new_password);
+    match &r {
+        Ok(()) => {
+            let now = Utc::now().to_rfc3339();
+            let detail = format!("{{\"at\":\"{}\"}}", now);
+            let _ = db::log_operation(
+                &conn,
+                "reset_by_recovery",
+                "通过恢复码重置密码成功",
+                SEC_OP_OPERATOR,
+                Some(&detail),
+            );
+        }
+        Err(e) => {
+            let detail = format!("{{\"error\":\"{}\"}}", json_escape(&e.to_string()));
+            let _ = db::log_operation(
+                &conn,
+                "reset_by_recovery_failed",
+                "通过恢复码重置密码失败",
+                SEC_OP_OPERATOR,
+                Some(&detail),
+            );
+        }
+    }
+    r
 }
 
 /// 用安全问题答案重置密码。失败累计 3 次锁定 15 分钟。
@@ -147,7 +243,31 @@ pub fn reset_password_by_question(
     sec: State<'_, SecurityState>,
 ) -> AppResult<()> {
     let conn = lock_conn(&state)?;
-    security::reset_password_by_question(&conn, &sec, &answer, &new_password)
+    let r = security::reset_password_by_question(&conn, &sec, &answer, &new_password);
+    match &r {
+        Ok(()) => {
+            let now = Utc::now().to_rfc3339();
+            let detail = format!("{{\"at\":\"{}\"}}", now);
+            let _ = db::log_operation(
+                &conn,
+                "reset_by_question",
+                "通过安全问题重置密码成功",
+                SEC_OP_OPERATOR,
+                Some(&detail),
+            );
+        }
+        Err(e) => {
+            let detail = format!("{{\"error\":\"{}\"}}", json_escape(&e.to_string()));
+            let _ = db::log_operation(
+                &conn,
+                "reset_by_question_failed",
+                "通过安全问题重置密码失败",
+                SEC_OP_OPERATOR,
+                Some(&detail),
+            );
+        }
+    }
+    r
 }
 
 /// 更新闲置锁定设置。
@@ -182,10 +302,32 @@ pub fn reveal_sensitive_data(
     let conn = lock_conn(&state)?;
     let r = security::unlock(&conn, &sec, &password)?;
     if !r.unlocked {
+        let detail = format!(
+            "{{\"unlocked\":false,\"failed_attempts\":{}}}",
+            r.failed_attempts
+        );
+        let _ = db::log_operation(
+            &conn,
+            "reveal_sensitive_failed",
+            "敏感数据解锁失败（密码错误）",
+            SEC_OP_OPERATOR,
+            Some(&detail),
+        );
         return Err(AppError::InvalidParam("密码错误，无法查看敏感数据".into()));
     }
     let seconds = security::get_idle_settings(&conn)?.2;
     let expires_at = (Utc::now() + chrono::Duration::seconds(seconds as i64)).to_rfc3339();
+    let detail = format!(
+        "{{\"expires_at\":\"{}\",\"seconds\":{}}}",
+        expires_at, seconds
+    );
+    let _ = db::log_operation(
+        &conn,
+        "reveal_sensitive",
+        "敏感数据解锁成功",
+        SEC_OP_OPERATOR,
+        Some(&detail),
+    );
     Ok(RevealResult { expires_at })
 }
 
@@ -287,4 +429,22 @@ pub fn get_decrypted_invoice_url(
     }
 
     Ok(dst.to_string_lossy().to_string())
+}
+
+/// 把任意字符串转义成安全的 JSON 字符串内容（不含两侧引号）。
+/// 用于把 AppError 文本塞进 detail JSON 的 `"error"` 字段，避免引号/反斜杠破坏 JSON 结构。
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
