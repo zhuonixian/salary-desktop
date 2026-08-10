@@ -7,6 +7,7 @@ mod invoice;
 mod models;
 mod ocr;
 mod salary;
+pub mod security;
 
 use std::io::Write;
 use std::sync::Mutex;
