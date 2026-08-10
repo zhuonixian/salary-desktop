@@ -781,3 +781,42 @@ pub struct DataSafetyCheckResult {
     pub integrity_check: String,
     pub messages: Vec<String>,
 }
+
+// ==================== Security ====================
+
+/// 安全中心状态概览,前端用于渲染 Setup/Lock/Status 等界面。
+/// 未初始化时返回 initialized: false, locked: true(其他字段默认值)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecurityStatus {
+    pub initialized: bool,
+    pub locked: bool,
+    pub failed_attempts: u32,
+    pub lock_until: Option<String>,
+    pub idle_lock_enabled: bool,
+    pub idle_timeout_seconds: u32,
+    pub sensitive_reveal_seconds: u32,
+    pub migration_status: Option<String>,
+}
+
+/// unlock 命令返回结果。Task 4 临时定义在 security.rs,Task 6 迁移到 models.rs。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnlockResult {
+    pub unlocked: bool,
+    pub failed_attempts: u32,
+    pub lock_until: Option<String>,
+}
+
+/// reveal_sensitive_data 返回结果:授予前端的明文查看截止时刻(RFC3339)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevealResult {
+    pub expires_at: String,
+}
+
+/// 旧版(明文)资源迁移进度。未初始化时默认 status=completed, token_migrated=true。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LegacyMigrationStatus {
+    pub status: String,
+    pub total_invoices: i64,
+    pub processed_invoices: i64,
+    pub token_migrated: bool,
+}

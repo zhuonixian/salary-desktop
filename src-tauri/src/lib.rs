@@ -4,9 +4,11 @@ mod db;
 mod errors;
 mod excel;
 mod invoice;
+mod legacy_migration;
 mod models;
 mod ocr;
 mod salary;
+mod security_commands;
 pub mod security;
 
 use std::io::Write;
@@ -178,6 +180,20 @@ pub fn run() {
         commands::get_reimbursement_invoices,
         commands::update_reimbursement_claim_status,
         commands::delete_reimbursement_claim,
+        // ===== Security（Task 6） =====
+        security_commands::is_security_initialized,
+        security_commands::setup_security,
+        security_commands::unlock,
+        security_commands::lock,
+        security_commands::get_security_status,
+        security_commands::change_password,
+        security_commands::reset_password_by_recovery,
+        security_commands::reset_password_by_question,
+        security_commands::update_idle_settings,
+        security_commands::update_sensitive_reveal_settings,
+        security_commands::reveal_sensitive_data,
+        security_commands::get_legacy_migration_status,
+        security_commands::migrate_legacy_resources,
     ]);
 
     diag("calling builder.run()...");

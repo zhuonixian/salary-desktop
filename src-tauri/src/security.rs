@@ -1,4 +1,5 @@
 use crate::errors::{AppError, AppResult};
+use crate::models::UnlockResult;
 use aes_gcm::{aead::{Aead, KeyInit}, Aes256Gcm, Nonce};
 use argon2::{Algorithm, Argon2, Params, Version};
 use chrono::{TimeDelta, Utc};
@@ -166,14 +167,6 @@ impl Default for SecurityState {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// 解锁命令返回给前端的结果。Task 6 会迁移到 models.rs。
-#[derive(serde::Serialize)]
-pub struct UnlockResult {
-    pub unlocked: bool,
-    pub failed_attempts: u32,
-    pub lock_until: Option<String>,
 }
 
 /// 连续解锁失败上限。达到后写入 lock_until，5 分钟内拒绝任何解锁尝试。
