@@ -333,6 +333,39 @@ fn create_tables(conn: &Connection) -> AppResult<()> {
         CREATE UNIQUE INDEX IF NOT EXISTS idx_budgets_scope
             ON budgets(month, COALESCE(department,''), COALESCE(expense_type_code,''));
         CREATE INDEX IF NOT EXISTS idx_budgets_month ON budgets(month);
+
+        CREATE TABLE IF NOT EXISTS security_state (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          password_hash TEXT NOT NULL,
+          password_kek_salt TEXT NOT NULL,
+          wrapped_dek_by_password TEXT NOT NULL,
+          wrapped_dek_by_password_nonce TEXT NOT NULL,
+          recovery_kek_salt TEXT NOT NULL,
+          wrapped_dek_by_recovery TEXT NOT NULL,
+          wrapped_dek_by_recovery_nonce TEXT NOT NULL,
+          security_question TEXT NOT NULL,
+          question_kek_salt TEXT NOT NULL,
+          wrapped_dek_by_question TEXT NOT NULL,
+          wrapped_dek_by_question_nonce TEXT NOT NULL,
+          security_answer_hash TEXT NOT NULL,
+          idle_timeout_seconds INTEGER NOT NULL DEFAULT 300,
+          idle_lock_enabled INTEGER NOT NULL DEFAULT 1,
+          sensitive_reveal_seconds INTEGER NOT NULL DEFAULT 300,
+          failed_attempts INTEGER NOT NULL DEFAULT 0,
+          lock_until TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS legacy_migration_state (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          status TEXT NOT NULL DEFAULT 'pending',
+          total_invoices INTEGER NOT NULL DEFAULT 0,
+          processed_invoices INTEGER NOT NULL DEFAULT 0,
+          token_migrated INTEGER NOT NULL DEFAULT 0,
+          started_at TEXT,
+          completed_at TEXT
+        );
         ",
     )?;
     migrate_existing_schema(conn)?;
@@ -368,6 +401,13 @@ fn migrate_existing_schema(conn: &Connection) -> AppResult<()> {
     ensure_column(conn, "budgets", "remark", "TEXT")?;
     ensure_column(conn, "budgets", "created_at", "TEXT")?;
     ensure_column(conn, "budgets", "updated_at", "TEXT")?;
+    // 兼容旧库：invoices 增加 image_encrypted
+    ensure_column(
+        conn,
+        "invoices",
+        "image_encrypted",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     Ok(())
 }
 
@@ -4337,9 +4377,41 @@ mod tests {
                 expense_type_code TEXT, employee_id INTEGER, belong_month TEXT,
                 status TEXT DEFAULT 'normal', remark TEXT,
                 image_path TEXT, raw_ocr_json TEXT,
+                image_encrypted INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT, updated_at TEXT
             );
             CREATE UNIQUE INDEX idx_invoices_code_number ON invoices(COALESCE(invoice_code, ''), invoice_number) WHERE status != 'void';
+            CREATE TABLE security_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                password_hash TEXT NOT NULL,
+                password_kek_salt TEXT NOT NULL,
+                wrapped_dek_by_password TEXT NOT NULL,
+                wrapped_dek_by_password_nonce TEXT NOT NULL,
+                recovery_kek_salt TEXT NOT NULL,
+                wrapped_dek_by_recovery TEXT NOT NULL,
+                wrapped_dek_by_recovery_nonce TEXT NOT NULL,
+                security_question TEXT NOT NULL,
+                question_kek_salt TEXT NOT NULL,
+                wrapped_dek_by_question TEXT NOT NULL,
+                wrapped_dek_by_question_nonce TEXT NOT NULL,
+                security_answer_hash TEXT NOT NULL,
+                idle_timeout_seconds INTEGER NOT NULL DEFAULT 300,
+                idle_lock_enabled INTEGER NOT NULL DEFAULT 1,
+                sensitive_reveal_seconds INTEGER NOT NULL DEFAULT 300,
+                failed_attempts INTEGER NOT NULL DEFAULT 0,
+                lock_until TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE legacy_migration_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                status TEXT NOT NULL DEFAULT 'pending',
+                total_invoices INTEGER NOT NULL DEFAULT 0,
+                processed_invoices INTEGER NOT NULL DEFAULT 0,
+                token_migrated INTEGER NOT NULL DEFAULT 0,
+                started_at TEXT,
+                completed_at TEXT
+            );
             INSERT INTO invoice_expense_types (code, name, sort_order) VALUES
                 ('office', '办公费', 1), ('other', '其他', 99);
             INSERT INTO employees (id, name) VALUES (1, '张三');
@@ -5501,5 +5573,40 @@ mod tests {
             "expected duplicate employee no to return InvalidParam, got {:?}",
             err
         );
+    }
+
+    #[test]
+    fn security_state_table_exists() {
+        let conn = setup_db();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM security_state", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn invoices_has_image_encrypted_column() {
+        let conn = setup_db();
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(invoices)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert!(cols.iter().any(|c| c == "image_encrypted"));
+    }
+
+    #[test]
+    fn legacy_migration_state_table_exists() {
+        let conn = setup_db();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM legacy_migration_state",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
     }
 }
