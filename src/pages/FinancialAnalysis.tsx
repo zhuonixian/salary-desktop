@@ -20,6 +20,7 @@ import {
   getFinancialAnalysis,
   saveBudget,
 } from '@/api';
+import { SensitiveText } from '@/components/SensitiveText';
 import type {
   BudgetExecution,
   BudgetInput,
@@ -141,23 +142,23 @@ const FinancialAnalysis: React.FC = () => {
       title: '工资成本',
       dataIndex: 'salary_cost',
       key: 'salary_cost',
-      width: 130,
+      width: 160,
       align: 'right' as const,
       render: (v: number, row: DepartmentCostAnalysis) => (
         <MoneyStack main={v} sub={`应发 ${fmtMoney(row.gross_salary)}`} />
       ),
     },
-    { title: '社保', dataIndex: 'social_security', key: 'social_security', width: 110, align: 'right' as const, render: fmtMoney },
-    { title: '公积金', dataIndex: 'housing_fund', key: 'housing_fund', width: 110, align: 'right' as const, render: fmtMoney },
-    { title: '发票费用', dataIndex: 'invoice_amount', key: 'invoice_amount', width: 120, align: 'right' as const, render: fmtMoney },
-    { title: '报销金额', dataIndex: 'reimbursement_amount', key: 'reimbursement_amount', width: 120, align: 'right' as const, render: fmtMoney },
+    { title: '社保', dataIndex: 'social_security', key: 'social_security', width: 130, align: 'right' as const, render: (v: number) => <SensitiveText type="amount" value={v} /> },
+    { title: '公积金', dataIndex: 'housing_fund', key: 'housing_fund', width: 130, align: 'right' as const, render: (v: number) => <SensitiveText type="amount" value={v} /> },
+    { title: '发票费用', dataIndex: 'invoice_amount', key: 'invoice_amount', width: 130, align: 'right' as const, render: (v: number) => <SensitiveText type="amount" value={v} /> },
+    { title: '报销金额', dataIndex: 'reimbursement_amount', key: 'reimbursement_amount', width: 130, align: 'right' as const, render: (v: number) => <SensitiveText type="amount" value={v} /> },
     {
       title: '总成本',
       dataIndex: 'total_cost',
       key: 'total_cost',
-      width: 130,
+      width: 150,
       align: 'right' as const,
-      render: (v: number) => <strong>¥{fmtMoney(v)}</strong>,
+      render: (v: number) => <strong><SensitiveText type="amount" value={v} /></strong>,
       sorter: (a: DepartmentCostAnalysis, b: DepartmentCostAnalysis) => a.total_cost - b.total_cost,
       defaultSortOrder: 'descend' as const,
     },
@@ -167,32 +168,32 @@ const FinancialAnalysis: React.FC = () => {
     { title: '部门', dataIndex: 'department', key: 'department', width: 110 },
     { title: '工号', dataIndex: 'employee_no', key: 'employee_no', width: 100 },
     { title: '姓名', dataIndex: 'name', key: 'name', width: 100 },
-    { title: '应发', dataIndex: 'gross_salary', key: 'gross_salary', width: 110, align: 'right' as const, render: fmtMoney },
-    { title: '实发', dataIndex: 'net_salary', key: 'net_salary', width: 110, align: 'right' as const, render: fmtMoney },
-    { title: '社保', dataIndex: 'social_security', key: 'social_security', width: 100, align: 'right' as const, render: fmtMoney },
-    { title: '公积金', dataIndex: 'housing_fund', key: 'housing_fund', width: 100, align: 'right' as const, render: fmtMoney },
+    { title: '应发', dataIndex: 'gross_salary', key: 'gross_salary', width: 130, align: 'right' as const, render: (v: number) => <SensitiveText type="amount" value={v} /> },
+    { title: '实发', dataIndex: 'net_salary', key: 'net_salary', width: 130, align: 'right' as const, render: (v: number) => <SensitiveText type="amount" value={v} /> },
+    { title: '社保', dataIndex: 'social_security', key: 'social_security', width: 130, align: 'right' as const, render: (v: number) => <SensitiveText type="amount" value={v} /> },
+    { title: '公积金', dataIndex: 'housing_fund', key: 'housing_fund', width: 130, align: 'right' as const, render: (v: number) => <SensitiveText type="amount" value={v} /> },
     {
       title: '考勤影响',
       dataIndex: 'attendance_deduction',
       key: 'attendance_deduction',
-      width: 140,
+      width: 180,
       align: 'right' as const,
       render: (v: number, row: EmployeeCostView) => (
         <Space>
-          <span>¥{fmtMoney(v)}</span>
+          <SensitiveText type="amount" value={v} />
           {row.abnormal_attendance_count > 0 && <Tag color="orange">{row.abnormal_attendance_count} 异常</Tag>}
         </Space>
       ),
     },
-    { title: '发票', dataIndex: 'invoice_amount', key: 'invoice_amount', width: 100, align: 'right' as const, render: fmtMoney },
-    { title: '报销', dataIndex: 'reimbursement_amount', key: 'reimbursement_amount', width: 100, align: 'right' as const, render: fmtMoney },
+    { title: '发票', dataIndex: 'invoice_amount', key: 'invoice_amount', width: 130, align: 'right' as const, render: (v: number) => <SensitiveText type="amount" value={v} /> },
+    { title: '报销', dataIndex: 'reimbursement_amount', key: 'reimbursement_amount', width: 130, align: 'right' as const, render: (v: number) => <SensitiveText type="amount" value={v} /> },
     {
       title: '总成本',
       dataIndex: 'total_cost',
       key: 'total_cost',
-      width: 120,
+      width: 140,
       align: 'right' as const,
-      render: (v: number) => <strong>¥{fmtMoney(v)}</strong>,
+      render: (v: number) => <strong><SensitiveText type="amount" value={v} /></strong>,
       sorter: (a: EmployeeCostView, b: EmployeeCostView) => a.total_cost - b.total_cost,
       defaultSortOrder: 'descend' as const,
     },
@@ -205,7 +206,7 @@ const FinancialAnalysis: React.FC = () => {
       dataIndex: key,
       key,
       align: 'right' as const,
-      render: (value: number) => `¥${fmtMoney(value)}`,
+      render: (value: number) => <SensitiveText type="amount" value={value} />,
     })),
   ];
 
@@ -220,8 +221,8 @@ const FinancialAnalysis: React.FC = () => {
         return '全月总预算';
       },
     },
-    { title: '预算金额', dataIndex: ['budget', 'budget_amount'], key: 'budget_amount', width: 130, align: 'right' as const, render: fmtMoney },
-    { title: '实际发生', dataIndex: 'actual_amount', key: 'actual_amount', width: 130, align: 'right' as const, render: fmtMoney },
+    { title: '预算金额', dataIndex: ['budget', 'budget_amount'], key: 'budget_amount', width: 140, align: 'right' as const, render: (v: number) => <SensitiveText type="amount" value={v} /> },
+    { title: '实际发生', dataIndex: 'actual_amount', key: 'actual_amount', width: 140, align: 'right' as const, render: (v: number) => <SensitiveText type="amount" value={v} /> },
     {
       title: '执行率',
       dataIndex: 'usage_percent',
@@ -235,7 +236,7 @@ const FinancialAnalysis: React.FC = () => {
         />
       ),
     },
-    { title: '超出金额', dataIndex: 'over_amount', key: 'over_amount', width: 120, align: 'right' as const, render: (value: number) => value > 0 ? <span style={{ color: '#cf1322' }}>¥{fmtMoney(value)}</span> : '-' },
+    { title: '超出金额', dataIndex: 'over_amount', key: 'over_amount', width: 140, align: 'right' as const, render: (value: number) => value > 0 ? <span style={{ color: '#cf1322' }}><SensitiveText type="amount" value={value} /></span> : '-' },
     { title: '状态', dataIndex: 'status', key: 'status', width: 100, render: (status: string) => <Tag color={status === 'over' ? 'red' : 'green'}>{status === 'over' ? '超预算' : '正常'}</Tag> },
     {
       title: '操作',
@@ -380,7 +381,7 @@ const FinancialAnalysis: React.FC = () => {
             <Card className="stat-card"><Statistic title="超预算项数" value={budgetSummary.overCount} suffix="项" valueStyle={{ color: budgetSummary.overCount > 0 ? '#cf1322' : '#389e0d' }} /></Card>
           </Col>
           <Col xs={24} md={8}>
-            <Card className="stat-card"><Statistic title="超预算金额" value={fmtMoney(budgetSummary.overAmount)} prefix="¥" valueStyle={{ color: budgetSummary.overAmount > 0 ? '#cf1322' : '#389e0d' }} /></Card>
+            <Card className="stat-card"><Statistic title="超预算金额" value={<SensitiveText type="amount" value={budgetSummary.overAmount} />} valueStyle={{ color: budgetSummary.overAmount > 0 ? '#cf1322' : '#389e0d' }} /></Card>
           </Col>
           <Col xs={24} md={8}>
             <Card className="stat-card"><Statistic title="最高执行率" value={`${budgetSummary.maxUsage.toFixed(1)}%`} /></Card>
@@ -567,7 +568,7 @@ const MetricCard: React.FC<{
   <Card className="stat-card" style={{ borderTop: `3px solid ${tone}` }}>
     <Statistic
       title={title}
-      value={fmtMoney(value)}
+      value={<SensitiveText type="amount" value={value} />}
       prefix={icon}
       valueStyle={{ color: tone }}
     />
@@ -588,7 +589,7 @@ const Toolbar: React.FC<{ title: string; onExport: () => void; loading: boolean 
 
 const MoneyStack: React.FC<{ main: number; sub: string }> = ({ main, sub }) => (
   <div>
-    <strong>¥{fmtMoney(main)}</strong>
+    <strong><SensitiveText type="amount" value={main} /></strong>
     <div style={{ color: '#8c8c8c', fontSize: 12 }}>{sub}</div>
   </div>
 );
@@ -686,8 +687,12 @@ const MonthlyDelta: React.FC<{ rows: MonthlyComparison[] }> = ({ rows }) => {
                 <span style={{ color: '#5f6b7a' }}>{metricLabels[key]}</span>
                 <Tag color={up ? 'red' : 'green'}>{fmtPercent(currentValue, previousValue)}</Tag>
               </div>
-              <div style={{ marginTop: 10, fontSize: 22, fontWeight: 700 }}>¥{fmtMoney(currentValue)}</div>
-              <div style={{ color: '#8c8c8c', marginTop: 4 }}>{previous.month}：¥{fmtMoney(previousValue)}</div>
+              <div style={{ marginTop: 10, fontSize: 22, fontWeight: 700 }}>
+                <SensitiveText type="amount" value={currentValue} />
+              </div>
+              <div style={{ color: '#8c8c8c', marginTop: 4 }}>
+                {previous.month}：<SensitiveText type="amount" value={previousValue} />
+              </div>
             </Card>
           </Col>
         );

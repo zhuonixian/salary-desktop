@@ -36,6 +36,7 @@ import {
   queryBankTransactions,
   queryPaymentBatches,
 } from '@/api';
+import { SensitiveText } from '@/components/SensitiveText';
 import type {
   BankTransaction,
   BankTransactionStatus,
@@ -225,30 +226,43 @@ const BankTransactions: React.FC = () => {
     },
     { title: '摘要', dataIndex: 'summary', key: 'summary', width: 180, ellipsis: true },
     { title: '对方户名', dataIndex: 'counterparty_name', key: 'counterparty_name', width: 140, ellipsis: true },
-    { title: '对方账号', dataIndex: 'counterparty_account', key: 'counterparty_account', width: 170, ellipsis: true },
+    {
+      title: '对方账号',
+      dataIndex: 'counterparty_account',
+      key: 'counterparty_account',
+      width: 200,
+      ellipsis: true,
+      render: (value: string) => <SensitiveText type="bank_card" value={value} />,
+    },
     {
       title: '收入',
       dataIndex: 'income_amount',
       key: 'income_amount',
-      width: 110,
+      width: 140,
       align: 'right' as const,
-      render: (value: number) => value > 0 ? fmtMoney(value) : '-',
+      render: (value: number) => value > 0 ? <SensitiveText type="amount" value={value} /> : '-',
     },
     {
       title: '支出',
       dataIndex: 'expense_amount',
       key: 'expense_amount',
-      width: 110,
+      width: 140,
       align: 'right' as const,
-      render: (value: number) => value > 0 ? fmtMoney(value) : '-',
+      render: (value: number) => value > 0 ? <SensitiveText type="amount" value={value} /> : '-',
     },
     {
       title: '匹配批次',
       dataIndex: 'matched_batch_no',
       key: 'matched_batch_no',
-      width: 170,
+      width: 220,
       render: (_: unknown, tx: BankTransaction) =>
-        tx.matched_batch_no ? `${tx.matched_batch_no} / ${fmtMoney(tx.matched_amount)}` : tx.ignore_reason || '-',
+        tx.matched_batch_no ? (
+          <Space size={4}>
+            <span>{tx.matched_batch_no}</span>
+            <span style={{ color: '#8c8c8c' }}>/</span>
+            <SensitiveText type="amount" value={tx.matched_amount} />
+          </Space>
+        ) : (tx.ignore_reason || '-'),
     },
     {
       title: '操作',
@@ -351,7 +365,7 @@ const BankTransactions: React.FC = () => {
             <Card className="stat-card"><Statistic title="已匹配" value={summary.matched} /></Card>
           </Col>
           <Col xs={24} sm={12} lg={6}>
-            <Card className="stat-card"><Statistic title="支出金额" value={fmtMoney(summary.expenseAmount)} prefix="¥" /></Card>
+            <Card className="stat-card"><Statistic title="支出金额" value={<SensitiveText type="amount" value={summary.expenseAmount} />} /></Card>
           </Col>
         </Row>
 
@@ -378,7 +392,10 @@ const BankTransactions: React.FC = () => {
         {matchTx && (
           <Space direction="vertical" style={{ width: '100%' }} size={12}>
             <div>
-              <div>{matchTx.transaction_date} / 支出 ¥{fmtMoney(matchTx.expense_amount)}</div>
+              <div>
+                {matchTx.transaction_date} / 支出{' '}
+                <SensitiveText type="amount" value={matchTx.expense_amount} />
+              </div>
               <div>{matchTx.summary || matchTx.counterparty_name || '-'}</div>
             </div>
             <Select

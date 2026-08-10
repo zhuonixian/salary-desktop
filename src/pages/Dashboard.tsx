@@ -14,6 +14,7 @@ import {
 import dayjs from 'dayjs';
 import type { Dayjs } from 'dayjs';
 import { getDashboardSummary, getMonthCloseWorkbench } from '@/api';
+import { SensitiveText } from '@/components/SensitiveText';
 import type { DashboardSummary, MonthCloseCheckItem, MonthCloseWorkbench } from '@/types';
 
 type ChartDatum = {
@@ -21,9 +22,6 @@ type ChartDatum = {
   value: number;
   color: string;
 };
-
-const fmtMoney = (val?: number | null) =>
-  (val ?? 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 const fmtNumber = (val?: number | null) => (val ?? 0).toLocaleString('zh-CN');
 
@@ -39,7 +37,7 @@ const MiniBarChart: React.FC<{ data: ChartDatum[]; unit?: string }> = ({ data, u
   return (
     <div style={{ display: 'grid', gap: 12 }}>
       {data.map((item) => (
-        <div key={item.label} style={{ display: 'grid', gridTemplateColumns: '92px 1fr 92px', alignItems: 'center', gap: 10 }}>
+        <div key={item.label} style={{ display: 'grid', gridTemplateColumns: '92px 1fr 110px', alignItems: 'center', gap: 10 }}>
           <span style={{ color: '#5f6b7a', fontSize: 13 }}>{item.label}</span>
           <div style={{ height: 10, background: '#eef1f5', borderRadius: 6, overflow: 'hidden' }}>
             <div
@@ -52,7 +50,7 @@ const MiniBarChart: React.FC<{ data: ChartDatum[]; unit?: string }> = ({ data, u
             />
           </div>
           <span style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: '#1f2a37' }}>
-            {unit === '¥' ? `¥${fmtMoney(item.value)}` : `${fmtNumber(item.value)}${unit}`}
+            {unit === '¥' ? <SensitiveText type="amount" value={item.value} /> : `${fmtNumber(item.value)}${unit}`}
           </span>
         </div>
       ))}
@@ -250,22 +248,22 @@ const Dashboard: React.FC = () => {
         <Row gutter={[16, 16]} className="mb-16">
           <Col xs={24} sm={12} lg={6}>
             <Card className="stat-card">
-              <Statistic title="应发工资合计" value={fmtMoney(data.total_gross_salary)} prefix={<PayCircleOutlined />} valueStyle={{ color: '#1677ff' }} />
+              <Statistic title="应发工资合计" value={<SensitiveText type="amount" value={data.total_gross_salary} />} prefix={<PayCircleOutlined />} valueStyle={{ color: '#1677ff' }} />
             </Card>
           </Col>
           <Col xs={24} sm={12} lg={6}>
             <Card className="stat-card">
-              <Statistic title="扣款合计" value={fmtMoney(data.total_deduction)} prefix={<MinusCircleOutlined />} valueStyle={{ color: '#d4380d' }} />
+              <Statistic title="扣款合计" value={<SensitiveText type="amount" value={data.total_deduction} />} prefix={<MinusCircleOutlined />} valueStyle={{ color: '#d4380d' }} />
             </Card>
           </Col>
           <Col xs={24} sm={12} lg={6}>
             <Card className="stat-card">
-              <Statistic title="发票价税合计" value={fmtMoney(closeSummary?.total_invoice_amount)} prefix={<FileTextOutlined />} valueStyle={{ color: '#13a8a8' }} />
+              <Statistic title="发票价税合计" value={<SensitiveText type="amount" value={closeSummary?.total_invoice_amount ?? 0} />} prefix={<FileTextOutlined />} valueStyle={{ color: '#13a8a8' }} />
             </Card>
           </Col>
           <Col xs={24} sm={12} lg={6}>
             <Card className="stat-card">
-              <Statistic title="已付款报销" value={fmtMoney(closeSummary?.paid_reimbursement_amount)} prefix={<WalletOutlined />} valueStyle={{ color: '#389e0d' }} />
+              <Statistic title="已付款报销" value={<SensitiveText type="amount" value={closeSummary?.paid_reimbursement_amount ?? 0} />} prefix={<WalletOutlined />} valueStyle={{ color: '#389e0d' }} />
             </Card>
           </Col>
         </Row>

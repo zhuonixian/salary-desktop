@@ -17,12 +17,10 @@ import dayjs from 'dayjs';
 import type { Dayjs } from 'dayjs';
 import { useNavigate } from 'react-router-dom';
 import { closeMonth, exportMonthClosePackage, getMonthCloseWorkbench, reopenMonth } from '@/api';
+import { SensitiveText } from '@/components/SensitiveText';
 import type { MonthCloseCheckItem, MonthCloseWorkbench } from '@/types';
 
 const { TextArea } = Input;
-
-const fmtMoney = (value?: number | null) =>
-  (value ?? 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 const fmtTime = (value?: string) => (value ? dayjs(value).format('YYYY-MM-DD HH:mm:ss') : '-');
 
@@ -281,17 +279,17 @@ const MonthClose: React.FC = () => {
         <Row gutter={[16, 16]} className="mb-16">
           <Col xs={24} md={8}>
             <Card className="stat-card">
-              <Statistic title="工资应发合计" value={fmtMoney(summary?.total_salary_cost)} prefix="¥" />
+              <Statistic title="工资应发合计" value={<SensitiveText type="amount" value={summary?.total_salary_cost ?? 0} />} />
             </Card>
           </Col>
           <Col xs={24} md={8}>
             <Card className="stat-card">
-              <Statistic title="发票价税合计" value={fmtMoney(summary?.total_invoice_amount)} prefix="¥" />
+              <Statistic title="发票价税合计" value={<SensitiveText type="amount" value={summary?.total_invoice_amount ?? 0} />} />
             </Card>
           </Col>
           <Col xs={24} md={8}>
             <Card className="stat-card">
-              <Statistic title="已付款报销" value={fmtMoney(summary?.paid_reimbursement_amount)} prefix="¥" />
+              <Statistic title="已付款报销" value={<SensitiveText type="amount" value={summary?.paid_reimbursement_amount ?? 0} />} />
             </Card>
           </Col>
         </Row>

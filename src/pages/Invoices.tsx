@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
   Button, Table, Card, Row, Col, Input, Select, DatePicker, Modal,
   message, Space, Tag, Form, Drawer, Spin, Alert, Statistic,
@@ -8,17 +8,37 @@ import {
   EditOutlined, DeleteOutlined, EyeOutlined, PlusOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
-import { convertFileSrc } from '@tauri-apps/api/core';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import {
   getInvoiceExpenseTypes, saveInvoiceExpenseType, deleteInvoiceExpenseType,
   ocrInvoice, saveInvoice, updateInvoice, deleteInvoice, queryInvoices, exportInvoiceList,
-  getEmployees,
+  getEmployees, getDecryptedInvoiceUrl,
 } from '@/api';
+import { SensitiveText } from '@/components/SensitiveText';
 import type {
   Invoice, InvoiceInput, InvoiceOcrPreview, InvoiceQuery,
   InvoiceExpenseType, InvoiceExpenseTypeInput, Employee,
 } from '@/types';
+
+// 发票原图预览：通过 get_decrypted_invoice_url 命令统一处理加密/未加密图片。
+// encrypted=0 时后端返回原始 asset URL；encrypted=1 时后端解密后返回 blob URL。
+function InvoiceImage({ invoiceId, fallback }: { invoiceId: number; fallback?: string }) {
+  const [url, setUrl] = useState<string>(fallback ?? '');
+  useEffect(() => {
+    let cancelled = false;
+    if (invoiceId > 0) {
+      getDecryptedInvoiceUrl(invoiceId)
+        .then((u) => { if (!cancelled) setUrl(u); })
+        .catch(() => { /* fallback 保持空 */ });
+    }
+    return () => { cancelled = true; };
+  }, [invoiceId]);
+  if (!url) return null;
+  if (url.toLowerCase().endsWith('.pdf')) {
+    return <iframe src={url} style={{ width: '100%', height: 400 }} title="发票原图" />;
+  }
+  return <img src={url} alt="发票原图" style={{ width: '100%' }} />;
+}
 
 const { TextArea } = Input;
 
@@ -322,9 +342,9 @@ const Invoices: React.FC = () => {
       title: '价税合计',
       dataIndex: 'total_amount',
       key: 'total',
-      width: 110,
+      width: 140,
       align: 'right' as const,
-      render: (v: number) => `¥${(v || 0).toFixed(2)}`,
+      render: (v: number) => <SensitiveText type="amount" value={v || 0} />,
     },
     {
       title: '操作',
@@ -346,12 +366,6 @@ const Invoices: React.FC = () => {
     !uploadModal.form.expense_type_code ||
     (!!uploadModal.preview?.is_duplicate && !uploadModal.editingId);
 
-  const viewDrawerAssetSrc = useMemo(
-    () => (viewDrawer?.image_path ? convertFileSrc(viewDrawer.image_path) : undefined),
-    [viewDrawer?.image_path],
-  );
-  const isViewDrawerPdf = viewDrawer?.image_path?.toLowerCase().endsWith('.pdf') ?? false;
-
   return (
     <div>
       <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -366,7 +380,7 @@ const Invoices: React.FC = () => {
 
       <Row gutter={16} style={{ marginBottom: 16 }}>
         <Col span={6}><Card><Statistic title="发票张数" value={list.length} /></Card></Col>
-        <Col span={6}><Card><Statistic title="价税合计" value={totalAmount} precision={2} prefix="¥" /></Card></Col>
+        <Col span={6}><Card><Statistic title="价税合计" value={<SensitiveText type="amount" value={totalAmount} />} /></Card></Col>
         <Col span={6}><Card><Statistic title="本月去重拦截" value={duplicateCount} /></Card></Col>
       </Row>
 
@@ -597,22 +611,18 @@ const Invoices: React.FC = () => {
       >
         {viewDrawer && (
           <div>
-            {viewDrawerAssetSrc && (
+            {viewDrawer.image_path && (
               <div style={{ marginBottom: 16 }}>
-                {isViewDrawerPdf ? (
-                  <iframe src={viewDrawerAssetSrc} style={{ width: '100%', height: 400 }} title="发票原图" />
-                ) : (
-                  <img src={viewDrawerAssetSrc} alt="发票原图" style={{ width: '100%' }} />
-                )}
+                <InvoiceImage invoiceId={viewDrawer.id} />
               </div>
             )}
             <p><b>发票代码：</b>{viewDrawer.invoice_code || '-'}</p>
             <p><b>发票号码：</b>{viewDrawer.invoice_number || '-'}</p>
             <p><b>类型：</b>{viewDrawer.invoice_type || '-'}</p>
             <p><b>开票日期：</b>{viewDrawer.issue_date || '-'}</p>
-            <p><b>金额：</b>¥{(viewDrawer.amount || 0).toFixed(2)}</p>
-            <p><b>税额：</b>¥{(viewDrawer.tax_amount || 0).toFixed(2)}</p>
-            <p><b>价税合计：</b>¥{(viewDrawer.total_amount || 0).toFixed(2)}</p>
+            <p><b>金额：</b><SensitiveText type="amount" value={viewDrawer.amount || 0} /></p>
+            <p><b>税额：</b><SensitiveText type="amount" value={viewDrawer.tax_amount || 0} /></p>
+            <p><b>价税合计：</b><SensitiveText type="amount" value={viewDrawer.total_amount || 0} /></p>
             <p><b>销售方：</b>{viewDrawer.seller_name || '-'}</p>
             <p><b>购买方：</b>{viewDrawer.buyer_name || '-'}</p>
             <p><b>录入时间：</b>{viewDrawer.created_at || '-'}</p>
