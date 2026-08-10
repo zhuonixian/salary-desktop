@@ -355,6 +355,274 @@ pub fn lock(state: &SecurityState) {
     state.clear_dek();
 }
 
+// ===== Task 5: 改密 + 找回密码 + 闲置/敏感设置 =====
+
+/// 找回码 / 安全问题答案失败上限与锁定时长(spec 第 5 节:3 次 / 15 分钟)。
+pub const MAX_RECOVERY_ATTEMPTS: u32 = 3;
+pub const RECOVERY_LOCK_SECS: i64 = 15 * 60;
+
+/// 用新密码把当前内存中的 DEK 重新 wrap 后写回 security_state。
+/// 复用失败不改变旧密码 wrap 的密文(只 INSERT 新一行失败才回滚)。
+fn rewrap_dek_for_new_password(
+    conn: &Connection,
+    state: &SecurityState,
+    new_password: &str,
+) -> AppResult<()> {
+    validate_password_strength(new_password)?;
+    let dek = state.dek().ok_or_else(|| AppError::General("DEK 未加载".into()))?;
+    let pw_salt = gen_salt();
+    let pw_kek = derive_kek(new_password, &pw_salt)?;
+    let (wrapped, nonce) = wrap_dek(&dek, &pw_kek)?;
+    let now = Utc::now().to_rfc3339();
+    // password_hash 列仅作存在性记录(详见 setup 注释),用新 KEK 的 hex 覆盖。
+    conn.execute(
+        "UPDATE security_state
+         SET password_hash = ?, password_kek_salt = ?,
+             wrapped_dek_by_password = ?, wrapped_dek_by_password_nonce = ?,
+             failed_attempts = 0, lock_until = NULL, updated_at = ?
+         WHERE id = 1",
+        params![
+            hex::encode(pw_kek),
+            hex::encode(pw_salt),
+            hex::encode(&wrapped),
+            hex::encode(nonce),
+            now
+        ],
+    )?;
+    Ok(())
+}
+
+/// 已登录用户改密:用旧密码派生 KEK → unwrap 验证 → set_dek → rewrap。
+/// 不走 unlock(),避免污染 failed_attempts / lock_until(unlock 是登录态前置)。
+pub fn change_password(
+    conn: &Connection,
+    state: &SecurityState,
+    old: &str,
+    new: &str,
+) -> AppResult<()> {
+    let row = conn.query_row(
+        "SELECT password_kek_salt, wrapped_dek_by_password, wrapped_dek_by_password_nonce
+         FROM security_state WHERE id = 1",
+        [],
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        },
+    );
+    let (salt_hex, wrapped_hex, nonce_hex) = match row {
+        Ok(v) => v,
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            return Err(AppError::NotFound("安全配置未初始化".into()));
+        }
+        Err(e) => return Err(e.into()),
+    };
+
+    let salt = hex::decode(&salt_hex).map_err(|e| AppError::General(e.to_string()))?;
+    let kek = derive_kek(old, &salt)?;
+    let wrapped = hex::decode(&wrapped_hex).map_err(|e| AppError::General(e.to_string()))?;
+    let nonce_bytes =
+        hex::decode(&nonce_hex).map_err(|e| AppError::General(e.to_string()))?;
+    if nonce_bytes.len() != 12 {
+        return Err(AppError::General("密码 nonce 损坏".into()));
+    }
+    let mut nonce = [0u8; 12];
+    nonce.copy_from_slice(&nonce_bytes);
+
+    match unwrap_dek(&wrapped, &kek, &nonce) {
+        Some(dek) => {
+            state.set_dek(dek);
+            rewrap_dek_for_new_password(conn, state, new)
+        }
+        None => Err(AppError::InvalidParam("原密码错误".into())),
+    }
+}
+
+/// 检查 lock_until 是否处于冷却期:是则返回 Err,否则继续。
+fn enforce_recovery_lockout(lock_until: &Option<String>) -> AppResult<()> {
+    if let Some(until) = lock_until {
+        if let Ok(t) = chrono::DateTime::parse_from_rfc3339(until) {
+            if Utc::now() < t.with_timezone(&Utc) {
+                return Err(AppError::InvalidParam("尝试过多，请稍后再试".into()));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 找回路径(恢复码 / 安全问题答案)失败计数 +1;累计到上限写 lock_until = now + 15min。
+fn record_recovery_failure(conn: &Connection, attempts: u32) -> AppResult<()> {
+    let new_attempts = attempts + 1;
+    let now = Utc::now();
+    let lock = if new_attempts >= MAX_RECOVERY_ATTEMPTS {
+        Some((now + TimeDelta::seconds(RECOVERY_LOCK_SECS)).to_rfc3339())
+    } else {
+        None
+    };
+    conn.execute(
+        "UPDATE security_state
+         SET failed_attempts = ?, lock_until = ?, updated_at = ?
+         WHERE id = 1",
+        params![new_attempts, lock, now.to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+/// 用恢复码重置密码:用 recovery_kek 派生 KEK → unwrap 验证 → set_dek → rewrap。
+/// 失败累计 3 次锁定 15 分钟(共用 failed_attempts / lock_until 列,但阈值与 unlock 不同)。
+pub fn reset_password_by_recovery(
+    conn: &Connection,
+    state: &SecurityState,
+    code: &str,
+    new_password: &str,
+) -> AppResult<()> {
+    let row = conn.query_row(
+        "SELECT recovery_kek_salt, wrapped_dek_by_recovery, wrapped_dek_by_recovery_nonce,
+                failed_attempts, lock_until
+         FROM security_state WHERE id = 1",
+        [],
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, u32>(3)?,
+                r.get::<_, Option<String>>(4)?,
+            ))
+        },
+    );
+    let (salt_hex, wrapped_hex, nonce_hex, attempts, lock_until) = match row {
+        Ok(v) => v,
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            return Err(AppError::NotFound("安全配置未初始化".into()));
+        }
+        Err(e) => return Err(e.into()),
+    };
+
+    enforce_recovery_lockout(&lock_until)?;
+
+    let salt = hex::decode(&salt_hex).map_err(|e| AppError::General(e.to_string()))?;
+    let kek = derive_kek(code, &salt)?;
+    let wrapped = hex::decode(&wrapped_hex).map_err(|e| AppError::General(e.to_string()))?;
+    let nonce_bytes =
+        hex::decode(&nonce_hex).map_err(|e| AppError::General(e.to_string()))?;
+    if nonce_bytes.len() != 12 {
+        return Err(AppError::General("恢复码 nonce 损坏".into()));
+    }
+    let mut nonce = [0u8; 12];
+    nonce.copy_from_slice(&nonce_bytes);
+
+    let dek = match unwrap_dek(&wrapped, &kek, &nonce) {
+        Some(d) => d,
+        None => {
+            record_recovery_failure(conn, attempts)?;
+            return Err(AppError::InvalidParam("恢复码不正确".into()));
+        }
+    };
+
+    state.set_dek(dek);
+    rewrap_dek_for_new_password(conn, state, new_password)
+}
+
+/// 用安全问题答案重置密码:必须走 unwrap_dek 验证(security_answer_hash 列实际存的是
+/// q_kek 的 hex,不可独立 == 校验)。失败累计 3 次锁定 15 分钟。
+pub fn reset_password_by_question(
+    conn: &Connection,
+    state: &SecurityState,
+    answer: &str,
+    new_password: &str,
+) -> AppResult<()> {
+    let row = conn.query_row(
+        "SELECT question_kek_salt, wrapped_dek_by_question, wrapped_dek_by_question_nonce,
+                failed_attempts, lock_until
+         FROM security_state WHERE id = 1",
+        [],
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, u32>(3)?,
+                r.get::<_, Option<String>>(4)?,
+            ))
+        },
+    );
+    let (salt_hex, wrapped_hex, nonce_hex, attempts, lock_until) = match row {
+        Ok(v) => v,
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            return Err(AppError::NotFound("安全配置未初始化".into()));
+        }
+        Err(e) => return Err(e.into()),
+    };
+
+    enforce_recovery_lockout(&lock_until)?;
+
+    let salt = hex::decode(&salt_hex).map_err(|e| AppError::General(e.to_string()))?;
+    let kek = derive_kek(answer, &salt)?;
+    let wrapped = hex::decode(&wrapped_hex).map_err(|e| AppError::General(e.to_string()))?;
+    let nonce_bytes =
+        hex::decode(&nonce_hex).map_err(|e| AppError::General(e.to_string()))?;
+    if nonce_bytes.len() != 12 {
+        return Err(AppError::General("安全问题 nonce 损坏".into()));
+    }
+    let mut nonce = [0u8; 12];
+    nonce.copy_from_slice(&nonce_bytes);
+
+    let dek = match unwrap_dek(&wrapped, &kek, &nonce) {
+        Some(d) => d,
+        None => {
+            record_recovery_failure(conn, attempts)?;
+            return Err(AppError::InvalidParam("安全问题答案不正确".into()));
+        }
+    };
+
+    state.set_dek(dek);
+    rewrap_dek_for_new_password(conn, state, new_password)
+}
+
+/// 更新闲置锁定设置。enabled=false 时也保留 seconds 以便 UI 复用。
+pub fn update_idle_settings(conn: &Connection, enabled: bool, seconds: u32) -> AppResult<()> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE security_state
+         SET idle_lock_enabled = ?, idle_timeout_seconds = ?, updated_at = ?
+         WHERE id = 1",
+        params![if enabled { 1 } else { 0 }, seconds, now],
+    )?;
+    Ok(())
+}
+
+/// 更新敏感字段回显时长(秒)。
+pub fn update_sensitive_reveal_settings(conn: &Connection, seconds: u32) -> AppResult<()> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE security_state
+         SET sensitive_reveal_seconds = ?, updated_at = ?
+         WHERE id = 1",
+        params![seconds, now],
+    )?;
+    Ok(())
+}
+
+/// 读取闲置/敏感设置,返回 (idle_lock_enabled, idle_timeout_seconds, sensitive_reveal_seconds)。
+pub fn get_idle_settings(conn: &Connection) -> AppResult<(bool, u32, u32)> {
+    let row = conn.query_row(
+        "SELECT idle_lock_enabled, idle_timeout_seconds, sensitive_reveal_seconds
+         FROM security_state WHERE id = 1",
+        [],
+        |r| {
+            Ok((
+                r.get::<_, i64>(0)? != 0,
+                r.get::<_, u32>(1)?,
+                r.get::<_, u32>(2)?,
+            ))
+        },
+    )?;
+    Ok(row)
+}
+
 #[cfg(test)]
 mod state_tests {
     use super::*;
@@ -496,5 +764,143 @@ mod tests {
         assert!(validate_password_strength("12345678").is_err()); // no letter
         assert!(validate_password_strength("abcd1234").is_ok());
         assert!(validate_password_strength("Abcd1234").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod reset_tests {
+    use super::*;
+    use crate::db::tests::setup_db;
+    use rusqlite::Connection;
+
+    fn fresh() -> (Connection, SecurityState) {
+        (setup_db(), SecurityState::new())
+    }
+
+    #[test]
+    fn change_password_keeps_dek_same() {
+        let (conn, state) = fresh();
+        setup(&conn, &state, "Abcd1234", "RC-AAAA", "Q", "A").unwrap();
+        let dek1 = state.dek().unwrap();
+        change_password(&conn, &state, "Abcd1234", "Xyzw9876").unwrap();
+        let dek2 = state.dek().unwrap();
+        assert_eq!(*dek1, *dek2);
+    }
+
+    #[test]
+    fn change_password_wrong_old_fails() {
+        let (conn, state) = fresh();
+        setup(&conn, &state, "Abcd1234", "RC", "Q", "A").unwrap();
+        assert!(change_password(&conn, &state, "wrong", "Xyzw9876").is_err());
+    }
+
+    #[test]
+    fn reset_by_recovery_then_unlock_new_password() {
+        let (conn, state) = fresh();
+        setup(&conn, &state, "Abcd1234", "RC-AAAA-BBBB", "Q", "A").unwrap();
+        lock(&state);
+        reset_password_by_recovery(&conn, &state, "RC-AAAA-BBBB", "Newp1234").unwrap();
+        let r = unlock(&conn, &state, "Newp1234").unwrap();
+        assert!(r.unlocked);
+    }
+
+    #[test]
+    fn reset_by_question_then_unlock_new_password() {
+        let (conn, state) = fresh();
+        setup(&conn, &state, "Abcd1234", "RC", "Q？", "答案").unwrap();
+        lock(&state);
+        reset_password_by_question(&conn, &state, "答案", "Newp1234").unwrap();
+        let r = unlock(&conn, &state, "Newp1234").unwrap();
+        assert!(r.unlocked);
+    }
+
+    #[test]
+    fn reset_by_recovery_wrong_code_fails() {
+        let (conn, state) = fresh();
+        setup(&conn, &state, "Abcd1234", "RC-AAAA", "Q", "A").unwrap();
+        assert!(reset_password_by_recovery(&conn, &state, "wrong", "Newp1234").is_err());
+    }
+
+    #[test]
+    fn reset_by_recovery_locks_after_3_failures() {
+        let (conn, state) = fresh();
+        setup(&conn, &state, "Abcd1234", "RC-AAAA", "Q", "A").unwrap();
+        for _ in 0..3 {
+            let _ = reset_password_by_recovery(&conn, &state, "wrong", "Newp1234");
+        }
+        // 第 4 次:即便输入正确恢复码也必须被锁定拒绝
+        let r = reset_password_by_recovery(&conn, &state, "RC-AAAA", "Newp1234");
+        assert!(r.is_err(), "应被 lock_until 拒绝");
+        // lock_until 已写入
+        let lock_until: Option<String> = conn
+            .query_row(
+                "SELECT lock_until FROM security_state WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(lock_until.is_some(), "lock_until 必须已设置");
+    }
+
+    #[test]
+    fn reset_by_question_wrong_answer_fails() {
+        let (conn, state) = fresh();
+        setup(&conn, &state, "Abcd1234", "RC", "Q？", "答案").unwrap();
+        assert!(reset_password_by_question(&conn, &state, "错答", "Newp1234").is_err());
+    }
+
+    #[test]
+    fn reset_success_clears_failed_attempts() {
+        let (conn, state) = fresh();
+        setup(&conn, &state, "Abcd1234", "RC-AAAA", "Q", "A").unwrap();
+        // 先失败一次
+        let _ = reset_password_by_recovery(&conn, &state, "wrong", "Newp1234");
+        // 成功重置
+        reset_password_by_recovery(&conn, &state, "RC-AAAA", "Newp1234").unwrap();
+        let (attempts, lock_until): (u32, Option<String>) = conn
+            .query_row(
+                "SELECT failed_attempts, lock_until FROM security_state WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(attempts, 0, "成功重置后 failed_attempts 必须清零");
+        assert!(lock_until.is_none(), "成功重置后 lock_until 必须为 NULL");
+    }
+
+    #[test]
+    fn idle_settings_round_trip() {
+        let (conn, state) = fresh();
+        setup(&conn, &state, "Abcd1234", "RC", "Q", "A").unwrap();
+        // 默认值
+        let (en, secs, reveal) = get_idle_settings(&conn).unwrap();
+        assert!(en);
+        assert_eq!(secs, 300);
+        assert_eq!(reveal, 300);
+        // 更新
+        update_idle_settings(&conn, false, 120).unwrap();
+        update_sensitive_reveal_settings(&conn, 60).unwrap();
+        let (en, secs, reveal) = get_idle_settings(&conn).unwrap();
+        assert!(!en);
+        assert_eq!(secs, 120);
+        assert_eq!(reveal, 60);
+    }
+
+    #[test]
+    fn change_password_does_not_touch_failed_attempts() {
+        // change_password 不应像 unlock 那样在成功时清零 failed_attempts 之外造成副作用;
+        // 旧密码错误不应触发 failed_attempts 累计(已登录用户操作)。
+        let (conn, state) = fresh();
+        setup(&conn, &state, "Abcd1234", "RC", "Q", "A").unwrap();
+        let err = change_password(&conn, &state, "wrong", "Xyzw9876");
+        assert!(err.is_err());
+        let attempts: u32 = conn
+            .query_row(
+                "SELECT failed_attempts FROM security_state WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(attempts, 0, "change_password 失败不应累计 failed_attempts");
     }
 }
