@@ -228,3 +228,56 @@ pub fn migrate_legacy_resources(
     let conn = lock_conn(&state)?;
     crate::legacy_migration::run(&conn, &sec, &app)
 }
+
+/// 取发票原图的可预览 URL。
+/// - `image_encrypted = 0`：直接复制原图到 preview 目录
+/// - `image_encrypted = 1`：用 DEK 解密到 preview 目录；DEK 未加载返回 InvalidParam("请先解锁应用")
+///
+/// 返回 preview 目录中的绝对路径字符串（前端用 `convertFileSrc()` 包一层即可显示）。
+/// 文件名格式 `{invoice_id}_{timestamp_millis}.{ext}`，每次调用都新建一份，
+/// 让前端缓存策略不会拿到旧的解密副本。
+#[tauri::command]
+pub fn get_decrypted_invoice_url(
+    invoice_id: i64,
+    state: State<'_, Mutex<Connection>>,
+    sec: State<'_, SecurityState>,
+) -> AppResult<String> {
+    use rusqlite::params;
+
+    let (image_path, encrypted): (String, i64) = {
+        let conn = lock_conn(&state)?;
+        conn.query_row(
+            "SELECT image_path, image_encrypted FROM invoices WHERE id = ?1",
+            params![invoice_id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+        )
+        .map_err(|_| AppError::NotFound(format!("发票ID={invoice_id}未找到")))?
+    };
+
+    let preview_dir = std::env::temp_dir().join("salary-desktop-preview");
+    std::fs::create_dir_all(&preview_dir)?;
+
+    let src_path = std::path::Path::new(&image_path);
+    let ext = src_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("bin");
+    let dst = preview_dir.join(format!(
+        "{}_{}.{}",
+        invoice_id,
+        Utc::now().timestamp_millis(),
+        ext
+    ));
+
+    if encrypted == 1 {
+        let dek = sec
+            .dek()
+            .ok_or_else(|| AppError::InvalidParam("请先解锁应用".into()))?;
+        security::decrypt_file(src_path, &dst, &dek)
+            .map_err(|_| AppError::InvalidParam("解密失败".into()))?;
+    } else {
+        std::fs::copy(src_path, &dst)?;
+    }
+
+    Ok(dst.to_string_lossy().to_string())
+}

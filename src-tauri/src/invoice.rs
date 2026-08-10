@@ -6,6 +6,7 @@ use crate::db;
 use crate::errors::{AppError, AppResult};
 use crate::models::*;
 use crate::ocr;
+use crate::security::{self, SecurityState};
 
 const BAIDU_VAT_INVOICE_URL: &str = "https://aip.baidubce.com/rest/2.0/ocr/v1/vat_invoice";
 
@@ -291,6 +292,7 @@ pub fn save_invoice(
     input: &InvoiceInput,
     conn: &Connection,
     app_data_dir: &std::path::Path,
+    sec: Option<&SecurityState>,
 ) -> AppResult<Invoice> {
     if let Some(month) = input.belong_month.as_deref() {
         db::ensure_month_open(conn, month)?;
@@ -311,16 +313,25 @@ pub fn save_invoice(
     }
 
     // 复制原图到应用目录
-    let target_path = match input.image_path.as_deref() {
-        Some(src) if !src.is_empty() => Some(copy_image_to_app_dir(
-            src,
-            input.belong_month.as_deref(),
-            app_data_dir,
-        )?),
-        _ => None,
+    let (target_path, image_encrypted) = match input.image_path.as_deref() {
+        Some(src) if !src.is_empty() => {
+            let copied = copy_image_to_app_dir(
+                src,
+                input.belong_month.as_deref(),
+                app_data_dir,
+            )?;
+            let encrypted = encrypt_image_if_unlocked(&copied, sec)?;
+            (Some(copied), encrypted)
+        }
+        _ => (None, 0),
     };
 
-    let invoice = db::insert_invoice(conn, input, target_path.as_deref().unwrap_or(""))?;
+    let invoice = db::insert_invoice(
+        conn,
+        input,
+        target_path.as_deref().unwrap_or(""),
+        image_encrypted,
+    )?;
 
     db::log_operation(
         conn,
@@ -342,6 +353,7 @@ pub fn save_invoice_with_mutex(
     input: &InvoiceInput,
     state: &Mutex<Connection>,
     app_data_dir: &std::path::Path,
+    sec: Option<&SecurityState>,
 ) -> AppResult<Invoice> {
     let number = input.invoice_number.as_deref().unwrap_or("").trim();
     if number.is_empty() {
@@ -362,17 +374,26 @@ pub fn save_invoice_with_mutex(
         }
     }
 
-    let target_path = match input.image_path.as_deref() {
-        Some(src) if !src.is_empty() => Some(copy_image_to_app_dir(
-            src,
-            input.belong_month.as_deref(),
-            app_data_dir,
-        )?),
-        _ => None,
+    let (target_path, image_encrypted) = match input.image_path.as_deref() {
+        Some(src) if !src.is_empty() => {
+            let copied = copy_image_to_app_dir(
+                src,
+                input.belong_month.as_deref(),
+                app_data_dir,
+            )?;
+            let encrypted = encrypt_image_if_unlocked(&copied, sec)?;
+            (Some(copied), encrypted)
+        }
+        _ => (None, 0),
     };
 
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
-    let invoice = db::insert_invoice(&conn, input, target_path.as_deref().unwrap_or(""))?;
+    let invoice = db::insert_invoice(
+        &conn,
+        input,
+        target_path.as_deref().unwrap_or(""),
+        image_encrypted,
+    )?;
 
     db::log_operation(
         &conn,
@@ -395,6 +416,7 @@ pub fn update_invoice(
     input: &InvoiceInput,
     conn: &Connection,
     app_data_dir: &std::path::Path,
+    sec: Option<&SecurityState>,
 ) -> AppResult<bool> {
     let existing = db::get_invoice(conn, id)?;
     if let Some(month) = existing.belong_month.as_deref() {
@@ -414,6 +436,8 @@ pub fn update_invoice(
                     .or(existing.belong_month.as_deref()),
                 app_data_dir,
             )?;
+            // 如 DEK 已加载，对新归档文件就地进行加密
+            let _ = encrypt_image_if_unlocked(&copied, sec)?;
             Some(copied)
         } else {
             None
@@ -442,6 +466,7 @@ pub fn update_invoice_with_mutex(
     input: &InvoiceInput,
     state: &Mutex<Connection>,
     app_data_dir: &std::path::Path,
+    sec: Option<&SecurityState>,
 ) -> AppResult<bool> {
     let existing = {
         let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
@@ -456,14 +481,16 @@ pub fn update_invoice_with_mutex(
     };
     let new_image_path = if let Some(new_src) = input.image_path.as_deref() {
         if !new_src.is_empty() && new_src != existing.image_path.as_deref().unwrap_or("") {
-            Some(copy_image_to_app_dir(
+            let copied = copy_image_to_app_dir(
                 new_src,
                 input
                     .belong_month
                     .as_deref()
                     .or(existing.belong_month.as_deref()),
                 app_data_dir,
-            )?)
+            )?;
+            let _ = encrypt_image_if_unlocked(&copied, sec)?;
+            Some(copied)
         } else {
             None
         }
@@ -541,6 +568,26 @@ pub(crate) fn copy_image_to_app_dir(
     std::fs::copy(src_path, &target_path)?;
 
     Ok(target_path.to_string_lossy().to_string())
+}
+
+/// 若传入 SecurityState 且 DEK 已加载，则对归档后的发票文件就地加密（先写 .enc.tmp 再 rename 替换）。
+/// 返回 1 表示加密成功；返回 0 表示未加密（DEK 未加载或无 sec）。
+/// 加密失败时返回原始错误，避免给用户留下"已加密"的假象。
+fn encrypt_image_if_unlocked(
+    archived_path: &str,
+    sec: Option<&SecurityState>,
+) -> AppResult<i64> {
+    let Some(sec) = sec else {
+        return Ok(0);
+    };
+    let Some(dek) = sec.dek() else {
+        return Ok(0);
+    };
+    let target = std::path::Path::new(archived_path);
+    let tmp = target.with_extension("enc.tmp");
+    security::encrypt_file(target, &tmp, &dek)?;
+    std::fs::rename(&tmp, target)?;
+    Ok(1)
 }
 
 fn sanitize_invoice_filename(raw: &str) -> String {
@@ -746,6 +793,7 @@ mod business_tests {
                 expense_type_code TEXT, employee_id INTEGER, belong_month TEXT,
                 status TEXT DEFAULT 'normal', remark TEXT,
                 image_path TEXT, raw_ocr_json TEXT,
+                image_encrypted INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT, updated_at TEXT
             );
             CREATE UNIQUE INDEX idx_invoices_code_number ON invoices(COALESCE(invoice_code, ''), invoice_number) WHERE status != 'void';
@@ -753,6 +801,28 @@ mod business_tests {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 operation_type TEXT NOT NULL, description TEXT,
                 operator TEXT, detail TEXT, created_at TEXT
+            );
+            CREATE TABLE security_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                password_hash TEXT NOT NULL,
+                password_kek_salt TEXT NOT NULL,
+                wrapped_dek_by_password TEXT NOT NULL,
+                wrapped_dek_by_password_nonce TEXT NOT NULL,
+                recovery_kek_salt TEXT NOT NULL,
+                wrapped_dek_by_recovery TEXT NOT NULL,
+                wrapped_dek_by_recovery_nonce TEXT NOT NULL,
+                security_question TEXT NOT NULL,
+                question_kek_salt TEXT NOT NULL,
+                wrapped_dek_by_question TEXT NOT NULL,
+                wrapped_dek_by_question_nonce TEXT NOT NULL,
+                security_answer_hash TEXT NOT NULL,
+                idle_timeout_seconds INTEGER NOT NULL DEFAULT 300,
+                idle_lock_enabled INTEGER NOT NULL DEFAULT 1,
+                sensitive_reveal_seconds INTEGER NOT NULL DEFAULT 300,
+                failed_attempts INTEGER NOT NULL DEFAULT 0,
+                lock_until TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );
             INSERT INTO invoice_expense_types (code, name, sort_order) VALUES ('office', '办公费', 1);
             INSERT INTO employees (id, name) VALUES (1, '张三');
@@ -788,8 +858,8 @@ mod business_tests {
         let conn = setup_db();
         let tmp = std::env::temp_dir();
         let input = sample_input();
-        save_invoice(&input, &conn, &tmp).unwrap();
-        let result = save_invoice(&input, &conn, &tmp);
+        save_invoice(&input, &conn, &tmp, None).unwrap();
+        let result = save_invoice(&input, &conn, &tmp, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("发票已存在"));
     }
@@ -800,7 +870,7 @@ mod business_tests {
         let conn = setup_db();
         let mut input = sample_input();
         input.invoice_code = None;
-        let result = save_invoice(&input, &conn, &std::env::temp_dir());
+        let result = save_invoice(&input, &conn, &std::env::temp_dir(), None);
         assert!(
             result.is_ok(),
             "missing code should be allowed for full-electronic invoices"
@@ -809,7 +879,7 @@ mod business_tests {
         // 但 number 缺失要被拒绝
         let mut no_number = sample_input();
         no_number.invoice_number = None;
-        let result = save_invoice(&no_number, &conn, &std::env::temp_dir());
+        let result = save_invoice(&no_number, &conn, &std::env::temp_dir(), None);
         let err = result.unwrap_err();
         assert!(
             matches!(err, AppError::InvalidParam(_)),
@@ -829,8 +899,8 @@ mod business_tests {
         let mut b = sample_input();
         b.invoice_code = None;
         b.invoice_number = Some("FULL001".into());
-        save_invoice(&a, &conn, &tmp).unwrap();
-        let result = save_invoice(&b, &conn, &tmp);
+        save_invoice(&a, &conn, &tmp, None).unwrap();
+        let result = save_invoice(&b, &conn, &tmp, None);
         assert!(
             result.is_err(),
             "duplicate full-electronic (no code) should be blocked"
@@ -849,8 +919,8 @@ mod business_tests {
         b.invoice_code = Some("abc123".into());
         b.invoice_number = Some("12345678".into());
 
-        save_invoice(&a, &conn, &tmp).unwrap();
-        let result = save_invoice(&b, &conn, &tmp);
+        save_invoice(&a, &conn, &tmp, None).unwrap();
+        let result = save_invoice(&b, &conn, &tmp, None);
         assert!(
             result.is_err(),
             "trimmed/lowercased dedup keys should collide"
@@ -868,14 +938,14 @@ mod business_tests {
         let mut b = sample_input();
         b.invoice_code = Some("BBB".into());
         b.invoice_number = Some("002".into());
-        let inv_a = save_invoice(&a, &conn, &tmp).unwrap();
-        let _inv_b = save_invoice(&b, &conn, &tmp).unwrap();
+        let inv_a = save_invoice(&a, &conn, &tmp, None).unwrap();
+        let _inv_b = save_invoice(&b, &conn, &tmp, None).unwrap();
 
         // Try to update A to use B's code+number — should fail
         let mut collision_input = a.clone();
         collision_input.invoice_code = Some("BBB".into());
         collision_input.invoice_number = Some("002".into());
-        let result = update_invoice(inv_a.id, &collision_input, &conn, &tmp);
+        let result = update_invoice(inv_a.id, &collision_input, &conn, &tmp, None);
         assert!(
             result.is_err(),
             "updating to collide with another record should fail"
@@ -885,7 +955,7 @@ mod business_tests {
     #[test]
     fn test_save_invoice_logs_operation() {
         let conn = setup_db();
-        save_invoice(&sample_input(), &conn, &std::env::temp_dir()).unwrap();
+        save_invoice(&sample_input(), &conn, &std::env::temp_dir(), None).unwrap();
         let log_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM operation_logs WHERE operation_type = 'save_invoice'",
@@ -894,6 +964,118 @@ mod business_tests {
             )
             .unwrap();
         assert_eq!(log_count, 1);
+    }
+
+    fn setup_security_with_dek(conn: &Connection) -> SecurityState {
+        let state = SecurityState::new();
+        security::setup(
+            conn,
+            &state,
+            "Abcd1234",
+            "RC-AAAA-BBBB-CCCC",
+            "你小学班主任姓什么？",
+            "王",
+        )
+        .expect("setup security");
+        // setup 自动加载 DEK 到内存，无需 unlock
+        assert!(state.dek().is_some(), "DEK should be loaded after setup");
+        state
+    }
+
+    #[test]
+    fn save_invoice_encrypts_image_when_dek_loaded() {
+        let conn = setup_db();
+        let sec = setup_security_with_dek(&conn);
+        let tmp = std::env::temp_dir();
+
+        // 准备源图片文件
+        let src_dir = tmp.join("task7_enc_src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let src = src_dir.join("plain.txt");
+        let plain = b"hello invoice encryption task7";
+        std::fs::write(&src, plain).unwrap();
+
+        let app_data = tmp.join("task7_enc_app");
+        std::fs::create_dir_all(&app_data).unwrap();
+
+        let mut input = sample_input();
+        input.invoice_number = Some("ENC001".into());
+        input.image_path = Some(src.to_string_lossy().to_string());
+
+        let invoice = save_invoice(&input, &conn, &app_data, Some(&sec)).unwrap();
+
+        // image_encrypted 列必须为 1
+        let encrypted_flag: i64 = conn
+            .query_row(
+                "SELECT image_encrypted FROM invoices WHERE id = ?1",
+                rusqlite::params![invoice.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(encrypted_flag, 1, "image_encrypted flag should be 1");
+
+        // 归档后的文件前 12 字节是 nonce（与 encrypt_file 的格式一致）
+        let archived = invoice.image_path.as_deref().expect("image_path stored");
+        let archived_bytes = std::fs::read(archived).unwrap();
+        assert!(
+            archived_bytes.len() >= 12,
+            "encrypted file should contain at least nonce"
+        );
+        assert_ne!(
+            &archived_bytes[..12],
+            &plain[..plain.len().min(12)],
+            "first 12 bytes should be nonce, not plain"
+        );
+
+        // 用同一 DEK 应能解密回原文
+        let dek = sec.dek().expect("dek present");
+        let restored_tmp = tmp.join(format!("task7_dec_{}.bin", std::process::id()));
+        security::decrypt_file(
+            std::path::Path::new(archived),
+            &restored_tmp,
+            &dek,
+        )
+        .expect("decrypt_file must round-trip");
+        let restored = std::fs::read(&restored_tmp).unwrap();
+        assert_eq!(restored, plain, "decrypted content must match original");
+        let _ = std::fs::remove_file(&restored_tmp);
+    }
+
+    #[test]
+    fn save_invoice_keeps_plain_when_no_dek() {
+        let conn = setup_db();
+        let sec_no_dek = SecurityState::new(); // 未 setup，DEK 不在内存
+        let tmp = std::env::temp_dir();
+
+        let src_dir = tmp.join("task7_plain_src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let src = src_dir.join("plain2.txt");
+        let plain = b"plaintext invoice";
+        std::fs::write(&src, plain).unwrap();
+
+        let app_data = tmp.join("task7_plain_app");
+        std::fs::create_dir_all(&app_data).unwrap();
+
+        let mut input = sample_input();
+        input.invoice_number = Some("PLAIN001".into());
+        input.image_path = Some(src.to_string_lossy().to_string());
+
+        let invoice = save_invoice(&input, &conn, &app_data, Some(&sec_no_dek)).unwrap();
+
+        // image_encrypted 必须为 0
+        let encrypted_flag: i64 = conn
+            .query_row(
+                "SELECT image_encrypted FROM invoices WHERE id = ?1",
+                rusqlite::params![invoice.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(encrypted_flag, 0, "image_encrypted flag should be 0");
+
+        // 归档文件应能直接以原文读出
+        let archived = invoice.image_path.as_deref().unwrap();
+        let archived_bytes = std::fs::read(archived).unwrap();
+        assert_eq!(archived_bytes, plain, "归档文件应保持明文");
     }
 
     #[test]

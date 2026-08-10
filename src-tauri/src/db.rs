@@ -183,6 +183,7 @@ fn create_tables(conn: &Connection) -> AppResult<()> {
             remark TEXT,
             image_path TEXT,
             raw_ocr_json TEXT,
+            image_encrypted INTEGER NOT NULL DEFAULT 0,
             created_at TEXT,
             updated_at TEXT,
             FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE SET NULL,
@@ -3895,6 +3896,7 @@ pub fn insert_invoice(
     conn: &Connection,
     data: &InvoiceInput,
     image_path: &str,
+    image_encrypted: i64,
 ) -> AppResult<Invoice> {
     if let Some(month) = data.belong_month.as_deref() {
         ensure_month_open(conn, month)?;
@@ -3902,14 +3904,14 @@ pub fn insert_invoice(
     let now = Utc::now().to_rfc3339();
     let data = normalized_invoice_input(data);
     conn.execute(
-        "INSERT INTO invoices (invoice_code, invoice_number, invoice_type, issue_date, check_code, amount, tax_amount, total_amount, seller_name, seller_tax_id, buyer_name, buyer_tax_id, expense_type_code, employee_id, belong_month, status, remark, image_path, raw_ocr_json, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 'normal', ?16, ?17, ?18, ?19, ?20)",
+        "INSERT INTO invoices (invoice_code, invoice_number, invoice_type, issue_date, check_code, amount, tax_amount, total_amount, seller_name, seller_tax_id, buyer_name, buyer_tax_id, expense_type_code, employee_id, belong_month, status, remark, image_path, raw_ocr_json, image_encrypted, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 'normal', ?16, ?17, ?18, ?19, ?20, ?21)",
         params![
             data.invoice_code, data.invoice_number, data.invoice_type, data.issue_date,
             data.check_code, data.amount.unwrap_or(0.0), data.tax_amount.unwrap_or(0.0),
             data.total_amount.unwrap_or(0.0), data.seller_name, data.seller_tax_id,
             data.buyer_name, data.buyer_tax_id, data.expense_type_code, data.employee_id,
-            data.belong_month, data.remark, image_path, data.raw_ocr_json, now, now
+            data.belong_month, data.remark, image_path, data.raw_ocr_json, image_encrypted, now, now
         ],
     )?;
     get_invoice(conn, conn.last_insert_rowid())
@@ -4492,7 +4494,7 @@ pub mod tests {
     #[test]
     fn test_insert_and_find_invoice() {
         let conn = setup_db();
-        let inv = insert_invoice(&conn, &sample_input("12345", "67890"), "/stored/x.pdf").unwrap();
+        let inv = insert_invoice(&conn, &sample_input("12345", "67890"), "/stored/x.pdf", 0).unwrap();
         assert_eq!(inv.invoice_code.as_deref(), Some("12345"));
         let found = find_invoice_by_dedup_key(&conn, Some("12345"), "67890").unwrap();
         assert!(found.is_some());
@@ -4512,7 +4514,7 @@ pub mod tests {
         let conn = setup_db();
         let mut input = sample_input("", "99999");
         input.invoice_code = None;
-        let inv = insert_invoice(&conn, &input, "/e.pdf").unwrap();
+        let inv = insert_invoice(&conn, &input, "/e.pdf", 0).unwrap();
         assert!(inv.invoice_code.is_none());
         let found = find_invoice_by_dedup_key(&conn, None, "99999").unwrap();
         assert!(found.is_some(), "None code should match via COALESCE");
@@ -4527,8 +4529,8 @@ pub mod tests {
         a.invoice_code = None;
         let mut b = sample_input("", "88888");
         b.invoice_code = None;
-        insert_invoice(&conn, &a, "/a.pdf").unwrap();
-        let result = insert_invoice(&conn, &b, "/b.pdf");
+        insert_invoice(&conn, &a, "/a.pdf", 0).unwrap();
+        let result = insert_invoice(&conn, &b, "/b.pdf", 0);
         assert!(
             result.is_err(),
             "duplicate full-electronic invoice should be blocked by COALESCE index"
@@ -4538,18 +4540,18 @@ pub mod tests {
     #[test]
     fn test_unique_index_blocks_duplicate() {
         let conn = setup_db();
-        insert_invoice(&conn, &sample_input("111", "222"), "/a.pdf").unwrap();
-        let result = insert_invoice(&conn, &sample_input("111", "222"), "/b.pdf");
+        insert_invoice(&conn, &sample_input("111", "222"), "/a.pdf", 0).unwrap();
+        let result = insert_invoice(&conn, &sample_input("111", "222"), "/b.pdf", 0);
         assert!(result.is_err(), "重复插入应被唯一索引拦截");
     }
 
     #[test]
     fn test_soft_delete_allows_resubmission() {
         let conn = setup_db();
-        let inv = insert_invoice(&conn, &sample_input("111", "222"), "/a.pdf").unwrap();
+        let inv = insert_invoice(&conn, &sample_input("111", "222"), "/a.pdf", 0).unwrap();
         assert!(soft_delete_invoice(&conn, inv.id).unwrap());
         // Re-inserting same code/number should now succeed
-        let result = insert_invoice(&conn, &sample_input("111", "222"), "/b.pdf");
+        let result = insert_invoice(&conn, &sample_input("111", "222"), "/b.pdf", 0);
         assert!(
             result.is_ok(),
             "soft-deleted invoice should allow re-submission"
@@ -4559,7 +4561,7 @@ pub mod tests {
     #[test]
     fn test_soft_delete_hides_record() {
         let conn = setup_db();
-        let inv = insert_invoice(&conn, &sample_input("333", "444"), "/c.pdf").unwrap();
+        let inv = insert_invoice(&conn, &sample_input("333", "444"), "/c.pdf", 0).unwrap();
         assert!(soft_delete_invoice(&conn, inv.id).unwrap());
         // find 应该返回 None（因为 status='void' 被过滤）
         assert!(find_invoice_by_dedup_key(&conn, Some("333"), "444")
@@ -4577,8 +4579,8 @@ pub mod tests {
         a.belong_month = Some("2026-07".into());
         let mut b = sample_input("555", "002");
         b.belong_month = Some("2026-08".into());
-        insert_invoice(&conn, &a, "/a.pdf").unwrap();
-        insert_invoice(&conn, &b, "/b.pdf").unwrap();
+        insert_invoice(&conn, &a, "/a.pdf", 0).unwrap();
+        insert_invoice(&conn, &b, "/b.pdf", 0).unwrap();
 
         let july = query_invoices(
             &conn,
@@ -4609,7 +4611,7 @@ pub mod tests {
     #[test]
     fn test_delete_used_expense_type_blocked() {
         let conn = setup_db();
-        insert_invoice(&conn, &sample_input("777", "888"), "/d.pdf").unwrap();
+        insert_invoice(&conn, &sample_input("777", "888"), "/d.pdf", 0).unwrap();
         let office_id: i64 = conn
             .query_row(
                 "SELECT id FROM invoice_expense_types WHERE code='office'",
@@ -5008,7 +5010,7 @@ pub mod tests {
         assert!(matches!(salary_err, AppError::InvalidParam(_)));
 
         let invoice_err =
-            insert_invoice(&conn, &sample_input("LOCK", "001"), "/locked.pdf").unwrap_err();
+            insert_invoice(&conn, &sample_input("LOCK", "001"), "/locked.pdf", 0).unwrap_err();
         assert!(matches!(invoice_err, AppError::InvalidParam(_)));
 
         let invoice_delete_err = soft_delete_invoice(&conn, 1).unwrap_err();

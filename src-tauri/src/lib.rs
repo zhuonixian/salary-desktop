@@ -194,6 +194,7 @@ pub fn run() {
         security_commands::reveal_sensitive_data,
         security_commands::get_legacy_migration_status,
         security_commands::migrate_legacy_resources,
+        security_commands::get_decrypted_invoice_url,
     ]);
 
     diag("calling builder.run()...");

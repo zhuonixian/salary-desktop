@@ -1364,12 +1364,13 @@ pub fn save_invoice(
     data: InvoiceInput,
     app: tauri::AppHandle,
     state: tauri::State<'_, Mutex<Connection>>,
+    sec: tauri::State<'_, crate::security::SecurityState>,
 ) -> Result<Invoice, AppError> {
     let app_data_dir = app
         .path()
         .app_data_dir()
         .map_err(|e| AppError::General(format!("获取app_data_dir失败: {e}")))?;
-    crate::invoice::save_invoice_with_mutex(&data, state.inner(), &app_data_dir)
+    crate::invoice::save_invoice_with_mutex(&data, state.inner(), &app_data_dir, Some(sec.inner()))
 }
 
 #[tauri::command]
@@ -1378,12 +1379,19 @@ pub fn update_invoice(
     data: InvoiceInput,
     app: tauri::AppHandle,
     state: tauri::State<'_, Mutex<Connection>>,
+    sec: tauri::State<'_, crate::security::SecurityState>,
 ) -> Result<bool, AppError> {
     let app_data_dir = app
         .path()
         .app_data_dir()
         .map_err(|e| AppError::General(format!("获取app_data_dir失败: {e}")))?;
-    crate::invoice::update_invoice_with_mutex(id, &data, state.inner(), &app_data_dir)
+    crate::invoice::update_invoice_with_mutex(
+        id,
+        &data,
+        state.inner(),
+        &app_data_dir,
+        Some(sec.inner()),
+    )
 }
 
 #[tauri::command]
