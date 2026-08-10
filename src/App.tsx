@@ -11,8 +11,6 @@ import {
   CalculatorOutlined,
   ExportOutlined,
   DatabaseOutlined,
-  MenuFoldOutlined,
-  MenuUnfoldOutlined,
   FormOutlined,
   FileTextOutlined,
   AuditOutlined,
@@ -146,23 +144,14 @@ const AppLayout: React.FC = () => {
     <Layout className="app-layout">
       <Sider
         className="app-sider"
-        trigger={null}
         collapsible
         collapsed={collapsed}
+        onCollapse={setCollapsed}
         width={220}
         theme="dark"
       >
         <div className={`logo ${collapsed ? 'collapsed' : ''}`}>
           <span>{collapsed ? '工资' : '工资核算助手'}</span>
-          <button
-            type="button"
-            className="sider-trigger-btn"
-            aria-label={collapsed ? '展开菜单栏' : '折叠菜单栏'}
-            title={collapsed ? '展开菜单栏' : '折叠菜单栏'}
-            onClick={() => setCollapsed(!collapsed)}
-          >
-            {collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
-          </button>
         </div>
         <Menu
           theme="dark"
