@@ -19,6 +19,7 @@ import {
   BankOutlined,
   BarChartOutlined,
   AppstoreOutlined,
+  LockOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import type { Dayjs } from 'dayjs';
@@ -39,6 +40,7 @@ import FinancialAnalysis from '@/pages/FinancialAnalysis';
 import DataSafety from '@/pages/DataSafety';
 import Payments from '@/pages/Payments';
 import BankTransactions from '@/pages/BankTransactions';
+import SecurityCenter from '@/pages/SecurityCenter';
 
 const { Sider, Header, Content } = Layout;
 
@@ -94,6 +96,7 @@ const menuItems: MenuProps['items'] = [
     ],
   },
   { key: '/rules', label: '系统设置', icon: <SettingOutlined /> },
+  { key: '/security', label: '安全中心', icon: <LockOutlined /> },
 ];
 
 const menuPathToGroupKey = new Map<string, string>();
@@ -198,6 +201,7 @@ const AppLayout: React.FC = () => {
             <Route path="/export" element={<ExportCenter />} />
             <Route path="/logs" element={<OperationLogs />} />
             <Route path="/data-safety" element={<DataSafety />} />
+            <Route path="/security" element={<SecurityCenter />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </Content>
