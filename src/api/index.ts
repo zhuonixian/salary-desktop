@@ -628,8 +628,11 @@ export async function getDataSafetyStatus(): Promise<DataSafetyStatus> {
   return invoke<DataSafetyStatus>('get_data_safety_status');
 }
 
-export async function backupDatabase(targetDir: string): Promise<DataBackupResult> {
-  return invoke<DataBackupResult>('backup_database', { targetDir });
+export async function backupDatabase(
+  targetDir: string,
+  encrypt = false,
+): Promise<DataBackupResult> {
+  return invoke<DataBackupResult>('backup_database', { targetDir, encrypt });
 }
 
 export async function restoreDatabase(backupDir: string): Promise<DataRestoreResult> {

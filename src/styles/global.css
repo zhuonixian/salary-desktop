@@ -30,6 +30,18 @@ html, body, #root {
   z-index: 10;
 }
 
+/* 强制 antd Layout Sider 默认折叠 trigger 可见：
+   .app-sider 是 position: fixed + overflow: auto，会让 antd 默认 trigger
+   （position: fixed; bottom: 0; zIndex: 1）被裁切或层级不足。
+   这里显式提高 z-index 并保证 fixed 定位贴底。 */
+.app-sider .ant-layout-sider-trigger {
+  position: fixed !important;
+  bottom: 0 !important;
+  left: 0 !important;
+  right: auto !important;
+  z-index: 20 !important;
+}
+
 .app-sider .logo {
   height: 64px;
   display: flex;
