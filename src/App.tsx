@@ -1,5 +1,12 @@
 import { useEffect, useState } from 'react';
-import { HashRouter, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
+import {
+  HashRouter,
+  Routes,
+  Route,
+  Navigate,
+  useNavigate,
+  useLocation,
+} from 'react-router-dom';
 import { Layout, Menu, DatePicker } from 'antd';
 import type { MenuProps } from 'antd';
 import {
@@ -41,6 +48,9 @@ import DataSafety from '@/pages/DataSafety';
 import Payments from '@/pages/Payments';
 import BankTransactions from '@/pages/BankTransactions';
 import SecurityCenter from '@/pages/SecurityCenter';
+import LockScreen from '@/components/LockScreen';
+import SetupSecurity from '@/components/SetupSecurity';
+import { useSecurity } from '@/contexts/SecurityContext';
 
 const { Sider, Header, Content } = Layout;
 
@@ -211,6 +221,58 @@ const AppLayout: React.FC = () => {
 };
 
 function App() {
+  const {
+    isInitialized,
+    isLocked,
+    idleLockEnabled,
+    idleTimeoutSeconds,
+    lock,
+  } = useSecurity();
+
+  // 闲置自动锁：仅当用户启用闲置锁、当前未锁、安全中心已初始化时挂监听。
+  // 在 effect 内部访问 lock callback 是安全的（已列入依赖），
+  // 不在 render 期调用任何非纯函数。
+  useEffect(() => {
+    if (!idleLockEnabled || isLocked || !isInitialized) return;
+
+    let timer: number | undefined;
+    const reset = () => {
+      if (timer) window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        void lock();
+      }, idleTimeoutSeconds * 1000);
+    };
+
+    window.addEventListener('mousemove', reset);
+    window.addEventListener('keydown', reset);
+    window.addEventListener('click', reset);
+    window.addEventListener('scroll', reset, true);
+    reset();
+
+    return () => {
+      if (timer) window.clearTimeout(timer);
+      window.removeEventListener('mousemove', reset);
+      window.removeEventListener('keydown', reset);
+      window.removeEventListener('click', reset);
+      window.removeEventListener('scroll', reset, true);
+    };
+  }, [
+    idleLockEnabled,
+    idleTimeoutSeconds,
+    isLocked,
+    isInitialized,
+    lock,
+  ]);
+
+  // 启动分流：未初始化 → 安全设置向导；已锁 → 锁屏；否则进入业务页面。
+  // 这就是路由守卫——未解锁时不渲染任何业务页面（含 /security 后台）。
+  if (!isInitialized) {
+    return <SetupSecurity />;
+  }
+  if (isLocked) {
+    return <LockScreen />;
+  }
+
   return (
     <HashRouter>
       <AppLayout />
