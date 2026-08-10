@@ -25,15 +25,14 @@ const QUESTIONS = [
 // 排除易混字符 O/0/I/1,base32 风格字母表。
 function generateRecoveryCode(): string {
   const chars = 'ABCDEFGHIJKLMNPQRSTUVWXYZ23456789';
-  const segments: string[] = [];
-  for (let s = 0; s < 6; s++) {
-    let seg = '';
-    for (let i = 0; i < 4; i++) {
-      seg += chars[Math.floor(Math.random() * chars.length)];
-    }
-    segments.push(seg);
+  const random = new Uint32Array(24); // 24 个字符各自一个 uint32
+  window.crypto.getRandomValues(random);
+  let result = '';
+  for (let i = 0; i < 24; i++) {
+    result += chars[random[i] % chars.length];
+    if ((i + 1) % 4 === 0 && i !== 23) result += '-';
   }
-  return segments.join('-');
+  return result;
 }
 
 const wrapperStyle: CSSProperties = {
@@ -173,7 +172,7 @@ export function SetupSecurity() {
     try {
       await setup(pw, recovery, question, answer.trim());
       // 当存在待迁移资源时,自动触发迁移;迁移失败不影响 setup 成功,但需提示用户。
-      if (migrationStatus === 'pending' || migrationStatus === 'in_progress') {
+      if (migrationStatus === 'pending') {
         try {
           await runMigration();
         } catch (e) {
