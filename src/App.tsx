@@ -138,17 +138,12 @@ const AppLayout: React.FC = () => {
   }, [location.pathname]);
 
   const handleOpenChange: MenuProps['onOpenChange'] = (keys) => {
-    const nextOpenKeys = keys as string[];
-    if (collapsed) {
-      setCollapsed(false);
-      setOpenKeys((currentKeys) => {
-        const openedKey = nextOpenKeys.find((key) => !currentKeys.includes(key)) ?? nextOpenKeys[0];
-        if (!openedKey || currentKeys.includes(openedKey)) return currentKeys;
-        return [...currentKeys, openedKey];
-      });
-      return;
-    }
-    setOpenKeys(nextOpenKeys);
+    // 折叠态下不响应 onOpenChange：
+    // 用户点折叠按钮时 collapsed 变 true → openKeys 程序化变 [] → Menu 触发
+    // onOpenChange，旧逻辑会反向 setCollapsed(false) 抵消按钮点击。
+    // 折叠态下点 submenu 走 antd 默认 popup 行为即可。
+    if (collapsed) return;
+    setOpenKeys(keys as string[]);
   };
 
   const handleMenuClick: MenuProps['onClick'] = ({ key }) => {
