@@ -30,18 +30,6 @@ html, body, #root {
   z-index: 10;
 }
 
-/* 强制 antd Layout Sider 默认折叠 trigger 可见：
-   .app-sider 是 position: fixed + overflow: auto，会让 antd 默认 trigger
-   （position: fixed; bottom: 0; zIndex: 1）被裁切或层级不足。
-   这里显式提高 z-index 并保证 fixed 定位贴底。 */
-.app-sider .ant-layout-sider-trigger {
-  position: fixed !important;
-  bottom: 0 !important;
-  left: 0 !important;
-  right: auto !important;
-  z-index: 20 !important;
-}
-
 .app-sider .logo {
   height: 64px;
   display: flex;
@@ -58,6 +46,39 @@ html, body, #root {
   overflow: hidden;
 }
 
+.app-sider .logo .logo-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 折叠/展开按钮：放在 logo 行右侧，符合桌面应用常见设计 */
+.app-sider .sider-trigger-btn {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.85);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0;
+  transition: background 0.2s, color 0.2s;
+}
+
+.app-sider .sider-trigger-btn:hover {
+  background: rgba(255, 255, 255, 0.18);
+  color: #fff;
+}
+
+.app-sider .sider-trigger-btn:focus {
+  outline: none;
+}
+
 .app-sider .logo.collapsed {
   justify-content: center;
   flex-direction: column;
@@ -65,6 +86,16 @@ html, body, #root {
   padding: 8px 6px;
   font-size: 14px;
   letter-spacing: 0;
+}
+
+.app-sider .logo.collapsed .logo-text {
+  text-align: center;
+}
+
+.app-sider .logo.collapsed .sider-trigger-btn {
+  width: 24px;
+  height: 24px;
+  font-size: 12px;
 }
 
 .app-content-wrapper {

@@ -27,6 +27,8 @@ import {
   BarChartOutlined,
   AppstoreOutlined,
   LockOutlined,
+  MenuFoldOutlined,
+  MenuUnfoldOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import type { Dayjs } from 'dayjs';
@@ -157,14 +159,23 @@ const AppLayout: React.FC = () => {
     <Layout className="app-layout">
       <Sider
         className="app-sider"
-        collapsible
+        trigger={null}
         collapsed={collapsed}
         onCollapse={setCollapsed}
         width={220}
         theme="dark"
       >
         <div className={`logo ${collapsed ? 'collapsed' : ''}`}>
-          <span>{collapsed ? '工资' : '工资核算助手'}</span>
+          <span className="logo-text">{collapsed ? '工资' : '工资核算助手'}</span>
+          <button
+            type="button"
+            className="sider-trigger-btn"
+            aria-label={collapsed ? '展开菜单栏' : '折叠菜单栏'}
+            title={collapsed ? '展开菜单栏' : '折叠菜单栏'}
+            onClick={() => setCollapsed(!collapsed)}
+          >
+            {collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+          </button>
         </div>
         <Menu
           theme="dark"
