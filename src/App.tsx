@@ -27,6 +27,7 @@ import {
   BarChartOutlined,
   AppstoreOutlined,
   LockOutlined,
+  ProfileOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
 } from '@ant-design/icons';
@@ -49,6 +50,7 @@ import FinancialAnalysis from '@/pages/FinancialAnalysis';
 import DataSafety from '@/pages/DataSafety';
 import Payments from '@/pages/Payments';
 import BankTransactions from '@/pages/BankTransactions';
+import ChartOfAccounts from '@/pages/ChartOfAccounts';
 import SecurityCenter from '@/pages/SecurityCenter';
 import LockScreen from '@/components/LockScreen';
 import SetupSecurity from '@/components/SetupSecurity';
@@ -95,6 +97,16 @@ const menuItems: MenuProps['items'] = [
     children: [
       { key: '/invoices', label: '发票管理', icon: <FileTextOutlined /> },
       { key: '/reimbursements', label: '报销管理', icon: <WalletOutlined /> },
+    ],
+  },
+  {
+    key: 'finance-group',
+    label: '财务管理',
+    icon: <AuditOutlined />,
+    children: [
+      { key: '/accounts', label: '科目表', icon: <ProfileOutlined /> },
+      { key: '/vouchers', label: '记账凭证', icon: <FileTextOutlined /> },
+      { key: '/reports', label: '财务报表', icon: <BarChartOutlined /> },
     ],
   },
   {
@@ -214,6 +226,7 @@ const AppLayout: React.FC = () => {
             <Route path="/salary" element={<SalaryCalculate />} />
             <Route path="/payments" element={<Payments />} />
             <Route path="/bank-transactions" element={<BankTransactions />} />
+            <Route path="/accounts" element={<ChartOfAccounts />} />
             <Route path="/export" element={<ExportCenter />} />
             <Route path="/logs" element={<OperationLogs />} />
             <Route path="/data-safety" element={<DataSafety />} />

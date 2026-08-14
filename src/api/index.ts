@@ -59,6 +59,11 @@ import type {
   UnlockResult,
   RevealResult,
   LegacyMigrationStatus,
+  GlAccount,
+  GlAccountInput,
+  OpeningBalanceRow,
+  OpeningBalanceState,
+  AccountMapping,
 } from '@/types';
 
 type BackendDashboardSummary = {
@@ -1072,4 +1077,38 @@ export async function getLegacyMigrationStatus(): Promise<LegacyMigrationStatus>
 
 export async function migrateLegacyResources(): Promise<void> {
   await invoke<void>('migrate_legacy_resources');
+}
+
+// ==================== 总账科目 ====================
+
+export async function getGlAccounts(): Promise<GlAccount[]> {
+  return invoke<GlAccount[]>('get_gl_accounts');
+}
+
+export async function createGlAccount(data: GlAccountInput): Promise<GlAccount> {
+  return invoke<GlAccount>('create_gl_account', { data });
+}
+
+export async function setGlAccountActive(code: string, active: boolean): Promise<boolean> {
+  return invoke<boolean>('set_gl_account_active', { code, active });
+}
+
+export async function getOpeningBalances(): Promise<OpeningBalanceState> {
+  return invoke<OpeningBalanceState>('get_opening_balances');
+}
+
+export async function saveOpeningBalances(month: string, rows: OpeningBalanceRow[]): Promise<boolean> {
+  return invoke<boolean>('save_opening_balances', { month, rows });
+}
+
+export async function getAccountMappings(): Promise<AccountMapping[]> {
+  return invoke<AccountMapping[]>('get_account_mappings');
+}
+
+export async function saveAccountMapping(data: Omit<AccountMapping, 'id'>): Promise<AccountMapping> {
+  return invoke<AccountMapping>('save_account_mapping', { data });
+}
+
+export async function deleteAccountMapping(id: number): Promise<boolean> {
+  return invoke<boolean>('delete_account_mapping', { id });
 }

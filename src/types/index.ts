@@ -758,3 +758,44 @@ export interface LegacyMigrationStatus {
   processed_invoices: number;
   token_migrated: boolean;
 }
+
+// ==================== 总账科目 ====================
+
+export interface GlAccount {
+  code: string;
+  name: string;
+  category: 'asset' | 'liability' | 'equity' | 'cost' | 'profit_loss';
+  direction: 'debit' | 'credit';
+  cash_flow_category: 'operating' | 'investing' | 'financing' | 'none';
+  is_system: number;
+  is_active: number;
+  remark?: string | null;
+}
+
+export interface GlAccountInput {
+  code: string;
+  name: string;
+  category: GlAccount['category'];
+  direction: GlAccount['direction'];
+  cash_flow_category?: GlAccount['cash_flow_category'];
+  remark?: string | null;
+}
+
+export interface OpeningBalanceRow {
+  account_code: string;
+  debit_amount: number;
+  credit_amount: number;
+}
+
+export interface OpeningBalanceState {
+  month: string | null;
+  rows: OpeningBalanceRow[];
+}
+
+export interface AccountMapping {
+  id: number;
+  scope: 'expense_type' | 'department';
+  key: string;
+  account_code: string;
+  remark?: string | null;
+}
