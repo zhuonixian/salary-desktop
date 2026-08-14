@@ -403,8 +403,6 @@ pub fn generate_salary_accrual_vouchers(conn: &Connection, month: &str) -> AppRe
         let dept_account =
             mapping_account(conn, "department", department.as_deref().unwrap_or(""))?;
         let emp = name.unwrap_or_else(|| "未知员工".into());
-        let month_dashless = month.replace('-', "");
-        let _ = month_dashless;
         let voucher_date = format!("{month}-28"); // 计提日固定 28 日，避开 31 天差异
         insert_voucher(
             conn,
@@ -453,6 +451,74 @@ pub fn void_salary_accrual_vouchers(conn: &Connection, month: &str) -> AppResult
            AND source_id IN (SELECT id FROM salary_monthly_results WHERE salary_month = ?1)",
         params![month, Utc::now().to_rfc3339()],
     )?)
+}
+
+/// 生成付款凭证：批次已标记 paid 后调用。salary：借 2211/贷 1002；reimbursement：借 2241/贷 1002。
+pub fn generate_payment_voucher(conn: &Connection, batch_id: i64) -> AppResult<Voucher> {
+    let (batch_no, belong_month, batch_type, payment_date, total, status): (
+        String,
+        String,
+        String,
+        Option<String>,
+        f64,
+        String,
+    ) = conn.query_row(
+        "SELECT batch_no, belong_month, batch_type, payment_date, total_amount, status
+         FROM payment_batches WHERE id = ?1",
+        params![batch_id],
+        |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        },
+    )?;
+    if status != "paid" {
+        return Err(AppError::General(format!(
+            "批次 {batch_no} 未标记已付款，不能生成付款凭证"
+        )));
+    }
+    let (source_type, debit_account, remark) = match batch_type.as_str() {
+        "salary" => ("salary_payment", "2211", "工资代发"),
+        "reimbursement" => ("reimbursement_payment", "2241", "报销付款"),
+        other => return Err(AppError::General(format!("未知批次类型 {other}"))),
+    };
+    let date = payment_date.unwrap_or_else(|| format!("{belong_month}-28"));
+    insert_voucher(
+        conn,
+        &VoucherDraft {
+            belong_month: belong_month.clone(),
+            voucher_date: date,
+            source_type: source_type.into(),
+            source_id: batch_id,
+            remark: Some(format!("{remark}（{batch_no}）")),
+            lines: vec![
+                VoucherLineDraft {
+                    account_code: debit_account.into(),
+                    debit_amount: total,
+                    credit_amount: 0.0,
+                    summary: Some(format!("{remark}（{batch_no}）")),
+                },
+                VoucherLineDraft {
+                    account_code: "1002".into(),
+                    debit_amount: 0.0,
+                    credit_amount: total,
+                    summary: Some(format!("{batch_no} 银行支出")),
+                },
+            ],
+        },
+    )
+}
+
+/// 作废某付款批次对应的全部付款凭证（salary_payment / reimbursement_payment），返回作废条数。
+pub fn void_payment_voucher(conn: &Connection, batch_id: i64) -> AppResult<usize> {
+    let n1 = void_vouchers_for_source(conn, "salary_payment", batch_id)?;
+    let n2 = void_vouchers_for_source(conn, "reimbursement_payment", batch_id)?;
+    Ok(n1 + n2)
 }
 
 /// 按条件查询凭证列表（月份/来源类型/状态均可选），含分录，按凭证号排序。
@@ -749,6 +815,213 @@ mod tests {
         )
         .unwrap();
         assert_eq!(active.len(), 0);
+    }
+
+    #[test]
+    fn test_payment_voucher() {
+        let mut conn = db::tests::setup_financial_db();
+        db::tests::fill_employee_bank_info(&conn);
+        db::lock_salary_results(&conn, "2026-08").unwrap();
+        // 2026-08 两个员工 net 合计 = 7800 + 6600 = 14400，只用 E001 构造 total=7800
+        let detail = db::create_payment_batch(
+            &mut conn,
+            &crate::models::PaymentBatchInput {
+                belong_month: "2026-08".into(),
+                batch_type: "salary".into(),
+                source_ids: None,
+                remark: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(detail.batch.total_amount, 14400.0);
+        db::mark_payment_batch_exported(&conn, detail.batch.id).unwrap();
+        // 标记已付款
+        db::mark_payment_batch_paid(
+            &mut conn,
+            &crate::models::PaymentBatchPaidInput {
+                id: detail.batch.id,
+                payment_date: "2026-08-31".into(),
+            },
+        )
+        .unwrap();
+        let vouchers = get_vouchers(
+            &conn,
+            &VoucherQuery {
+                month: Some("2026-08".into()),
+                source_type: Some("salary_payment".into()),
+                status: Some("active".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(vouchers.len(), 1);
+        let v = &vouchers[0];
+        assert_eq!(v.total_amount, 14400.0);
+        assert_eq!(v.voucher_date, "2026-08-31");
+        assert_eq!(v.source_id, detail.batch.id);
+        // 借 2211 14400，贷 1002 14400
+        let debit_line = v.lines.iter().find(|l| l.debit_amount > 0.0).unwrap();
+        assert_eq!(debit_line.account_code, "2211");
+        assert_eq!(debit_line.debit_amount, 14400.0);
+        let credit_line = v.lines.iter().find(|l| l.credit_amount > 0.0).unwrap();
+        assert_eq!(credit_line.account_code, "1002");
+        assert_eq!(credit_line.credit_amount, 14400.0);
+        // 作废批次后凭证 void：
+        db::void_payment_batch(
+            &mut conn,
+            &crate::models::PaymentBatchVoidInput {
+                id: detail.batch.id,
+                reason: "测试作废".into(),
+            },
+        )
+        .unwrap();
+        let active = get_vouchers(
+            &conn,
+            &VoucherQuery {
+                month: None,
+                source_type: Some("salary_payment".into()),
+                status: Some("active".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(active.len(), 0);
+        let voided = get_vouchers(
+            &conn,
+            &VoucherQuery {
+                month: None,
+                source_type: Some("salary_payment".into()),
+                status: Some("void".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(voided.len(), 1);
+        // 批次状态与工资明细付款状态同步
+        assert_eq!(voided[0].status, "void");
+        let paid_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM salary_monthly_results WHERE salary_month='2026-08' AND payment_status='paid'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(paid_count, 2);
+    }
+
+    #[test]
+    fn test_reimbursement_payment_voucher_accounts() {
+        let mut conn = db::tests::setup_financial_db();
+        db::tests::fill_employee_bank_info(&conn);
+        // 报销批次：借 2241，贷 1002（claim 2 未付，500 元）
+        let detail = db::create_payment_batch(
+            &mut conn,
+            &crate::models::PaymentBatchInput {
+                belong_month: "2026-08".into(),
+                batch_type: "reimbursement".into(),
+                source_ids: None,
+                remark: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(detail.batch.total_amount, 500.0);
+        db::mark_payment_batch_exported(&conn, detail.batch.id).unwrap();
+        db::mark_payment_batch_paid(
+            &mut conn,
+            &crate::models::PaymentBatchPaidInput {
+                id: detail.batch.id,
+                payment_date: "2026-08-31".into(),
+            },
+        )
+        .unwrap();
+        let vouchers = get_vouchers(
+            &conn,
+            &VoucherQuery {
+                month: None,
+                source_type: Some("reimbursement_payment".into()),
+                status: Some("active".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(vouchers.len(), 1);
+        let debit_line = vouchers[0]
+            .lines
+            .iter()
+            .find(|l| l.debit_amount > 0.0)
+            .unwrap();
+        assert_eq!(debit_line.account_code, "2241");
+        let credit_line = vouchers[0]
+            .lines
+            .iter()
+            .find(|l| l.credit_amount > 0.0)
+            .unwrap();
+        assert_eq!(credit_line.account_code, "1002");
+        // 作废已付批次，报销单付款状态重置后重建 draft 批次，draft 状态直接生成凭证应被拒绝
+        db::void_payment_batch(
+            &mut conn,
+            &crate::models::PaymentBatchVoidInput {
+                id: detail.batch.id,
+                reason: "重建测试".into(),
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE reimbursement_claims SET payment_status='unpaid', payment_batch_id=NULL WHERE id=2",
+            [],
+        )
+        .unwrap();
+        let detail2 = db::create_payment_batch(
+            &mut conn,
+            &crate::models::PaymentBatchInput {
+                belong_month: "2026-08".into(),
+                batch_type: "reimbursement".into(),
+                source_ids: None,
+                remark: None,
+            },
+        )
+        .unwrap();
+        let err = generate_payment_voucher(&conn, detail2.batch.id).unwrap_err();
+        assert!(err.to_string().contains("未标记已付款"), "got: {err:?}");
+    }
+
+    #[test]
+    fn test_salary_accrual_department_mapping() {
+        let conn = setup();
+        save_account_mapping(
+            &conn,
+            &AccountMappingInput {
+                scope: "department".into(),
+                key: "销售部".into(),
+                account_code: "6601".into(),
+                remark: None,
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO salary_monthly_results
+                (salary_month, employee_no, name, department, gross_salary, net_salary,
+                 social_security_personal, housing_fund_personal, attendance_deduction,
+                 tax_amount, other_deduction, status, locked, created_at, updated_at)
+             VALUES ('2026-08', 'E001', '张三', '销售部', 10000, 7400, 1000, 800, 500, 200, 100,
+                     'reviewed', 0, '2026-08-31', '2026-08-31')",
+            [],
+        )
+        .unwrap();
+        db::lock_salary_results(&conn, "2026-08").unwrap();
+        let vouchers = get_vouchers(
+            &conn,
+            &VoucherQuery {
+                month: Some("2026-08".into()),
+                source_type: Some("salary_accrual".into()),
+                status: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(vouchers.len(), 1);
+        // 销售部映射到 6601（销售费用），非默认 6602
+        let debit_line = vouchers[0]
+            .lines
+            .iter()
+            .find(|l| l.debit_amount > 0.0)
+            .unwrap();
+        assert_eq!(debit_line.account_code, "6601");
     }
 
     #[test]

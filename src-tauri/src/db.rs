@@ -1235,6 +1235,16 @@ pub fn save_salary_result(conn: &Connection, result: &SalaryResult) -> AppResult
 
     match existing {
         Ok(existing_id) => {
+            let locked: i64 = conn.query_row(
+                "SELECT locked FROM salary_monthly_results WHERE id = ?1",
+                params![existing_id],
+                |row| row.get(0),
+            )?;
+            if locked == 1 {
+                return Err(AppError::InvalidParam(
+                    "工资结果已锁定，请先解锁再修改".into(),
+                ));
+            }
             if active_payment_item_exists(conn, "salary_result", existing_id)? {
                 return Err(AppError::InvalidParam(
                     "工资结果已纳入付款批次，不能重新计算或覆盖".into(),
@@ -1365,6 +1375,16 @@ pub fn update_salary_result(
 ) -> AppResult<bool> {
     let month = get_salary_result_month(conn, id)?;
     ensure_month_open(conn, &month)?;
+    let locked: i64 = conn.query_row(
+        "SELECT locked FROM salary_monthly_results WHERE id = ?1",
+        params![id],
+        |row| row.get(0),
+    )?;
+    if locked == 1 {
+        return Err(AppError::InvalidParam(
+            "工资结果已锁定，请先解锁再修改".into(),
+        ));
+    }
     if active_payment_item_exists(conn, "salary_result", id)? {
         return Err(AppError::InvalidParam(
             "工资结果已纳入付款批次，不能直接调整".into(),
@@ -2656,6 +2676,8 @@ pub fn mark_payment_batch_paid(
         "UPDATE payment_batches SET status='paid', payment_date=?1, updated_at=?2 WHERE id=?3",
         params![input.payment_date.trim(), now, input.id],
     )?;
+    // 状态置 paid 与付款凭证生成同事务：凭证失败时付款标记一并回滚
+    crate::accounting::generate_payment_voucher(&tx, input.id)?;
     tx.commit()?;
     get_payment_batch(conn, input.id)
 }
@@ -2703,6 +2725,8 @@ pub fn void_payment_batch(
         "UPDATE payment_batches SET status='void', remark=?1, updated_at=?2 WHERE id=?3",
         params![input.reason.trim(), now, input.id],
     )?;
+    // 批次作废与付款凭证作废同事务：任一失败整体回滚
+    crate::accounting::void_payment_voucher(&tx, input.id)?;
     tx.commit()?;
     get_payment_batch(conn, input.id)
 }
@@ -4618,7 +4642,7 @@ pub mod tests {
         }
     }
 
-    fn setup_financial_db() -> Connection {
+    pub(crate) fn setup_financial_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         create_tables(&conn).unwrap();
         seed_gl_accounts(&conn).unwrap();
@@ -5041,7 +5065,7 @@ pub mod tests {
         .unwrap();
     }
 
-    fn fill_employee_bank_info(conn: &Connection) {
+    pub(crate) fn fill_employee_bank_info(conn: &Connection) {
         conn.execute_batch(
             "
             UPDATE employees SET bank_account='62220001', bank_name='测试银行' WHERE employee_no='E001';
@@ -5225,6 +5249,8 @@ pub mod tests {
         assert!(matches!(ocr_batch_err, AppError::InvalidParam(_)));
 
         reopen_month(&conn, "2026-08", "测试反月结").unwrap();
+        // 月结前 make_august_closable 已锁定工资结果；锁定结果仍需先解锁才能修改
+        unlock_salary_results(&conn, "2026-08").unwrap();
         assert!(update_salary_result(
             &conn,
             salary_id,
@@ -5253,6 +5279,80 @@ pub mod tests {
             },
         )
         .is_ok());
+    }
+
+    #[test]
+    fn test_locked_salary_result_rejects_save_and_update() {
+        let conn = setup_financial_db();
+        lock_salary_results(&conn, "2026-08").unwrap();
+
+        // save_salary_result：锁定后覆盖保存应被拒绝
+        let existing = get_salary_result_by_employee(&conn, "2026-08", "E001").unwrap();
+        let mut overwritten = existing.clone();
+        overwritten.id = 0;
+        overwritten.overtime_salary = 999.0;
+        let save_err = save_salary_result(&conn, &overwritten).unwrap_err();
+        assert!(matches!(save_err, AppError::InvalidParam(_)));
+
+        // update_salary_result：锁定后调整应被拒绝
+        let update_err = update_salary_result(
+            &conn,
+            existing.id,
+            &SalaryResultUpdate {
+                overtime_salary: Some(10.0),
+                meal_allowance: None,
+                transport_allowance: None,
+                other_allowance: None,
+                other_deduction: None,
+                remark: None,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(update_err, AppError::InvalidParam(_)));
+
+        // 新员工插入不受锁定影响（锁定前该月无记录）
+        let fresh = SalaryResult {
+            id: 0,
+            salary_month: "2026-08".into(),
+            employee_no: "E003".into(),
+            name: Some("王五".into()),
+            department: Some("销售部".into()),
+            base_salary: 5000.0,
+            position_salary: 0.0,
+            performance_salary: 0.0,
+            overtime_salary: 0.0,
+            meal_allowance: 0.0,
+            transport_allowance: 0.0,
+            other_allowance: 0.0,
+            gross_salary: 5000.0,
+            social_security_personal: 0.0,
+            housing_fund_personal: 0.0,
+            attendance_deduction: 0.0,
+            tax_amount: 0.0,
+            other_deduction: 0.0,
+            net_salary: 5000.0,
+            status: "reviewed".into(),
+            locked: 0,
+            remark: None,
+            created_at: None,
+            updated_at: None,
+        };
+        save_salary_result(&conn, &fresh).unwrap();
+        // 解锁后更新恢复可用
+        unlock_salary_results(&conn, "2026-08").unwrap();
+        assert!(update_salary_result(
+            &conn,
+            existing.id,
+            &SalaryResultUpdate {
+                overtime_salary: Some(10.0),
+                meal_allowance: None,
+                transport_allowance: None,
+                other_allowance: None,
+                other_deduction: None,
+                remark: None,
+            },
+        )
+        .unwrap());
     }
 
     #[test]
