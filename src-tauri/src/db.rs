@@ -21,6 +21,7 @@ pub fn init_db(app_data_dir: &str) -> AppResult<Connection> {
     conn.execute_batch("PRAGMA foreign_keys=ON;")?;
 
     create_tables(&conn)?;
+    seed_gl_accounts(&conn)?;
     insert_default_data(&conn)?;
 
     Ok(conn)
@@ -335,6 +336,74 @@ fn create_tables(conn: &Connection) -> AppResult<()> {
             ON budgets(month, COALESCE(department,''), COALESCE(expense_type_code,''));
         CREATE INDEX IF NOT EXISTS idx_budgets_month ON budgets(month);
 
+        CREATE TABLE IF NOT EXISTS gl_accounts (
+            code TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            category TEXT NOT NULL CHECK (category IN ('asset','liability','equity','cost','profit_loss')),
+            direction TEXT NOT NULL CHECK (direction IN ('debit','credit')),
+            cash_flow_category TEXT NOT NULL DEFAULT 'none'
+                CHECK (cash_flow_category IN ('operating','investing','financing','none')),
+            is_system INTEGER NOT NULL DEFAULT 0,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            remark TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS vouchers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            voucher_no TEXT UNIQUE NOT NULL,
+            voucher_date TEXT NOT NULL,
+            belong_month TEXT NOT NULL,
+            source_type TEXT NOT NULL CHECK (source_type IN (
+                'salary_accrual','salary_payment','reimbursement_accrual',
+                'reimbursement_payment','invoice_expense','bank_manual')),
+            source_id INTEGER NOT NULL,
+            total_amount REAL NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','void')),
+            remark TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_vouchers_month ON vouchers(belong_month, status);
+        CREATE INDEX IF NOT EXISTS idx_vouchers_source ON vouchers(source_type, source_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_vouchers_source_active
+            ON vouchers(source_type, source_id) WHERE status = 'active';
+        CREATE TABLE IF NOT EXISTS voucher_lines (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            voucher_id INTEGER NOT NULL,
+            account_code TEXT NOT NULL,
+            debit_amount REAL NOT NULL DEFAULT 0,
+            credit_amount REAL NOT NULL DEFAULT 0,
+            summary TEXT,
+            line_order INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (voucher_id) REFERENCES vouchers(id) ON DELETE CASCADE,
+            FOREIGN KEY (account_code) REFERENCES gl_accounts(code)
+        );
+        CREATE INDEX IF NOT EXISTS idx_voucher_lines_voucher ON voucher_lines(voucher_id);
+        CREATE INDEX IF NOT EXISTS idx_voucher_lines_account ON voucher_lines(account_code);
+        CREATE TABLE IF NOT EXISTS opening_balances (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            month TEXT NOT NULL,
+            account_code TEXT NOT NULL,
+            debit_amount REAL NOT NULL DEFAULT 0,
+            credit_amount REAL NOT NULL DEFAULT 0,
+            created_at TEXT,
+            updated_at TEXT,
+            FOREIGN KEY (account_code) REFERENCES gl_accounts(code)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_opening_balances_account ON opening_balances(account_code);
+        CREATE TABLE IF NOT EXISTS account_mappings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope TEXT NOT NULL CHECK (scope IN ('expense_type','department')),
+            key TEXT NOT NULL,
+            account_code TEXT NOT NULL,
+            remark TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            FOREIGN KEY (account_code) REFERENCES gl_accounts(code)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_account_mappings_scope_key ON account_mappings(scope, key);
+
         CREATE TABLE IF NOT EXISTS security_state (
           id INTEGER PRIMARY KEY CHECK (id = 1),
           password_hash TEXT NOT NULL,
@@ -372,6 +441,89 @@ fn create_tables(conn: &Connection) -> AppResult<()> {
     migrate_existing_schema(conn)?;
 
     Ok(())
+}
+
+/// 《小企业会计准则》预置一级科目表
+const GL_ACCOUNT_PRESETS: &[(&str, &str, &str, &str, &str)] = &[
+    // (code, name, category, direction, cash_flow_category)
+    ("1001", "库存现金", "asset", "debit", "none"),
+    ("1002", "银行存款", "asset", "debit", "none"),
+    ("1012", "其他货币资金", "asset", "debit", "none"),
+    ("1101", "短期投资", "asset", "debit", "investing"),
+    ("1121", "应收票据", "asset", "debit", "operating"),
+    ("1122", "应收账款", "asset", "debit", "operating"),
+    ("1123", "预付账款", "asset", "debit", "operating"),
+    ("1131", "应收股利", "asset", "debit", "investing"),
+    ("1132", "应收利息", "asset", "debit", "operating"),
+    ("1221", "其他应收款", "asset", "debit", "operating"),
+    ("1231", "坏账准备", "asset", "credit", "operating"),
+    ("1401", "材料采购", "asset", "debit", "operating"),
+    ("1402", "在途物资", "asset", "debit", "operating"),
+    ("1403", "原材料", "asset", "debit", "operating"),
+    ("1405", "库存商品", "asset", "debit", "operating"),
+    ("1406", "发出商品", "asset", "debit", "operating"),
+    ("1411", "周转材料", "asset", "debit", "operating"),
+    ("1471", "存货跌价准备", "asset", "credit", "operating"),
+    ("1501", "长期债券投资", "asset", "debit", "investing"),
+    ("1511", "长期股权投资", "asset", "debit", "investing"),
+    ("1601", "固定资产", "asset", "debit", "investing"),
+    ("1602", "累计折旧", "asset", "credit", "operating"),
+    ("1604", "在建工程", "asset", "debit", "investing"),
+    ("1605", "工程物资", "asset", "debit", "investing"),
+    ("1606", "固定资产清理", "asset", "debit", "investing"),
+    ("1621", "生产性生物资产", "asset", "debit", "investing"),
+    ("1701", "无形资产", "asset", "debit", "investing"),
+    ("1702", "累计摊销", "asset", "credit", "operating"),
+    ("1801", "长期待摊费用", "asset", "debit", "operating"),
+    ("1901", "待处理财产损溢", "asset", "debit", "operating"),
+    ("2001", "短期借款", "liability", "credit", "financing"),
+    ("2201", "应付票据", "liability", "credit", "operating"),
+    ("2202", "应付账款", "liability", "credit", "operating"),
+    ("2203", "预收账款", "liability", "credit", "operating"),
+    ("2211", "应付职工薪酬", "liability", "credit", "operating"),
+    ("2221", "应交税费", "liability", "credit", "operating"),
+    ("2231", "应付利息", "liability", "credit", "financing"),
+    ("2232", "应付利润", "liability", "credit", "financing"),
+    ("2241", "其他应付款", "liability", "credit", "operating"),
+    ("2401", "递延收益", "liability", "credit", "operating"),
+    ("2501", "长期借款", "liability", "credit", "financing"),
+    ("2502", "长期应付款", "liability", "credit", "financing"),
+    ("3001", "实收资本", "equity", "credit", "financing"),
+    ("3002", "资本公积", "equity", "credit", "financing"),
+    ("3101", "盈余公积", "equity", "credit", "none"),
+    ("3103", "本年利润", "equity", "credit", "none"),
+    ("3104", "利润分配—未分配利润", "equity", "credit", "none"),
+    ("5001", "生产成本", "cost", "debit", "operating"),
+    ("5101", "制造费用", "cost", "debit", "operating"),
+    ("5201", "劳务成本", "cost", "debit", "operating"),
+    ("6001", "主营业务收入", "profit_loss", "credit", "operating"),
+    ("6051", "其他业务收入", "profit_loss", "credit", "operating"),
+    ("6111", "投资收益", "profit_loss", "credit", "investing"),
+    ("6301", "营业外收入", "profit_loss", "credit", "operating"),
+    ("6401", "主营业务成本", "profit_loss", "debit", "operating"),
+    ("6402", "其他业务成本", "profit_loss", "debit", "operating"),
+    ("6403", "税金及附加", "profit_loss", "debit", "operating"),
+    ("6601", "销售费用", "profit_loss", "debit", "operating"),
+    ("6602", "管理费用", "profit_loss", "debit", "operating"),
+    ("6603", "财务费用", "profit_loss", "debit", "operating"),
+    ("6711", "营业外支出", "profit_loss", "debit", "operating"),
+    ("6801", "所得税费用", "profit_loss", "debit", "operating"),
+];
+
+/// 插入《小企业会计准则》预置科目（INSERT OR IGNORE，幂等），返回本次新插入行数
+pub fn seed_gl_accounts(conn: &Connection) -> AppResult<usize> {
+    let now = Utc::now().to_rfc3339();
+    let mut n = 0;
+    for (code, name, category, direction, cfc) in GL_ACCOUNT_PRESETS {
+        let changed = conn.execute(
+            "INSERT OR IGNORE INTO gl_accounts
+             (code, name, category, direction, cash_flow_category, is_system, is_active, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1, 1, ?6)",
+            params![code, name, category, direction, cfc, now],
+        )?;
+        n += changed;
+    }
+    Ok(n)
 }
 
 fn migrate_existing_schema(conn: &Connection) -> AppResult<()> {
@@ -5609,5 +5761,30 @@ pub mod tests {
             })
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_gl_tables_and_seed() {
+        let conn = Connection::open_in_memory().unwrap();
+        create_tables(&conn).unwrap();
+        seed_gl_accounts(&conn).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM gl_accounts WHERE is_system=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        // 《小企业会计准则》官方一级科目共 62 个（资产30+负债12+权益5+成本3+损益12）
+        assert!(count >= 62, "预置科目不足: {count}");
+        // 借贷方向枚举合法
+        let bad: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM gl_accounts WHERE direction NOT IN ('debit','credit')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bad, 0);
     }
 }
