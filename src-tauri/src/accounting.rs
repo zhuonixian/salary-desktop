@@ -2,6 +2,7 @@ use crate::errors::{AppError, AppResult};
 use crate::models::*;
 use chrono::Utc;
 use rusqlite::{params, Connection};
+use std::collections::HashSet;
 
 /// 查询全部会计科目（按编码排序）。
 pub fn get_accounts(conn: &Connection) -> AppResult<Vec<GlAccount>> {
@@ -68,10 +69,11 @@ pub fn create_account(conn: &Connection, input: &GlAccountInput) -> AppResult<Gl
     })
 }
 
-/// 启用/停用科目。已有凭证分录的科目不允许停用。
+/// 启用/停用科目。已有有效（active）凭证分录的科目不允许停用；作废凭证不阻塞。
 pub fn set_account_active(conn: &Connection, code: &str, active: bool) -> AppResult<bool> {
     let used: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM voucher_lines WHERE account_code = ?1",
+        "SELECT COUNT(*) FROM voucher_lines vl JOIN vouchers v ON v.id = vl.voucher_id
+         WHERE vl.account_code = ?1 AND v.status = 'active'",
         params![code],
         |r| r.get(0),
     )?;
@@ -145,15 +147,28 @@ pub fn save_opening_balances(
             debit - credit
         )));
     }
-    let now = Utc::now().to_rfc3339();
-    conn.execute("DELETE FROM opening_balances", [])?;
+    // 保存前查重：同一批 rows 中重复科目直接报错，避免部分写入后覆盖语义混乱
+    let mut seen = HashSet::new();
     for row in rows {
-        conn.execute(
+        if !seen.insert(&row.account_code) {
+            return Err(AppError::General(format!(
+                "期初余额存在重复科目 {}",
+                row.account_code
+            )));
+        }
+    }
+    let now = Utc::now().to_rfc3339();
+    // DELETE + INSERT 事务包裹，保证整体覆盖的原子性（&Connection 下用 unchecked_transaction）
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM opening_balances", [])?;
+    for row in rows {
+        tx.execute(
             "INSERT INTO opening_balances (month, account_code, debit_amount, credit_amount, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![month, row.account_code, row.debit_amount, row.credit_amount, now],
         )?;
     }
+    tx.commit()?;
     Ok(())
 }
 
@@ -304,10 +319,85 @@ mod tests {
             credit_amount: 60000.0,
         });
         save_opening_balances(&conn, "2026-01", &rows).unwrap();
-        // 换月重录：清空旧月重新保存
+        // 换月重录：清空旧月重新保存（取原 rows 前 2 条科目，金额改为平衡）
         let (month, loaded) = get_opening_balances(&conn).unwrap();
         assert_eq!(month.as_deref(), Some("2026-01"));
         assert_eq!(loaded.len(), 3);
+        let rows2 = vec![
+            OpeningBalanceRow {
+                account_code: "1002".into(),
+                debit_amount: 40000.0,
+                credit_amount: 0.0,
+            },
+            OpeningBalanceRow {
+                account_code: "2001".into(),
+                debit_amount: 0.0,
+                credit_amount: 40000.0,
+            },
+        ];
+        save_opening_balances(&conn, "2026-02", &rows2).unwrap();
+        let (month2, loaded2) = get_opening_balances(&conn).unwrap();
+        assert_eq!(month2.as_deref(), Some("2026-02"));
+        assert_eq!(loaded2.len(), 2);
+        // 重复科目报错
+        let dup = vec![
+            OpeningBalanceRow {
+                account_code: "1002".into(),
+                debit_amount: 100.0,
+                credit_amount: 0.0,
+            },
+            OpeningBalanceRow {
+                account_code: "1002".into(),
+                debit_amount: 100.0,
+                credit_amount: 0.0,
+            },
+            OpeningBalanceRow {
+                account_code: "2001".into(),
+                debit_amount: 0.0,
+                credit_amount: 200.0,
+            },
+        ];
+        assert!(save_opening_balances(&conn, "2026-03", &dup).is_err());
+        // 查重报错不应破坏已保存数据
+        let (month3, loaded3) = get_opening_balances(&conn).unwrap();
+        assert_eq!(month3.as_deref(), Some("2026-02"));
+        assert_eq!(loaded3.len(), 2);
+    }
+
+    #[test]
+    fn test_deactivate_account_with_voucher_lines() {
+        let conn = setup();
+        // 手工插入一条银行流水凭证（source_type=bank_manual）及分录，引用 1002 科目
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO vouchers (voucher_no, voucher_date, belong_month, source_type, source_id, total_amount, status, created_at, updated_at)
+             VALUES ('BK-2026-0001', '2026-01-10', '2026-01', 'bank_manual', 1, 500.0, 'active', ?1, ?1)",
+            params![now],
+        )
+        .unwrap();
+        let vid: i64 = conn
+            .query_row(
+                "SELECT id FROM vouchers WHERE voucher_no = 'BK-2026-0001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT INTO voucher_lines (voucher_id, account_code, debit_amount, credit_amount, summary, line_order)
+             VALUES (?1, '1002', 500.0, 0.0, '测试分录', 1)",
+            params![vid],
+        )
+        .unwrap();
+        // active 凭证引用时停用报错，启用不受影响
+        assert!(set_account_active(&conn, "1002", false).is_err());
+        assert!(set_account_active(&conn, "1002", true).unwrap());
+        // 凭证作废后不再阻塞停用
+        conn.execute(
+            "UPDATE vouchers SET status = 'void' WHERE id = ?1",
+            params![vid],
+        )
+        .unwrap();
+        assert!(set_account_active(&conn, "1002", false).unwrap());
     }
 
     #[test]
