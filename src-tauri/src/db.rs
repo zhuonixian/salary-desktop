@@ -2239,13 +2239,19 @@ fn validate_payment_batch_type(batch_type: &str) -> AppResult<()> {
     }
 }
 
+/// 生成批次号：前缀 + YYYYMM + 纳秒时间戳 + 随机后缀，避免同毫秒并发撞 UNIQUE。
 fn payment_batch_no(month: &str, batch_type: &str) -> String {
     let prefix = if batch_type == "salary" { "GZ" } else { "BX" };
+    let nanos = Utc::now()
+        .timestamp_nanos_opt()
+        .unwrap_or_else(|| Utc::now().timestamp_millis() as i64);
+    let suffix = std::process::id() as i64 ^ nanos;
     format!(
-        "{}{}{}",
+        "{}{}{}{:04X}",
         prefix,
         month.replace('-', ""),
-        Utc::now().timestamp_millis()
+        nanos,
+        suffix & 0xFFFF
     )
 }
 
