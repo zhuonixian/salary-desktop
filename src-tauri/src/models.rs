@@ -855,6 +855,13 @@ pub struct OpeningBalanceRow {
     pub credit_amount: f64,
 }
 
+/// 期初余额状态：期初月份 + 全部行。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpeningBalanceState {
+    pub month: Option<String>,
+    pub rows: Vec<OpeningBalanceRow>,
+}
+
 /// 科目映射（account_mappings 表行）：费用类型/部门 → 会计科目。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountMapping {

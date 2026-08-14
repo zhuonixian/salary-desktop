@@ -194,6 +194,15 @@ pub fn run() {
         commands::get_reimbursement_invoices,
         commands::update_reimbursement_claim_status,
         commands::delete_reimbursement_claim,
+        // ===== Accounting（第五阶段 科目/期初/映射） =====
+        commands::get_gl_accounts,
+        commands::create_gl_account,
+        commands::set_gl_account_active,
+        commands::get_opening_balances,
+        commands::save_opening_balances,
+        commands::get_account_mappings,
+        commands::save_account_mapping,
+        commands::delete_account_mapping,
         // ===== Security（Task 6） =====
         security_commands::is_security_initialized,
         security_commands::setup_security,

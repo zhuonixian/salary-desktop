@@ -6,6 +6,7 @@ use std::sync::Mutex;
 use rusqlite::Connection;
 use tauri::Manager;
 
+use crate::accounting;
 use crate::data_safety;
 use crate::db;
 use crate::errors::AppError;
@@ -1550,6 +1551,88 @@ pub fn delete_reimbursement_claim(
         )?;
     }
     Ok(result)
+}
+
+// ==================== Accounting Commands ====================
+
+#[tauri::command]
+pub fn get_gl_accounts(
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<GlAccount>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(accounting::get_accounts(&conn)?)
+}
+
+#[tauri::command]
+pub fn create_gl_account(
+    data: GlAccountInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<GlAccount, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    accounting::create_account(&conn, &data)
+}
+
+#[tauri::command]
+pub fn set_gl_account_active(
+    code: String,
+    active: bool,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    accounting::set_account_active(&conn, &code, active)
+}
+
+#[tauri::command]
+pub fn get_opening_balances(
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<OpeningBalanceState, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let (month, rows) = accounting::get_opening_balances(&conn)?;
+    Ok(OpeningBalanceState { month, rows })
+}
+
+#[tauri::command]
+pub fn save_opening_balances(
+    month: String,
+    rows: Vec<OpeningBalanceRow>,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    accounting::save_opening_balances(&conn, &month, &rows)?;
+    db::log_operation(
+        &conn,
+        "save_opening_balances",
+        &format!("保存{month}期初余额"),
+        "system",
+        None,
+    )?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn get_account_mappings(
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<AccountMapping>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(accounting::get_account_mappings(&conn)?)
+}
+
+#[tauri::command]
+pub fn save_account_mapping(
+    data: AccountMappingInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<AccountMapping, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    accounting::save_account_mapping(&conn, &data)
+}
+
+#[tauri::command]
+pub fn delete_account_mapping(
+    id: i64,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    accounting::delete_account_mapping(&conn, id)
 }
 
 #[cfg(test)]
