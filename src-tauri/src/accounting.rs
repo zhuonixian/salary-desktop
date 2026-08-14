@@ -255,6 +255,11 @@ pub fn insert_voucher(conn: &Connection, draft: &VoucherDraft) -> AppResult<Vouc
         )));
     }
     for line in &draft.lines {
+        if line.debit_amount < 0.0 || line.credit_amount < 0.0 {
+            return Err(AppError::General("凭证分录金额不能为负".into()));
+        }
+    }
+    for line in &draft.lines {
         if conn
             .query_row(
                 "SELECT 1 FROM gl_accounts WHERE code = ?1",
@@ -271,10 +276,29 @@ pub fn insert_voucher(conn: &Connection, draft: &VoucherDraft) -> AppResult<Vouc
     }
     let voucher_no = next_voucher_no(conn, &draft.belong_month)?;
     let now = Utc::now().to_rfc3339();
+    // vouchers 主表 + voucher_lines 分录写入需原子。独立调用（autocommit）时用 unchecked_transaction 包裹；
+    // 若调用方已开启事务（如 lock_salary_results），BEGIN 无法嵌套，直接写入、由外层事务保证原子性。
+    let id = if conn.is_autocommit() {
+        let tx = conn.unchecked_transaction()?;
+        let id = insert_voucher_rows(&tx, draft, &voucher_no, &now)?;
+        tx.commit()?;
+        id
+    } else {
+        insert_voucher_rows(conn, draft, &voucher_no, &now)?
+    };
+    get_voucher(conn, id)
+}
+
+fn insert_voucher_rows(
+    conn: &Connection,
+    draft: &VoucherDraft,
+    voucher_no: &str,
+    now: &str,
+) -> AppResult<i64> {
     conn.execute(
         "INSERT INTO vouchers (voucher_no, voucher_date, belong_month, source_type, source_id, total_amount, status, remark, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?8, ?8)",
-        params![voucher_no, draft.voucher_date, draft.belong_month, draft.source_type, draft.source_id, debit, draft.remark, now],
+        params![voucher_no, draft.voucher_date, draft.belong_month, draft.source_type, draft.source_id, draft.lines.iter().map(|l| l.debit_amount).sum::<f64>(), draft.remark, now],
     )?;
     let id = conn.last_insert_rowid();
     for (i, line) in draft.lines.iter().enumerate() {
@@ -284,7 +308,7 @@ pub fn insert_voucher(conn: &Connection, draft: &VoucherDraft) -> AppResult<Vouc
             params![id, line.account_code, line.debit_amount, line.credit_amount, line.summary, i as i64],
         )?;
     }
-    get_voucher(conn, id)
+    Ok(id)
 }
 
 /// 按 id 读取凭证（含按 line_order 排序的分录列表）。
@@ -341,6 +365,93 @@ pub fn void_vouchers_for_source(
     Ok(conn.execute(
         "UPDATE vouchers SET status = 'void', updated_at = ?3 WHERE source_type = ?1 AND source_id = ?2 AND status = 'active'",
         params![source_type, source_id, Utc::now().to_rfc3339()],
+    )?)
+}
+
+pub fn generate_salary_accrual_vouchers(conn: &Connection, month: &str) -> AppResult<usize> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, department, gross_salary, attendance_deduction, other_deduction
+         FROM salary_monthly_results
+         WHERE salary_month = ?1 AND locked = 1 AND status != 'void'",
+    )?;
+    let rows = stmt
+        .query_map(params![month], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,            // id
+                r.get::<_, Option<String>>(1)?, // name
+                r.get::<_, Option<String>>(2)?, // department
+                r.get::<_, f64>(3)?,            // gross
+                r.get::<_, f64>(4)?,            // attendance
+                r.get::<_, f64>(5)?,            // other
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+    let mut n = 0;
+    for (id, name, department, gross, attendance, other) in rows {
+        let amount = (gross - attendance - other).max(0.0);
+        if amount <= 0.0 {
+            continue;
+        }
+        // 已有 active 凭证则跳过（幂等）
+        let exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM vouchers WHERE source_type='salary_accrual' AND source_id=?1 AND status='active'",
+            params![id], |r| r.get(0))?;
+        if exists > 0 {
+            continue;
+        }
+        let dept_account =
+            mapping_account(conn, "department", department.as_deref().unwrap_or(""))?;
+        let emp = name.unwrap_or_else(|| "未知员工".into());
+        let month_dashless = month.replace('-', "");
+        let _ = month_dashless;
+        let voucher_date = format!("{month}-28"); // 计提日固定 28 日，避开 31 天差异
+        insert_voucher(
+            conn,
+            &VoucherDraft {
+                belong_month: month.to_string(),
+                voucher_date,
+                source_type: "salary_accrual".into(),
+                source_id: id,
+                remark: Some(format!("{month} 工资计提（{emp}）")),
+                lines: vec![
+                    VoucherLineDraft {
+                        account_code: dept_account.clone(),
+                        debit_amount: amount,
+                        credit_amount: 0.0,
+                        summary: Some(format!("{month} 工资费用（{emp}）")),
+                    },
+                    VoucherLineDraft {
+                        account_code: "2211".into(),
+                        debit_amount: 0.0,
+                        credit_amount: amount,
+                        summary: Some(format!("{month} 应付职工薪酬（{emp}）")),
+                    },
+                ],
+            },
+        )?;
+        n += 1;
+    }
+    Ok(n)
+}
+
+fn mapping_account(conn: &Connection, scope: &str, key: &str) -> AppResult<String> {
+    let mapped: Option<String> = conn
+        .query_row(
+            "SELECT account_code FROM account_mappings WHERE scope = ?1 AND key = ?2",
+            params![scope, key],
+            |r| r.get(0),
+        )
+        .unwrap_or(None);
+    Ok(mapped.unwrap_or_else(|| "6602".into()))
+}
+
+pub fn void_salary_accrual_vouchers(conn: &Connection, month: &str) -> AppResult<usize> {
+    Ok(conn.execute(
+        "UPDATE vouchers SET status='void', updated_at=?2
+         WHERE source_type='salary_accrual' AND status='active'
+           AND source_id IN (SELECT id FROM salary_monthly_results WHERE salary_month = ?1)",
+        params![month, Utc::now().to_rfc3339()],
     )?)
 }
 
@@ -589,6 +700,90 @@ mod tests {
         .unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].lines.len(), 2);
+    }
+
+    #[test]
+    fn test_salary_accrual_voucher() {
+        let conn = setup();
+        // 插入 1 条 2026-08 工资结果：应发 10000，缺勤 500，其他扣款 100，
+        // 社保 1000，公积金 800，个税 200，实发 = 10000-500-100-1000-800-200 = 7400
+        // （插入语句参考 db.rs setup_financial_db 现有工资测试）
+        conn.execute(
+            "INSERT INTO salary_monthly_results
+                (salary_month, employee_no, name, department, gross_salary, net_salary,
+                 social_security_personal, housing_fund_personal, attendance_deduction,
+                 tax_amount, other_deduction, status, locked, created_at, updated_at)
+             VALUES ('2026-08', 'E001', '张三', '销售部', 10000, 7400, 1000, 800, 500, 200, 100,
+                     'reviewed', 0, '2026-08-31', '2026-08-31')",
+            [],
+        )
+        .unwrap();
+        db::lock_salary_results(&conn, "2026-08").unwrap();
+        let vouchers = get_vouchers(
+            &conn,
+            &VoucherQuery {
+                month: Some("2026-08".into()),
+                source_type: Some("salary_accrual".into()),
+                status: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(vouchers.len(), 1);
+        let v = &vouchers[0];
+        // 计提金额 = 应发 - 缺勤 - 其他 = 9400
+        assert_eq!(v.total_amount, 9400.0);
+        // 借 6602 9400，贷 2211 9400
+        let debit_line = v.lines.iter().find(|l| l.debit_amount > 0.0).unwrap();
+        assert_eq!(debit_line.account_code, "6602");
+        let credit_line = v.lines.iter().find(|l| l.credit_amount > 0.0).unwrap();
+        assert_eq!(credit_line.account_code, "2211");
+        // 解锁后凭证作废
+        db::unlock_salary_results(&conn, "2026-08").unwrap();
+        let active = get_vouchers(
+            &conn,
+            &VoucherQuery {
+                month: None,
+                source_type: Some("salary_accrual".into()),
+                status: Some("active".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(active.len(), 0);
+    }
+
+    #[test]
+    fn test_voucher_rejects_negative_amount() {
+        let conn = setup();
+        let draft = VoucherDraft {
+            belong_month: "2026-08".into(),
+            voucher_date: "2026-08-31".into(),
+            source_type: "bank_manual".into(),
+            source_id: 1,
+            remark: None,
+            lines: vec![
+                VoucherLineDraft {
+                    account_code: "6603".into(),
+                    debit_amount: 50.0,
+                    credit_amount: 0.0,
+                    summary: None,
+                },
+                VoucherLineDraft {
+                    account_code: "6603".into(),
+                    debit_amount: -20.0,
+                    credit_amount: 0.0,
+                    summary: None,
+                },
+                VoucherLineDraft {
+                    account_code: "1002".into(),
+                    debit_amount: 0.0,
+                    credit_amount: 30.0,
+                    summary: None,
+                },
+            ],
+        };
+        // 借贷合计平衡（30/30）但存在负数分录，应被拒绝
+        let err = insert_voucher(&conn, &draft).unwrap_err();
+        assert!(err.to_string().contains("不能为负"), "got: {err:?}");
     }
 
     #[test]

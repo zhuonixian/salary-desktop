@@ -1436,10 +1436,31 @@ pub fn update_salary_result(
 
 pub fn lock_salary_results(conn: &Connection, month: &str) -> AppResult<bool> {
     ensure_month_open(conn, month)?;
-    let updated = conn.execute(
+    // 锁定 UPDATE 与计提凭证生成放在同一事务：凭证生成失败时锁定一并回滚
+    let tx = conn.unchecked_transaction()?;
+    let updated = tx.execute(
         "UPDATE salary_monthly_results SET locked = 1, status = 'locked', updated_at = ?1 WHERE salary_month = ?2 AND locked = 0",
         params![Utc::now().to_rfc3339(), month],
     )?;
+    if updated > 0 {
+        crate::accounting::generate_salary_accrual_vouchers(&tx, month)?;
+    }
+    tx.commit()?;
+    Ok(updated > 0)
+}
+
+pub fn unlock_salary_results(conn: &Connection, month: &str) -> AppResult<bool> {
+    ensure_month_open(conn, month)?;
+    // 解锁 UPDATE 与计提凭证作废放在同一事务：任一失败整体回滚
+    let tx = conn.unchecked_transaction()?;
+    let updated = tx.execute(
+        "UPDATE salary_monthly_results SET locked = 0, status = 'reviewed', updated_at = ?1 WHERE salary_month = ?2 AND locked = 1",
+        params![Utc::now().to_rfc3339(), month],
+    )?;
+    if updated > 0 {
+        crate::accounting::void_salary_accrual_vouchers(&tx, month)?;
+    }
+    tx.commit()?;
     Ok(updated > 0)
 }
 
@@ -4600,6 +4621,7 @@ pub mod tests {
     fn setup_financial_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         create_tables(&conn).unwrap();
+        seed_gl_accounts(&conn).unwrap();
         insert_default_data(&conn).unwrap();
         conn.execute_batch(
             "
