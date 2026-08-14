@@ -4107,7 +4107,9 @@ pub fn insert_invoice(
     }
     let now = Utc::now().to_rfc3339();
     let data = normalized_invoice_input(data);
-    conn.execute(
+    // 发票写入与费用凭证生成同事务：凭证失败时发票插入一并回滚
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
         "INSERT INTO invoices (invoice_code, invoice_number, invoice_type, issue_date, check_code, amount, tax_amount, total_amount, seller_name, seller_tax_id, buyer_name, buyer_tax_id, expense_type_code, employee_id, belong_month, status, remark, image_path, raw_ocr_json, image_encrypted, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 'normal', ?16, ?17, ?18, ?19, ?20, ?21)",
         params![
@@ -4118,7 +4120,11 @@ pub fn insert_invoice(
             data.belong_month, data.remark, image_path, data.raw_ocr_json, image_encrypted, now, now
         ],
     )?;
-    get_invoice(conn, conn.last_insert_rowid())
+    let id = tx.last_insert_rowid();
+    // 未挂报销的发票自动生成费用入账凭证（挂报销的随报销审批入账，见 3.2 防重复口径）
+    crate::accounting::maybe_generate_invoice_expense_voucher(&tx, id)?;
+    tx.commit()?;
+    get_invoice(conn, id)
 }
 
 pub fn update_invoice(
@@ -4163,7 +4169,9 @@ pub fn update_invoice(
         }
     }
 
-    let updated = conn.execute(
+    // 发票更新与凭证重生成同事务：凭证失败时更新一并回滚
+    let tx = conn.unchecked_transaction()?;
+    let updated = tx.execute(
         "UPDATE invoices SET invoice_code=?1, invoice_number=?2, invoice_type=?3, issue_date=?4, check_code=?5, amount=?6, tax_amount=?7, total_amount=?8, seller_name=?9, seller_tax_id=?10, buyer_name=?11, buyer_tax_id=?12, expense_type_code=?13, employee_id=?14, belong_month=?15, remark=?16, image_path=?17, raw_ocr_json=?18, updated_at=?19 WHERE id=?20",
         params![
             new_code,
@@ -4187,6 +4195,26 @@ pub fn update_invoice(
             now, id
         ],
     )?;
+    if updated > 0 {
+        // 金额/税额/费用类型/归属月份变化会影响凭证行，简单起见一律 void + 按新值重建（幂等）
+        crate::accounting::void_invoice_expense_voucher(&tx, id)?;
+        crate::accounting::maybe_generate_invoice_expense_voucher(&tx, id)?;
+        // 已挂 approved 报销单的发票金额变化也要重报销计提：void + 重建
+        let claim_ids: Vec<i64> = {
+            let mut stmt = tx.prepare(
+                "SELECT rc.claim_id FROM reimbursement_claim_invoices rc
+                 JOIN reimbursement_claims c ON c.id = rc.claim_id
+                 WHERE rc.invoice_id = ?1 AND c.status = 'approved'",
+            )?;
+            let rows = stmt.query_map(params![id], |r| r.get(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        for claim_id in claim_ids {
+            crate::accounting::void_reimbursement_accrual_voucher(&tx, claim_id)?;
+            crate::accounting::generate_reimbursement_accrual_voucher(&tx, claim_id)?;
+        }
+    }
+    tx.commit()?;
     Ok(updated > 0)
 }
 
@@ -4195,10 +4223,16 @@ pub fn soft_delete_invoice(conn: &Connection, id: i64) -> AppResult<bool> {
         ensure_month_open(conn, &month)?;
     }
     let now = Utc::now().to_rfc3339();
-    let updated = conn.execute(
+    // 发票作废与费用凭证作废同事务
+    let tx = conn.unchecked_transaction()?;
+    let updated = tx.execute(
         "UPDATE invoices SET status='void', updated_at=?1 WHERE id=?2 AND status != 'void'",
         params![now, id],
     )?;
+    if updated > 0 {
+        crate::accounting::void_invoice_expense_voucher(&tx, id)?;
+    }
+    tx.commit()?;
     Ok(updated > 0)
 }
 
@@ -4422,8 +4456,12 @@ pub fn save_reimbursement_claim(
     }
 
     let now = Utc::now().to_rfc3339();
+    // 报销单写入 + 关联发票重写 + 凭证补偿放在同一事务：
+    // 先重写关联行，再补偿凭证（作废旧计提/发票单独凭证后按新关联重建，幂等）
+    let tx = conn.unchecked_transaction()?;
+    let mut old_invoice_ids: Vec<i64> = Vec::new();
     let claim_id = if let Some(id) = data.id {
-        let updated = conn.execute(
+        let updated = tx.execute(
             "UPDATE reimbursement_claims
              SET employee_id=?1, belong_month=?2, title=?3, total_amount=?4, invoice_count=?5,
                  status=?6, payment_status=?7, payment_date=?8, remark=?9, updated_at=?10
@@ -4445,14 +4483,22 @@ pub fn save_reimbursement_claim(
         if updated == 0 {
             return Err(AppError::NotFound(format!("报销单ID={id}未找到或已作废")));
         }
-        conn.execute(
+        // 移除旧关联前记录发票清单，用于补偿其单独入账凭证
+        old_invoice_ids = {
+            let mut stmt = tx.prepare(
+                "SELECT invoice_id FROM reimbursement_claim_invoices WHERE claim_id = ?1",
+            )?;
+            let rows = stmt.query_map(params![id], |r| r.get(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        tx.execute(
             "DELETE FROM reimbursement_claim_invoices WHERE claim_id = ?1",
             params![id],
         )?;
         id
     } else {
         let claim_no = generate_reimbursement_claim_no(&data.belong_month);
-        conn.execute(
+        tx.execute(
             "INSERT INTO reimbursement_claims
              (claim_no, employee_id, belong_month, title, total_amount, invoice_count,
               status, payment_status, payment_date, remark, created_at, updated_at)
@@ -4472,18 +4518,48 @@ pub fn save_reimbursement_claim(
                 now
             ],
         )?;
-        conn.last_insert_rowid()
+        tx.last_insert_rowid()
     };
 
     for invoice_id in &data.invoice_ids {
-        conn.execute(
+        tx.execute(
             "INSERT INTO reimbursement_claim_invoices (claim_id, invoice_id, created_at)
              VALUES (?1, ?2, ?3)",
             params![claim_id, invoice_id, now],
         )?;
     }
 
+    // 关联行落库后补偿凭证：作废旧计提 + 对全部新旧关联发票重建单独凭证判定 + 按需重生成计提
+    compensate_claim_vouchers(&tx, claim_id, &old_invoice_ids)?;
+    tx.commit()?;
     get_reimbursement_claim(conn, claim_id)
+}
+
+/// 报销单关联/金额/状态变化后的凭证补偿（在关联行已落库后调用）：
+/// 1) 作废该报销单计提凭证；2) 对新旧关联发票 void + maybe 重建单独凭证（内部幂等）；
+/// 3) 报销单仍为 approved 时重新生成计提。
+fn compensate_claim_vouchers(
+    conn: &Connection,
+    claim_id: i64,
+    old_invoice_ids: &[i64],
+) -> AppResult<()> {
+    crate::accounting::void_reimbursement_accrual_voucher(conn, claim_id)?;
+    // 新关联发票：作废其单独入账凭证（若进入 approved 则由计提统一承载，防止重复计费）
+    let new_invoice_ids: Vec<i64> = {
+        let mut stmt = conn
+            .prepare("SELECT invoice_id FROM reimbursement_claim_invoices WHERE claim_id = ?1")?;
+        let rows = stmt.query_map(params![claim_id], |r| r.get(0))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    for invoice_id in new_invoice_ids.iter().chain(old_invoice_ids.iter()) {
+        crate::accounting::void_invoice_expense_voucher(conn, *invoice_id)?;
+    }
+    for invoice_id in new_invoice_ids.iter().chain(old_invoice_ids.iter()) {
+        crate::accounting::maybe_generate_invoice_expense_voucher(conn, *invoice_id)?;
+    }
+    // 报销单本身若为 approved，重新生成计提
+    crate::accounting::generate_reimbursement_accrual_voucher(conn, claim_id)?;
+    Ok(())
 }
 
 pub fn update_reimbursement_claim_status(
@@ -4500,15 +4576,40 @@ pub fn update_reimbursement_claim_status(
             "报销单已纳入付款批次，请在付款批次中处理付款状态".into(),
         ));
     }
+    let old_status = existing.status.clone();
     let new_status = status.unwrap_or(existing.status);
     let new_payment_status = payment_status.unwrap_or(existing.payment_status);
     let now = Utc::now().to_rfc3339();
-    let updated = conn.execute(
+    // 状态变更与凭证联动同事务：进入 approved 生成计提并作废关联发票单独凭证（防重复计费）；
+    // 离开 approved（反审批/驳回）作废计提并恢复仍满足条件的发票单独凭证
+    let tx = conn.unchecked_transaction()?;
+    let updated = tx.execute(
         "UPDATE reimbursement_claims
          SET status=?1, payment_status=?2, payment_date=?3, updated_at=?4
          WHERE id=?5 AND status != 'void'",
         params![new_status, new_payment_status, payment_date, now, id],
     )?;
+    if updated > 0 && new_status != old_status {
+        let invoice_ids: Vec<i64> = {
+            let mut stmt = tx.prepare(
+                "SELECT invoice_id FROM reimbursement_claim_invoices WHERE claim_id = ?1",
+            )?;
+            let rows = stmt.query_map(params![id], |r| r.get(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        if new_status == "approved" {
+            for invoice_id in &invoice_ids {
+                crate::accounting::void_invoice_expense_voucher(&tx, *invoice_id)?;
+            }
+            crate::accounting::generate_reimbursement_accrual_voucher(&tx, id)?;
+        } else if old_status == "approved" {
+            crate::accounting::void_reimbursement_accrual_voucher(&tx, id)?;
+            for invoice_id in &invoice_ids {
+                crate::accounting::maybe_generate_invoice_expense_voucher(&tx, *invoice_id)?;
+            }
+        }
+    }
+    tx.commit()?;
     Ok(updated > 0)
 }
 
@@ -4521,10 +4622,26 @@ pub fn soft_delete_reimbursement_claim(conn: &Connection, id: i64) -> AppResult<
         ));
     }
     let now = Utc::now().to_rfc3339();
-    let updated = conn.execute(
+    // 报销单作废与凭证联动同事务：作废计提凭证 + 关联发票恢复单独入账
+    let tx = conn.unchecked_transaction()?;
+    let updated = tx.execute(
         "UPDATE reimbursement_claims SET status='void', updated_at=?1 WHERE id=?2 AND status != 'void'",
         params![now, id],
     )?;
+    if updated > 0 {
+        let invoice_ids: Vec<i64> = {
+            let mut stmt = tx.prepare(
+                "SELECT invoice_id FROM reimbursement_claim_invoices WHERE claim_id = ?1",
+            )?;
+            let rows = stmt.query_map(params![id], |r| r.get(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        crate::accounting::void_reimbursement_accrual_voucher(&tx, id)?;
+        for invoice_id in &invoice_ids {
+            crate::accounting::maybe_generate_invoice_expense_voucher(&tx, *invoice_id)?;
+        }
+    }
+    tx.commit()?;
     Ok(updated > 0)
 }
 

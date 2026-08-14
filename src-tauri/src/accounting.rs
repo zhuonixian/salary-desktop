@@ -357,11 +357,15 @@ pub fn next_voucher_no(conn: &Connection, month: &str) -> AppResult<String> {
 }
 
 /// 作废某业务源下全部 active 凭证，返回作废条数。作废后同源可重新生成。
+/// 测试环境（invoice.rs/db.rs 的最小 schema）可能没有 vouchers 表，此时视为无凭证可作废。
 pub fn void_vouchers_for_source(
     conn: &Connection,
     source_type: &str,
     source_id: i64,
 ) -> AppResult<usize> {
+    if !table_exists(conn, "vouchers") {
+        return Ok(0);
+    }
     Ok(conn.execute(
         "UPDATE vouchers SET status = 'void', updated_at = ?3 WHERE source_type = ?1 AND source_id = ?2 AND status = 'active'",
         params![source_type, source_id, Utc::now().to_rfc3339()],
@@ -521,6 +525,250 @@ pub fn void_payment_voucher(conn: &Connection, batch_id: i64) -> AppResult<usize
     Ok(n1 + n2)
 }
 
+/// 报销计提凭证借方行：按报销单关联发票的费用类型映射生成借方行，税额进 2221，贷方 2241 汇总。
+fn invoice_expense_lines(
+    conn: &Connection,
+    claim_id: i64,
+    month: &str,
+) -> AppResult<Vec<VoucherLineDraft>> {
+    let mut stmt = conn.prepare(
+        "SELECT i.amount, i.tax_amount, i.expense_type_code
+         FROM invoices i JOIN reimbursement_claim_invoices rc ON rc.invoice_id = i.id
+         WHERE rc.claim_id = ?1 AND i.status = 'normal'",
+    )?;
+    let rows = stmt
+        .query_map(params![claim_id], |r| {
+            Ok((
+                r.get::<_, f64>(0)?,
+                r.get::<_, f64>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut expense_map: std::collections::BTreeMap<String, f64> = Default::default();
+    let mut tax_total = 0.0;
+    for (amount, tax, type_code) in &rows {
+        let account = match type_code {
+            Some(code) if !code.is_empty() => mapping_account(conn, "expense_type", code)?,
+            _ => "6602".into(),
+        };
+        *expense_map.entry(account).or_insert(0.0) += amount;
+        tax_total += tax;
+    }
+    let total: f64 = rows.iter().map(|(a, t, _)| a + t).sum();
+    let mut lines = Vec::new();
+    for (account, amt) in expense_map {
+        if amt > 0.0 {
+            lines.push(VoucherLineDraft {
+                account_code: account,
+                debit_amount: amt,
+                credit_amount: 0.0,
+                summary: Some(format!("{month} 报销费用")),
+            });
+        }
+    }
+    if tax_total > 0.0 {
+        lines.push(VoucherLineDraft {
+            account_code: "2221".into(),
+            debit_amount: tax_total,
+            credit_amount: 0.0,
+            summary: Some(format!("{month} 报销进项税额")),
+        });
+    }
+    lines.push(VoucherLineDraft {
+        account_code: "2241".into(),
+        debit_amount: 0.0,
+        credit_amount: total,
+        summary: Some(format!("{month} 应付报销款")),
+    });
+    Ok(lines)
+}
+
+/// 报销审批计提凭证：claim 状态为 approved（及之后状态，即非 draft/submitted/void/rejected）时生成。
+/// 已有 active 凭证时跳过（幂等）。
+pub fn generate_reimbursement_accrual_voucher(
+    conn: &Connection,
+    claim_id: i64,
+) -> AppResult<Option<Voucher>> {
+    if !table_exists(conn, "vouchers") {
+        return Ok(None);
+    }
+    let (claim_no, belong_month, total, status): (String, String, f64, String) = conn.query_row(
+        "SELECT claim_no, belong_month, total_amount, status FROM reimbursement_claims WHERE id = ?1",
+        params![claim_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )?;
+    // 实际状态机为 draft/submitted/approved/rejected/void；仅 approved 生成计提
+    // （brief 的"approved 及之后状态"在本状态机中即 approved 本身）
+    if status != "approved" {
+        return Ok(None);
+    }
+    let exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM vouchers WHERE source_type='reimbursement_accrual' AND source_id=?1 AND status='active'",
+        params![claim_id],
+        |r| r.get(0),
+    )?;
+    if exists > 0 {
+        return Ok(None);
+    }
+    let lines = invoice_expense_lines(conn, claim_id, &belong_month)?;
+    let mut lines = lines;
+    let has_invoices = lines.len() > 1; // invoice_expense_lines 有发票时至少含 2241 贷方 + 借方行
+    if !has_invoices {
+        // 无发票报销（如现金支出）：总额整体进 6602，贷 2241
+        lines = vec![
+            VoucherLineDraft {
+                account_code: "6602".into(),
+                debit_amount: total,
+                credit_amount: 0.0,
+                summary: Some(format!("{belong_month} 报销费用（无票部分）")),
+            },
+            VoucherLineDraft {
+                account_code: "2241".into(),
+                debit_amount: 0.0,
+                credit_amount: total,
+                summary: Some(format!("{belong_month} 应付报销款")),
+            },
+        ];
+    } else {
+        // 借贷差额兜底：发票合计与贷方不平时差额进 6602 配平
+        let debit: f64 = lines.iter().map(|l| l.debit_amount).sum();
+        let credit: f64 = lines.iter().map(|l| l.credit_amount).sum();
+        if (credit - debit).abs() > 0.005 {
+            lines.insert(
+                0,
+                VoucherLineDraft {
+                    account_code: "6602".into(),
+                    debit_amount: credit - debit,
+                    credit_amount: 0.0,
+                    summary: Some(format!("{belong_month} 报销费用（无票部分）")),
+                },
+            );
+        }
+    }
+    let voucher = insert_voucher(
+        conn,
+        &VoucherDraft {
+            belong_month: belong_month.clone(),
+            voucher_date: format!("{belong_month}-28"),
+            source_type: "reimbursement_accrual".into(),
+            source_id: claim_id,
+            remark: Some(format!("报销计提（{claim_no}）")),
+            lines,
+        },
+    )?;
+    Ok(Some(voucher))
+}
+
+/// 发票费用入账凭证：仅当发票 normal 且未挂任何报销单时生成（防止与报销计提重复入账）。
+pub fn maybe_generate_invoice_expense_voucher(
+    conn: &Connection,
+    invoice_id: i64,
+) -> AppResult<Option<Voucher>> {
+    let (belong_month, amount, tax, total, type_code, status): (
+        Option<String>,
+        f64,
+        f64,
+        f64,
+        Option<String>,
+        String,
+    ) = conn.query_row(
+        "SELECT belong_month, amount, tax_amount, total_amount, expense_type_code, status FROM invoices WHERE id = ?1",
+        params![invoice_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+    )?;
+    if status != "normal" {
+        return Ok(None);
+    }
+    if !table_exists(conn, "vouchers") {
+        return Ok(None);
+    }
+    // 借方（费用+税额）为 0 或非正时无法构成平衡凭证（如历史数据缺 amount/tax），跳过
+    if amount + tax <= 0.0 {
+        return Ok(None);
+    }
+    let belong_month = match belong_month {
+        Some(m) if !m.trim().is_empty() => m,
+        _ => return Ok(None),
+    };
+    // 仅统计挂到"会生成计提凭证"的报销单（approved）上的关联：
+    // 挂在 draft/submitted/rejected/void 报销单上的发票仍需单独入账，作废/反审批时由此得到补偿。
+    let linked: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM reimbursement_claim_invoices rc
+         JOIN reimbursement_claims c ON c.id = rc.claim_id
+         WHERE rc.invoice_id = ?1 AND c.status = 'approved'",
+        params![invoice_id],
+        |r| r.get(0),
+    )?;
+    if linked > 0 {
+        return Ok(None);
+    }
+    let exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM vouchers WHERE source_type='invoice_expense' AND source_id=?1 AND status='active'",
+        params![invoice_id],
+        |r| r.get(0),
+    )?;
+    if exists > 0 {
+        return Ok(None);
+    }
+    let account = match &type_code {
+        Some(code) if !code.is_empty() => mapping_account(conn, "expense_type", code)?,
+        _ => "6602".into(),
+    };
+    let mut lines = vec![VoucherLineDraft {
+        account_code: account,
+        debit_amount: amount,
+        credit_amount: 0.0,
+        summary: Some(format!("{belong_month} 费用（无报销关联发票）")),
+    }];
+    if tax > 0.0 {
+        lines.push(VoucherLineDraft {
+            account_code: "2221".into(),
+            debit_amount: tax,
+            credit_amount: 0.0,
+            summary: Some("进项税额".into()),
+        });
+    }
+    lines.push(VoucherLineDraft {
+        account_code: "2241".into(),
+        debit_amount: 0.0,
+        credit_amount: total,
+        summary: Some(format!("{belong_month} 应付费用")),
+    });
+    let voucher = insert_voucher(
+        conn,
+        &VoucherDraft {
+            belong_month: belong_month.clone(),
+            voucher_date: format!("{belong_month}-28"),
+            source_type: "invoice_expense".into(),
+            source_id: invoice_id,
+            remark: Some("发票费用入账".into()),
+            lines,
+        },
+    )?;
+    Ok(Some(voucher))
+}
+
+/// 作废某报销单的全部计提凭证，返回作废条数。
+pub fn void_reimbursement_accrual_voucher(conn: &Connection, claim_id: i64) -> AppResult<usize> {
+    void_vouchers_for_source(conn, "reimbursement_accrual", claim_id)
+}
+
+/// 作废某发票的费用入账凭证，返回作废条数。
+pub fn void_invoice_expense_voucher(conn: &Connection, invoice_id: i64) -> AppResult<usize> {
+    void_vouchers_for_source(conn, "invoice_expense", invoice_id)
+}
+
+/// 测试环境（invoice.rs/db.rs 的最小 schema）可能没有 vouchers 表，此时跳过凭证生成。
+fn table_exists(conn: &Connection, table: &str) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?1",
+        params![table],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
 /// 按条件查询凭证列表（月份/来源类型/状态均可选），含分录，按凭证号排序。
 pub fn get_vouchers(conn: &Connection, q: &VoucherQuery) -> AppResult<Vec<Voucher>> {
     let mut sql = String::from("SELECT id FROM vouchers WHERE 1=1");
@@ -560,6 +808,13 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         db::create_tables(&conn).unwrap();
         db::seed_gl_accounts(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT OR IGNORE INTO invoice_expense_types (code, name, sort_order) VALUES
+                ('office', '办公费', 1), ('travel', '差旅费', 2), ('other', '其他', 99);
+            INSERT OR IGNORE INTO employees (id, employee_no, name, department, status, base_salary, created_at, updated_at)
+            VALUES (1, 'E001', '张三', '销售部', 'active', 10000, '2026-08-01', '2026-08-01');",
+        )
+        .unwrap();
         conn
     }
 
@@ -1057,6 +1312,541 @@ mod tests {
         // 借贷合计平衡（30/30）但存在负数分录，应被拒绝
         let err = insert_voucher(&conn, &draft).unwrap_err();
         assert!(err.to_string().contains("不能为负"), "got: {err:?}");
+    }
+
+    #[test]
+    fn test_reimbursement_and_invoice_vouchers() {
+        let conn = setup();
+        // 场景 1：无报销关联的发票入账
+        // amount=100 tax=13 total=113 belong_month=2026-08，office 映射到 6602
+        save_account_mapping(
+            &conn,
+            &AccountMappingInput {
+                scope: "expense_type".into(),
+                key: "office".into(),
+                account_code: "6602".into(),
+                remark: None,
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO invoices (id, invoice_code, invoice_number, amount, tax_amount, total_amount,
+                 expense_type_code, employee_id, belong_month, status, created_at, updated_at)
+             VALUES (1, 'A', '001', 100.0, 13.0, 113.0, 'office', 1, '2026-08', 'normal',
+                     '2026-08-10', '2026-08-10')",
+            [],
+        )
+        .unwrap();
+        assert!(maybe_generate_invoice_expense_voucher(&conn, 1)
+            .unwrap()
+            .is_some());
+        let vouchers = get_vouchers(
+            &conn,
+            &VoucherQuery {
+                month: None,
+                source_type: Some("invoice_expense".into()),
+                status: Some("active".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(vouchers.len(), 1);
+        assert_eq!(vouchers[0].source_id, 1);
+        assert_eq!(vouchers[0].total_amount, 113.0);
+        assert_eq!(vouchers[0].voucher_date, "2026-08-28");
+        // 借 6602=100、借 2221=13、贷 2241=113
+        let debit6602 = vouchers[0]
+            .lines
+            .iter()
+            .find(|l| l.account_code == "6602")
+            .unwrap();
+        assert_eq!(debit6602.debit_amount, 100.0);
+        let debit2221 = vouchers[0]
+            .lines
+            .iter()
+            .find(|l| l.account_code == "2221")
+            .unwrap();
+        assert_eq!(debit2221.debit_amount, 13.0);
+        let credit2241 = vouchers[0]
+            .lines
+            .iter()
+            .find(|l| l.account_code == "2241")
+            .unwrap();
+        assert_eq!(credit2241.credit_amount, 113.0);
+
+        // 场景 2：发票挂到报销单并审批通过
+        // 先作废 invoice_expense，再生成 reimbursement_accrual
+        conn.execute(
+            "INSERT INTO reimbursement_claims
+                (id, claim_no, employee_id, belong_month, title, total_amount, invoice_count,
+                 status, payment_status, created_at, updated_at)
+             VALUES (10, 'BX202608010', 1, '2026-08', '办公报销', 113.0, 1,
+                     'approved', 'unpaid', '2026-08-12', '2026-08-12')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO reimbursement_claim_invoices (claim_id, invoice_id, created_at)
+             VALUES (10, 1, '2026-08-12')",
+            [],
+        )
+        .unwrap();
+        // 审批通过后：void 发票单独凭证 + 生成报销计提
+        assert_eq!(void_invoice_expense_voucher(&conn, 1).unwrap(), 1);
+        assert!(generate_reimbursement_accrual_voucher(&conn, 10)
+            .unwrap()
+            .is_some());
+        // 报销计提凭证：借 6602=100、借 2221=13、贷 2241=113
+        let accruals = get_vouchers(
+            &conn,
+            &VoucherQuery {
+                month: None,
+                source_type: Some("reimbursement_accrual".into()),
+                status: Some("active".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(accruals.len(), 1);
+        assert_eq!(accruals[0].source_id, 10);
+        assert_eq!(accruals[0].total_amount, 113.0);
+        let debit6602 = accruals[0]
+            .lines
+            .iter()
+            .find(|l| l.account_code == "6602")
+            .unwrap();
+        assert_eq!(debit6602.debit_amount, 100.0);
+        let credit2241 = accruals[0]
+            .lines
+            .iter()
+            .find(|l| l.account_code == "2241")
+            .unwrap();
+        assert_eq!(credit2241.credit_amount, 113.0);
+        // 发票单独凭证已 void，防止重复计费
+        let active_invoice_expense = get_vouchers(
+            &conn,
+            &VoucherQuery {
+                month: None,
+                source_type: Some("invoice_expense".into()),
+                status: Some("active".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(active_invoice_expense.len(), 0);
+        // 重复审批（幂等）：不新增凭证
+        assert!(generate_reimbursement_accrual_voucher(&conn, 10)
+            .unwrap()
+            .is_none());
+
+        // 场景 3+4：报销反审批（status 回 submitted）后凭证 void，发票恢复单独入账
+        // 反审批 = void 计提凭证 + 更新报销单状态 + maybe 补发票单独凭证
+        assert_eq!(void_reimbursement_accrual_voucher(&conn, 10).unwrap(), 1);
+        conn.execute(
+            "UPDATE reimbursement_claims SET status='submitted' WHERE id=10",
+            [],
+        )
+        .unwrap();
+        assert!(maybe_generate_invoice_expense_voucher(&conn, 1)
+            .unwrap()
+            .is_some());
+        let active_after = get_vouchers(
+            &conn,
+            &VoucherQuery {
+                month: None,
+                source_type: Some("invoice_expense".into()),
+                status: Some("active".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(active_after.len(), 1);
+        // 报销计提凭证 active 数为 0
+        let active_accruals = get_vouchers(
+            &conn,
+            &VoucherQuery {
+                month: None,
+                source_type: Some("reimbursement_accrual".into()),
+                status: Some("active".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(active_accruals.len(), 0);
+    }
+
+    #[test]
+    fn test_invoice_linked_to_claim_no_expense_voucher() {
+        let conn = setup();
+        // 已挂报销单的发票不生成单独费用凭证
+        conn.execute(
+            "INSERT INTO invoices (id, invoice_code, invoice_number, amount, tax_amount, total_amount,
+                 expense_type_code, employee_id, belong_month, status, created_at, updated_at)
+             VALUES (1, 'A', '001', 100.0, 13.0, 113.0, 'office', 1, '2026-08', 'normal',
+                     '2026-08-10', '2026-08-10')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO reimbursement_claims
+                (id, claim_no, employee_id, belong_month, title, total_amount, invoice_count,
+                 status, payment_status, created_at, updated_at)
+             VALUES (10, 'BX202608010', 1, '2026-08', '办公报销', 113.0, 1,
+                     'approved', 'unpaid', '2026-08-12', '2026-08-12')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO reimbursement_claim_invoices (claim_id, invoice_id, created_at)
+             VALUES (10, 1, '2026-08-12')",
+            [],
+        )
+        .unwrap();
+        // 已挂 approved 报销单的发票不生成单独费用凭证
+        assert!(maybe_generate_invoice_expense_voucher(&conn, 1)
+            .unwrap()
+            .is_none());
+        // void 发票也不生成
+        conn.execute("UPDATE invoices SET status='void' WHERE id=1", [])
+            .unwrap();
+        assert!(maybe_generate_invoice_expense_voucher(&conn, 1)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_draft_claim_does_not_gate_invoice_or_accrual() {
+        let conn = setup();
+        conn.execute(
+            "INSERT INTO invoices (id, invoice_code, invoice_number, amount, tax_amount, total_amount,
+                 expense_type_code, employee_id, belong_month, status, created_at, updated_at)
+             VALUES (1, 'A', '001', 100.0, 13.0, 113.0, 'office', 1, '2026-08', 'normal',
+                     '2026-08-10', '2026-08-10')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO reimbursement_claims
+                (id, claim_no, employee_id, belong_month, title, total_amount, invoice_count,
+                 status, payment_status, created_at, updated_at)
+             VALUES (10, 'BX202608010', 1, '2026-08', '办公报销', 113.0, 1,
+                     'draft', 'unpaid', '2026-08-12', '2026-08-12')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO reimbursement_claim_invoices (claim_id, invoice_id, created_at)
+             VALUES (10, 1, '2026-08-12')",
+            [],
+        )
+        .unwrap();
+        // draft 报销单不生成计提凭证
+        assert!(generate_reimbursement_accrual_voucher(&conn, 10)
+            .unwrap()
+            .is_none());
+        // 挂在 draft 报销单上的发票仍单独入账（防漏记）
+        assert!(maybe_generate_invoice_expense_voucher(&conn, 1)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn test_accrual_no_invoice_part_falls_to_6602() {
+        let conn = setup();
+        // 报销单无关联发票（如现金支出）：总额 200 全部进 6602
+        conn.execute(
+            "INSERT INTO reimbursement_claims
+                (id, claim_no, employee_id, belong_month, title, total_amount, invoice_count,
+                 status, payment_status, created_at, updated_at)
+             VALUES (10, 'BX202608010', 1, '2026-08', '无票报销', 200.0, 0,
+                     'approved', 'unpaid', '2026-08-12', '2026-08-12')",
+            [],
+        )
+        .unwrap();
+        assert!(generate_reimbursement_accrual_voucher(&conn, 10)
+            .unwrap()
+            .is_some());
+        let accruals = get_vouchers(
+            &conn,
+            &VoucherQuery {
+                month: None,
+                source_type: Some("reimbursement_accrual".into()),
+                status: Some("active".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(accruals.len(), 1);
+        let debit = accruals[0]
+            .lines
+            .iter()
+            .find(|l| l.debit_amount > 0.0)
+            .unwrap();
+        assert_eq!(debit.account_code, "6602");
+        assert_eq!(debit.debit_amount, 200.0);
+        let credit = accruals[0]
+            .lines
+            .iter()
+            .find(|l| l.credit_amount > 0.0)
+            .unwrap();
+        assert_eq!(credit.account_code, "2241");
+    }
+
+    #[test]
+    fn test_db_hooks_reimbursement_invoice_vouchers() {
+        let conn = setup();
+        // 通过 db.rs 公开入口验证挂接（setup 已预置员工 E001）
+        let invoice = db::insert_invoice(
+            &conn,
+            &crate::models::InvoiceInput {
+                invoice_code: Some("A".into()),
+                invoice_number: Some("100".into()),
+                invoice_type: Some("普通发票".into()),
+                issue_date: Some("2026-08-01".into()),
+                check_code: None,
+                amount: Some(100.0),
+                tax_amount: Some(13.0),
+                total_amount: Some(113.0),
+                seller_name: Some("销售方".into()),
+                seller_tax_id: None,
+                buyer_name: None,
+                buyer_tax_id: None,
+                expense_type_code: Some("office".into()),
+                employee_id: Some(1),
+                belong_month: Some("2026-08".into()),
+                remark: None,
+                image_path: None,
+                raw_ocr_json: None,
+            },
+            "/tmp/a.pdf",
+            0,
+        )
+        .unwrap();
+        // insert_invoice 挂接：未挂报销的发票自动生成 invoice_expense 凭证
+        let vouchers = get_vouchers(
+            &conn,
+            &VoucherQuery {
+                month: None,
+                source_type: Some("invoice_expense".into()),
+                status: Some("active".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(vouchers.len(), 1);
+        assert_eq!(vouchers[0].source_id, invoice.id);
+
+        // 挂到报销单并审批通过
+        let claim = db::save_reimbursement_claim(
+            &conn,
+            &crate::models::ReimbursementClaimInput {
+                id: None,
+                employee_id: Some(1),
+                belong_month: "2026-08".into(),
+                title: "办公报销".into(),
+                invoice_ids: vec![invoice.id],
+                status: Some("submitted".into()),
+                payment_status: None,
+                payment_date: None,
+                remark: None,
+            },
+        )
+        .unwrap();
+        // 保存后（submitted 未审批）不应有报销计提；发票仍单独入账（防漏记），
+        // 其单独凭证被补偿性 void+重建（金额不变，凭证号前移）
+        let accruals = get_vouchers(
+            &conn,
+            &VoucherQuery {
+                month: None,
+                source_type: Some("reimbursement_accrual".into()),
+                status: Some("active".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(accruals.len(), 0);
+        let active_expense = get_vouchers(
+            &conn,
+            &VoucherQuery {
+                month: None,
+                source_type: Some("invoice_expense".into()),
+                status: Some("active".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(active_expense.len(), 1);
+
+        // 审批通过：生成报销计提
+        db::update_reimbursement_claim_status(&conn, claim.id, Some("approved".into()), None, None)
+            .unwrap();
+        let accruals = get_vouchers(
+            &conn,
+            &VoucherQuery {
+                month: None,
+                source_type: Some("reimbursement_accrual".into()),
+                status: Some("active".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(accruals.len(), 1);
+        assert_eq!(accruals[0].source_id, claim.id);
+        assert_eq!(accruals[0].total_amount, 113.0);
+
+        // 反审批：报销计提 void，发票恢复单独入账
+        db::update_reimbursement_claim_status(
+            &conn,
+            claim.id,
+            Some("submitted".into()),
+            None,
+            None,
+        )
+        .unwrap();
+        let active_accruals = get_vouchers(
+            &conn,
+            &VoucherQuery {
+                month: None,
+                source_type: Some("reimbursement_accrual".into()),
+                status: Some("active".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(active_accruals.len(), 0);
+        let active_expense = get_vouchers(
+            &conn,
+            &VoucherQuery {
+                month: None,
+                source_type: Some("invoice_expense".into()),
+                status: Some("active".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(active_expense.len(), 1);
+        assert_eq!(active_expense[0].source_id, invoice.id);
+
+        // soft_delete_invoice：发票费用凭证 void
+        db::soft_delete_invoice(&conn, invoice.id).unwrap();
+        let active_expense = get_vouchers(
+            &conn,
+            &VoucherQuery {
+                month: None,
+                source_type: Some("invoice_expense".into()),
+                status: Some("active".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(active_expense.len(), 0);
+
+        // soft_delete_reimbursement_claim：报销计提凭证 void
+        db::update_reimbursement_claim_status(&conn, claim.id, Some("approved".into()), None, None)
+            .unwrap();
+        db::soft_delete_reimbursement_claim(&conn, claim.id).unwrap();
+        let active_accruals = get_vouchers(
+            &conn,
+            &VoucherQuery {
+                month: None,
+                source_type: Some("reimbursement_accrual".into()),
+                status: Some("active".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(active_accruals.len(), 0);
+    }
+
+    #[test]
+    fn test_update_invoice_regenerates_expense_voucher() {
+        let conn = setup();
+        conn.execute(
+            "INSERT INTO invoices (id, invoice_code, invoice_number, amount, tax_amount, total_amount,
+                 expense_type_code, employee_id, belong_month, status, created_at, updated_at)
+             VALUES (1, 'A', '001', 100.0, 13.0, 113.0, 'office', 1, '2026-08', 'normal',
+                     '2026-08-10', '2026-08-10')",
+            [],
+        )
+        .unwrap();
+        assert!(maybe_generate_invoice_expense_voucher(&conn, 1)
+            .unwrap()
+            .is_some());
+        // 修改金额：100 -> 200（tax 不变，total 213）
+        let updated = db::update_invoice(
+            &conn,
+            1,
+            &crate::models::InvoiceInput {
+                invoice_code: None,
+                invoice_number: None,
+                invoice_type: None,
+                issue_date: None,
+                check_code: None,
+                amount: Some(200.0),
+                tax_amount: None,
+                total_amount: Some(213.0),
+                seller_name: None,
+                seller_tax_id: None,
+                buyer_name: None,
+                buyer_tax_id: None,
+                expense_type_code: None,
+                employee_id: None,
+                belong_month: None,
+                remark: None,
+                image_path: None,
+                raw_ocr_json: None,
+            },
+            None,
+        )
+        .unwrap();
+        assert!(updated);
+        let vouchers = get_vouchers(
+            &conn,
+            &VoucherQuery {
+                month: None,
+                source_type: Some("invoice_expense".into()),
+                status: Some("active".into()),
+            },
+        )
+        .unwrap();
+        // void 旧凭证后重建：active 凭证金额为新值
+        assert_eq!(vouchers.len(), 1);
+        assert_eq!(vouchers[0].total_amount, 213.0);
+        let voided = get_vouchers(
+            &conn,
+            &VoucherQuery {
+                month: None,
+                source_type: Some("invoice_expense".into()),
+                status: Some("void".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(voided.len(), 1);
+        // 幂等：再次 update（金额未变）不重复生成
+        db::update_invoice(
+            &conn,
+            1,
+            &crate::models::InvoiceInput {
+                invoice_code: None,
+                invoice_number: None,
+                invoice_type: None,
+                issue_date: None,
+                check_code: None,
+                amount: Some(200.0),
+                tax_amount: None,
+                total_amount: Some(213.0),
+                seller_name: None,
+                seller_tax_id: None,
+                buyer_name: None,
+                buyer_tax_id: None,
+                expense_type_code: None,
+                employee_id: None,
+                belong_month: None,
+                remark: None,
+                image_path: None,
+                raw_ocr_json: None,
+            },
+            None,
+        )
+        .unwrap();
+        let active = get_vouchers(
+            &conn,
+            &VoucherQuery {
+                month: None,
+                source_type: Some("invoice_expense".into()),
+                status: Some("active".into()),
+            },
+        )
+        .unwrap();
+        // 幂等：金额未变的 update 走 void+重建，active 仍只有 1 张且金额为新值
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].total_amount, 213.0);
     }
 
     #[test]
