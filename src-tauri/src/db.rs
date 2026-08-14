@@ -4231,6 +4231,26 @@ pub fn soft_delete_invoice(conn: &Connection, id: i64) -> AppResult<bool> {
     )?;
     if updated > 0 {
         crate::accounting::void_invoice_expense_voucher(&tx, id)?;
+        // 作废的发票若挂在 approved 报销单上，其余额仍留在 active 计提凭证中：
+        // 仿 update_invoice，对每个关联 approved 报销单 void + 重建计提（同事务）
+        // （测试最小 schema 可能没有报销表，此时跳过）
+        if crate::accounting::table_exists(&tx, "reimbursement_claim_invoices") {
+            let claim_ids: Vec<i64> = {
+                let mut stmt = tx.prepare(
+                    "SELECT rc.claim_id FROM reimbursement_claim_invoices rc
+                     JOIN reimbursement_claims c ON c.id = rc.claim_id
+                     WHERE rc.invoice_id = ?1 AND c.status = 'approved'",
+                )?;
+                let rows = stmt.query_map(params![id], |r| r.get(0))?;
+                rows.collect::<Result<Vec<_>, _>>()?
+            };
+            for claim_id in claim_ids {
+                crate::accounting::void_reimbursement_accrual_voucher(&tx, claim_id)?;
+                crate::accounting::generate_reimbursement_accrual_voucher(&tx, claim_id)?;
+            }
+        }
+        // 注：claim 的 total_amount/invoice_count 滞留旧值（含已作废发票）不在本函数刷新，
+        // 由报销模块在重新编辑/保存报销单时重算（save_reimbursement_claim 全量重写这两个字段）
     }
     tx.commit()?;
     Ok(updated > 0)
