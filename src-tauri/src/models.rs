@@ -880,3 +880,59 @@ pub struct AccountMappingInput {
     pub account_code: String,
     pub remark: Option<String>,
 }
+
+// ==================== Accounting（第五阶段 凭证核心） ====================
+
+/// 凭证分录草稿（生成凭证入参的行）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VoucherLineDraft {
+    pub account_code: String,
+    pub debit_amount: f64,
+    pub credit_amount: f64,
+    pub summary: Option<String>,
+}
+
+/// 凭证草稿（生成凭证入参）。借贷必须平衡，科目必须存在。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VoucherDraft {
+    pub belong_month: String,
+    pub voucher_date: String,
+    pub source_type: String,
+    pub source_id: i64,
+    pub remark: Option<String>,
+    pub lines: Vec<VoucherLineDraft>,
+}
+
+/// 凭证分录（voucher_lines 表行，按 line_order 排序）。
+#[derive(Debug, Clone, Serialize)]
+pub struct VoucherLine {
+    pub id: i64,
+    pub account_code: String,
+    pub debit_amount: f64,
+    pub credit_amount: f64,
+    pub summary: Option<String>,
+    pub line_order: i64,
+}
+
+/// 凭证（vouchers 表行 + 分录列表）。
+#[derive(Debug, Clone, Serialize)]
+pub struct Voucher {
+    pub id: i64,
+    pub voucher_no: String,
+    pub voucher_date: String,
+    pub belong_month: String,
+    pub source_type: String,
+    pub source_id: i64,
+    pub total_amount: f64,
+    pub status: String,
+    pub remark: Option<String>,
+    pub lines: Vec<VoucherLine>,
+}
+
+/// 凭证查询条件（全部可选，组合过滤）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct VoucherQuery {
+    pub month: Option<String>,
+    pub source_type: Option<String>,
+    pub status: Option<String>,
+}

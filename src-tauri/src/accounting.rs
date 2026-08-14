@@ -244,6 +244,135 @@ pub fn delete_account_mapping(conn: &Connection, id: i64) -> AppResult<bool> {
     Ok(conn.execute("DELETE FROM account_mappings WHERE id = ?1", params![id])? > 0)
 }
 
+/// 生成凭证：校验借贷平衡与科目存在后落库，编号按月递增（记-YYYYMM-NNN）。
+/// 同源（source_type+source_id）已有 active 凭证时由部分唯一索引拒绝（错误包装为 AppError 返回，不 panic）。
+pub fn insert_voucher(conn: &Connection, draft: &VoucherDraft) -> AppResult<Voucher> {
+    let debit: f64 = draft.lines.iter().map(|l| l.debit_amount).sum();
+    let credit: f64 = draft.lines.iter().map(|l| l.credit_amount).sum();
+    if (debit - credit).abs() > 0.005 || debit <= 0.0 {
+        return Err(AppError::General(format!(
+            "凭证借贷不平衡（借 {debit:.2} / 贷 {credit:.2}），拒绝生成"
+        )));
+    }
+    for line in &draft.lines {
+        if conn
+            .query_row(
+                "SELECT 1 FROM gl_accounts WHERE code = ?1",
+                params![line.account_code],
+                |_| Ok(()),
+            )
+            .is_err()
+        {
+            return Err(AppError::General(format!(
+                "科目 {} 不存在",
+                line.account_code
+            )));
+        }
+    }
+    let voucher_no = next_voucher_no(conn, &draft.belong_month)?;
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO vouchers (voucher_no, voucher_date, belong_month, source_type, source_id, total_amount, status, remark, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?8, ?8)",
+        params![voucher_no, draft.voucher_date, draft.belong_month, draft.source_type, draft.source_id, debit, draft.remark, now],
+    )?;
+    let id = conn.last_insert_rowid();
+    for (i, line) in draft.lines.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO voucher_lines (voucher_id, account_code, debit_amount, credit_amount, summary, line_order)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, line.account_code, line.debit_amount, line.credit_amount, line.summary, i as i64],
+        )?;
+    }
+    get_voucher(conn, id)
+}
+
+/// 按 id 读取凭证（含按 line_order 排序的分录列表）。
+pub fn get_voucher(conn: &Connection, id: i64) -> AppResult<Voucher> {
+    let mut voucher = conn.query_row(
+        "SELECT id, voucher_no, voucher_date, belong_month, source_type, source_id, total_amount, status, remark
+         FROM vouchers WHERE id = ?1",
+        params![id],
+        |r| {
+            Ok(Voucher {
+                id: r.get(0)?, voucher_no: r.get(1)?, voucher_date: r.get(2)?,
+                belong_month: r.get(3)?, source_type: r.get(4)?, source_id: r.get(5)?,
+                total_amount: r.get(6)?, status: r.get(7)?, remark: r.get(8)?,
+                lines: Vec::new(),
+            })
+        },
+    )?;
+    let mut stmt = conn.prepare(
+        "SELECT id, account_code, debit_amount, credit_amount, summary, line_order
+         FROM voucher_lines WHERE voucher_id = ?1 ORDER BY line_order",
+    )?;
+    voucher.lines = stmt
+        .query_map(params![id], |r| {
+            Ok(VoucherLine {
+                id: r.get(0)?,
+                account_code: r.get(1)?,
+                debit_amount: r.get(2)?,
+                credit_amount: r.get(3)?,
+                summary: r.get(4)?,
+                line_order: r.get(5)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(voucher)
+}
+
+/// 生成下一凭证号：记-YYYYMM-NNN（NNN 为该月已有凭证数 + 1）。
+/// 并发安全由上层 Mutex<Connection> 串行化保证。
+pub fn next_voucher_no(conn: &Connection, month: &str) -> AppResult<String> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM vouchers WHERE belong_month = ?1",
+        params![month],
+        |r| r.get(0),
+    )?;
+    Ok(format!("记-{}-{:03}", month.replace('-', ""), n + 1))
+}
+
+/// 作废某业务源下全部 active 凭证，返回作废条数。作废后同源可重新生成。
+pub fn void_vouchers_for_source(
+    conn: &Connection,
+    source_type: &str,
+    source_id: i64,
+) -> AppResult<usize> {
+    Ok(conn.execute(
+        "UPDATE vouchers SET status = 'void', updated_at = ?3 WHERE source_type = ?1 AND source_id = ?2 AND status = 'active'",
+        params![source_type, source_id, Utc::now().to_rfc3339()],
+    )?)
+}
+
+/// 按条件查询凭证列表（月份/来源类型/状态均可选），含分录，按凭证号排序。
+pub fn get_vouchers(conn: &Connection, q: &VoucherQuery) -> AppResult<Vec<Voucher>> {
+    let mut sql = String::from("SELECT id FROM vouchers WHERE 1=1");
+    let mut args: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    if let Some(m) = &q.month {
+        sql.push_str(&format!(" AND belong_month = ?{}", args.len() + 1));
+        args.push(Box::new(m.clone()));
+    }
+    if let Some(s) = &q.source_type {
+        sql.push_str(&format!(" AND source_type = ?{}", args.len() + 1));
+        args.push(Box::new(s.clone()));
+    }
+    if let Some(s) = &q.status {
+        sql.push_str(&format!(" AND status = ?{}", args.len() + 1));
+        args.push(Box::new(s.clone()));
+    }
+    sql.push_str(" ORDER BY voucher_no");
+    let ids: Vec<i64> = {
+        let mut stmt = conn.prepare(&sql)?;
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+            args.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt
+            .query_map(params_ref.as_slice(), |r| r.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+    ids.iter().map(|id| get_voucher(conn, *id)).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,6 +527,68 @@ mod tests {
         )
         .unwrap();
         assert!(set_account_active(&conn, "1002", false).unwrap());
+    }
+
+    #[test]
+    fn test_voucher_core() {
+        let conn = setup();
+        let draft = VoucherDraft {
+            belong_month: "2026-08".into(),
+            voucher_date: "2026-08-31".into(),
+            source_type: "bank_manual".into(),
+            source_id: 1,
+            remark: Some("手续费".into()),
+            lines: vec![
+                VoucherLineDraft {
+                    account_code: "6603".into(),
+                    debit_amount: 30.0,
+                    credit_amount: 0.0,
+                    summary: Some("手续费".into()),
+                },
+                VoucherLineDraft {
+                    account_code: "1002".into(),
+                    debit_amount: 0.0,
+                    credit_amount: 30.0,
+                    summary: Some("手续费".into()),
+                },
+            ],
+        };
+        let v = insert_voucher(&conn, &draft).unwrap();
+        assert!(v.voucher_no.starts_with("记-202608-"));
+        assert_eq!(v.total_amount, 30.0);
+        // 不平衡拒绝
+        let bad = VoucherDraft {
+            lines: vec![VoucherLineDraft {
+                account_code: "6603".into(),
+                debit_amount: 30.0,
+                credit_amount: 0.0,
+                summary: None,
+            }],
+            ..draft.clone()
+        };
+        assert!(insert_voucher(&conn, &bad).is_err());
+        // 同源重复拒绝（部分唯一索引）
+        assert!(insert_voucher(&conn, &draft).is_err());
+        // 作废后可重新生成，编号递增
+        assert_eq!(
+            void_vouchers_for_source(&conn, "bank_manual", 1).unwrap(),
+            1
+        );
+        let v2 = insert_voucher(&conn, &draft).unwrap();
+        assert_ne!(v.id, v2.id);
+        assert_ne!(v.voucher_no, v2.voucher_no);
+        // 查询
+        let list = get_vouchers(
+            &conn,
+            &VoucherQuery {
+                month: Some("2026-08".into()),
+                source_type: None,
+                status: Some("active".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].lines.len(), 2);
     }
 
     #[test]
