@@ -60,7 +60,7 @@ const errText = (e: unknown): string => (e instanceof Error ? e.message : String
 const fmtAmount = (value: number): string =>
   (Number(value) || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-// 期初余额编辑行：科目信息 + 借贷两侧金额
+// 期初余额编辑行：科目信息 + 借贷两侧金额；inactive 标记已停用科目（只读展示，保存时保留）
 interface ObRow {
   code: string;
   name: string;
@@ -68,6 +68,7 @@ interface ObRow {
   direction: GlAccount['direction'];
   debit: number;
   credit: number;
+  inactive: boolean;
 }
 
 const ChartOfAccounts: React.FC = () => {
@@ -107,7 +108,8 @@ const ChartOfAccounts: React.FC = () => {
     [accounts, activeCategory]
   );
 
-  // 打开期初余额 Modal：加载已保存数据并与全部启用科目合并（未录制的科目金额为 0）
+  // 打开期初余额 Modal：加载已保存数据并与全部科目合并
+  // 启用科目生成可编辑行；已停用但仍有保存金额的科目生成只读行（保存时原样保留，避免整体覆盖时静默丢失）
   const openOpeningBalances = async () => {
     setObOpen(true);
     setObLoading(true);
@@ -117,18 +119,37 @@ const ChartOfAccounts: React.FC = () => {
         setObMonth(dayjs(state.month));
       }
       const saved = new Map(state.rows.map((r) => [r.account_code, r]));
-      setObRows(
-        list
-          .filter((a) => a.is_active === 1)
-          .map((a) => ({
+      const hasAmount = (code: string): boolean => {
+        const s = saved.get(code);
+        return Boolean(s?.debit_amount || s?.credit_amount);
+      };
+      const rows: ObRow[] = [];
+      for (const a of list) {
+        if (a.is_active === 1) {
+          // 启用科目：可编辑，未录制的金额为 0
+          rows.push({
             code: a.code,
             name: a.name,
             category: a.category,
             direction: a.direction,
             debit: saved.get(a.code)?.debit_amount ?? 0,
             credit: saved.get(a.code)?.credit_amount ?? 0,
-          }))
-      );
+            inactive: false,
+          });
+        } else if (hasAmount(a.code)) {
+          // 停用科目但已有保存金额：只读展示，保存时随 rows 原样提交
+          rows.push({
+            code: a.code,
+            name: a.name,
+            category: a.category,
+            direction: a.direction,
+            debit: saved.get(a.code)?.debit_amount ?? 0,
+            credit: saved.get(a.code)?.credit_amount ?? 0,
+            inactive: true,
+          });
+        }
+      }
+      setObRows(rows);
     } catch (e: unknown) {
       message.error('获取期初余额失败: ' + errText(e));
     } finally {
@@ -272,6 +293,7 @@ const ChartOfAccounts: React.FC = () => {
         <Space size={4}>
           <span>{record.name}</span>
           <Tag>{CATEGORY_LABEL[record.category] ?? record.category}</Tag>
+          {record.inactive && <Tag color="default">已停用</Tag>}
         </Space>
       ),
     },
@@ -285,7 +307,7 @@ const ChartOfAccounts: React.FC = () => {
           value={record.debit}
           min={0}
           precision={2}
-          disabled={record.direction !== 'debit'}
+          disabled={record.inactive || record.direction !== 'debit'}
           onChange={(v) => updateObRow(record.code, 'debit', v)}
           style={{ width: '100%' }}
         />
@@ -301,7 +323,7 @@ const ChartOfAccounts: React.FC = () => {
           value={record.credit}
           min={0}
           precision={2}
-          disabled={record.direction !== 'credit'}
+          disabled={record.inactive || record.direction !== 'credit'}
           onChange={(v) => updateObRow(record.code, 'credit', v)}
           style={{ width: '100%' }}
         />
@@ -417,7 +439,7 @@ const ChartOfAccounts: React.FC = () => {
             showIcon
             style={{ marginBottom: 12 }}
             message="录入启用科目的期初余额"
-            description="借方科目填借方金额，贷方科目填贷方金额；保存时借贷合计必须相等，未填金额的科目不会保存。保存会整体覆盖已有期初数据。"
+            description="借方科目填借方金额，贷方科目填贷方金额；保存时借贷合计必须相等，未填金额的科目不会保存。保存会整体覆盖已有期初数据。注意：已停用科目若在系统中仍有期初余额，会以只读行展示，保存时保留。"
           />
           <div style={{ marginBottom: 12 }}>
             <span style={{ marginRight: 8 }}>期初月份：</span>
