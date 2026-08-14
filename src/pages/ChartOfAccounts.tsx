@@ -183,7 +183,13 @@ const ChartOfAccounts: React.FC = () => {
   };
 
   const handleAddAccount = async () => {
-    const values = await form.validateFields();
+    let values: GlAccountInput;
+    try {
+      values = await form.validateFields();
+    } catch {
+      // 表单校验失败：antd 已在字段上展示错误，保持 Modal 打开
+      return;
+    }
     setSavingAccount(true);
     try {
       const created = await createGlAccount({ ...values, cash_flow_category: values.cash_flow_category ?? 'none' });
