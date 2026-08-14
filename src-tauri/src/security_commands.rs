@@ -95,21 +95,12 @@ pub fn unlock(
 
 /// 锁屏：清空内存中的 DEK。DB 中密文不动。
 #[tauri::command]
-pub fn lock(
-    state: State<'_, Mutex<Connection>>,
-    sec: State<'_, SecurityState>,
-) -> AppResult<()> {
+pub fn lock(state: State<'_, Mutex<Connection>>, sec: State<'_, SecurityState>) -> AppResult<()> {
     let conn = lock_conn(&state)?;
     security::lock(&sec);
     let now = Utc::now().to_rfc3339();
     let detail = format!("{{\"at\":\"{}\"}}", now);
-    let _ = db::log_operation(
-        &conn,
-        "lock",
-        "手动锁屏",
-        SEC_OP_OPERATOR,
-        Some(&detail),
-    );
+    let _ = db::log_operation(&conn, "lock", "手动锁屏", SEC_OP_OPERATOR, Some(&detail));
     Ok(())
 }
 
