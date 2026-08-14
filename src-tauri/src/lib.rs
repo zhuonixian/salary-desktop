@@ -1,3 +1,4 @@
+mod accounting;
 mod commands;
 mod data_safety;
 mod db;

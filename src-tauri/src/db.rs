@@ -27,7 +27,8 @@ pub fn init_db(app_data_dir: &str) -> AppResult<Connection> {
     Ok(conn)
 }
 
-fn create_tables(conn: &Connection) -> AppResult<()> {
+/// 建表（幂等）。pub 供 accounting 等业务模块测试初始化内存库使用。
+pub fn create_tables(conn: &Connection) -> AppResult<()> {
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS employees (

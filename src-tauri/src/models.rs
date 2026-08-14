@@ -820,3 +820,56 @@ pub struct LegacyMigrationStatus {
     pub processed_invoices: i64,
     pub token_migrated: bool,
 }
+
+// ==================== Accounting（第五阶段 科目/期初/映射） ====================
+
+/// 会计科目（gl_accounts 表行）。is_system/is_active 用 0/1 表示。
+#[derive(Debug, Clone, Serialize)]
+pub struct GlAccount {
+    pub code: String,
+    pub name: String,
+    pub category: String,
+    pub direction: String,
+    pub cash_flow_category: String,
+    pub is_system: i64,
+    pub is_active: i64,
+    pub remark: Option<String>,
+}
+
+/// 新增自定义科目的前端入参。
+#[derive(Debug, Clone, Deserialize)]
+pub struct GlAccountInput {
+    pub code: String,
+    pub name: String,
+    pub category: String,
+    pub direction: String,
+    pub cash_flow_category: Option<String>,
+    pub remark: Option<String>,
+}
+
+/// 期初余额行（opening_balances 表行）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpeningBalanceRow {
+    pub account_code: String,
+    pub debit_amount: f64,
+    pub credit_amount: f64,
+}
+
+/// 科目映射（account_mappings 表行）：费用类型/部门 → 会计科目。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountMapping {
+    pub id: i64,
+    pub scope: String,
+    pub key: String,
+    pub account_code: String,
+    pub remark: Option<String>,
+}
+
+/// 保存科目映射的前端入参。
+#[derive(Debug, Clone, Deserialize)]
+pub struct AccountMappingInput {
+    pub scope: String,
+    pub key: String,
+    pub account_code: String,
+    pub remark: Option<String>,
+}
