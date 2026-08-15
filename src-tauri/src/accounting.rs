@@ -907,13 +907,16 @@ pub fn get_vouchers(conn: &Connection, q: &VoucherQuery) -> AppResult<Vec<Vouche
 
 // ==================== 报表计算引擎（Task 10） ====================
 
-/// 科目余额中间结构：opening 按科目方向取正负号（借方科目借正，贷方科目贷正）。
+/// 科目余额中间结构：opening/opening_raw 按科目方向取正负号（借方科目借正，贷方科目贷正）。
 struct AccountBalance {
     code: String,
     name: String,
     category: String,
     direction: String,
+    /// 月初余额 = 启用期初 + 启用月至本月前一月凭证净额（跨月查看报表时滚入）
     opening: f64,
+    /// 年初（启用月期初）余额 = 仅 opening_balances，不滚入凭证净额
+    opening_raw: f64,
     period_debit: f64,
     period_credit: f64,
 }
@@ -933,7 +936,7 @@ fn opening_month(conn: &Connection) -> Option<String> {
         .unwrap_or(None)
 }
 
-/// 计算 month 及其之前所有月份中落在启用月之后的月份是否有效（month >= 启用月）。
+/// month 是否不早于启用月。
 fn month_enabled(conn: &Connection, month: &str) -> bool {
     match opening_month(conn) {
         Some(m) => month >= m.as_str(),
@@ -957,6 +960,7 @@ fn compute_balances(conn: &Connection, month: &str) -> AppResult<Vec<AccountBala
                 category: r.get(2)?,
                 direction: r.get(3)?,
                 opening: 0.0,
+                opening_raw: 0.0,
                 period_debit: 0.0,
                 period_credit: 0.0,
             })
@@ -979,11 +983,13 @@ fn compute_balances(conn: &Connection, month: &str) -> AppResult<Vec<AccountBala
             for row in rows {
                 let (code, debit, credit) = row?;
                 if let Some(b) = balances.iter_mut().find(|b| b.code == code) {
-                    b.opening = if b.direction == "debit" {
+                    let raw = if b.direction == "debit" {
                         debit
                     } else {
                         credit
                     };
+                    b.opening = raw;
+                    b.opening_raw = raw;
                 }
             }
             drop(stmt);
@@ -1112,10 +1118,26 @@ fn profit_loss_amounts(
         let y = *year_map.get(*code).unwrap_or(&0.0) * s;
         result.insert((*code).to_string(), (m, y));
     }
+    // 兜底行：非 12 标准编码的 profit_loss 科目（如自定义 660299）求和（贷-借），
+    // 避免自定义损益科目金额从报表消失导致资产负债表不平
+    let is_standard = |code: &str| INCOME_STATEMENT_ROWS.iter().any(|(c, _, _)| *c == code);
+    let mut other_m = 0.0;
+    let mut other_y = 0.0;
+    for (code, amt) in &month_map {
+        if !is_standard(code) {
+            other_m += amt;
+        }
+    }
+    for (code, amt) in &year_map {
+        if !is_standard(code) {
+            other_y += amt;
+        }
+    }
+    result.insert("other_pl".to_string(), (other_m, other_y));
     Ok(Some(result))
 }
 
-/// 净利润 = 收入类合计 − 费用类合计（贷方向科目为正、借方向科目为负）。
+/// 净利润 = 收入类合计 − 费用类合计 + 其他未列示损益（贷方向科目为正、借方向科目为负）。
 /// 返回 (当月, 年初至当月累计)；未启用返回 (0, 0)。
 fn net_profit(conn: &Connection, month: &str) -> AppResult<(f64, f64)> {
     match profit_loss_amounts(conn, month)? {
@@ -1128,14 +1150,22 @@ fn net_profit(conn: &Connection, month: &str) -> AppResult<(f64, f64)> {
                 m += mv * s;
                 y += yv * s;
             }
+            // 其他未列示损益已是净额（贷-借），直接计入
+            let (om, oy) = map.get("other_pl").copied().unwrap_or((0.0, 0.0));
+            m += om;
+            y += oy;
             Ok((m, y))
         }
         None => Ok((0.0, 0.0)),
     }
 }
 
+/// 现金等价物科目（货币资金合并行 / 编制现金流量表时视为"现金"）。
+const CASH_ACCOUNTS: &[&str] = &["1001", "1002", "1012"];
+
 /// 资产负债表：asset 科目期末 → 资产行（1001+1002+1012 合并"货币资金"，其余一科目一行）；
-/// 未分配利润 = 3104 期末 + 启用月至当月累计净利润；comparative = 年初（期初口径）；
+/// cost 类科目期末余额合计 → "成本类科目"行（借方，资产行末尾兜底，避免成本类科目金额消失致报表不平）；
+/// 未分配利润 = 3104 期末 + 启用月至当月累计净利润；comparative = 年初（启用月期初口径，不滚入凭证）；
 /// balanced 兜底校验 |资产合计 - 负债权益合计| < 0.005。
 pub fn build_balance_sheet(conn: &Connection, month: &str) -> AppResult<BalanceSheet> {
     let mut sheet = BalanceSheet {
@@ -1161,19 +1191,31 @@ pub fn build_balance_sheet(conn: &Connection, month: &str) -> AppResult<BalanceS
     };
     for b in balances.iter().filter(|b| b.category == "asset") {
         let ending = b.ending();
-        if ["1001", "1002", "1012"].contains(&b.code.as_str()) {
+        if CASH_ACCOUNTS.contains(&b.code.as_str()) {
             monetary_row.current += ending;
-            monetary_row.comparative += b.opening;
+            monetary_row.comparative += b.opening_raw;
         } else {
             sheet.asset_rows.push(ReportRow {
                 key: b.code.clone(),
                 label: b.name.clone(),
                 current: ending,
-                comparative: b.opening,
+                comparative: b.opening_raw,
             });
         }
     }
     sheet.asset_rows.insert(0, monetary_row);
+    // cost 类科目期末余额合计（借方）：资产行末尾兜底行，保证资产负债表平衡
+    let cost_total: f64 = balances
+        .iter()
+        .filter(|b| b.category == "cost")
+        .map(|b| b.ending())
+        .sum();
+    sheet.asset_rows.push(ReportRow {
+        key: "cost_accounts".into(),
+        label: "成本类科目".into(),
+        current: cost_total,
+        comparative: 0.0,
+    });
     sheet.asset_total = sheet.asset_rows.iter().map(|r| r.current).sum();
     // 负债与权益端：3104 替换为"未分配利润" = 3104 期末 + 启用月至当月累计净利润
     for b in balances
@@ -1181,9 +1223,9 @@ pub fn build_balance_sheet(conn: &Connection, month: &str) -> AppResult<BalanceS
         .filter(|b| b.category == "liability" || b.category == "equity")
     {
         let (ending, comp) = if b.code == "3104" {
-            (b.ending() + year_profit, b.opening)
+            (b.ending() + year_profit, b.opening_raw)
         } else {
-            (b.ending(), b.opening)
+            (b.ending(), b.opening_raw)
         };
         sheet.liability_equity_rows.push(ReportRow {
             key: if b.code == "3104" {
@@ -1206,8 +1248,9 @@ pub fn build_balance_sheet(conn: &Connection, month: &str) -> AppResult<BalanceS
 }
 
 /// 利润表：profit_loss 科目当月与年初至当月累计发生额（贷-借）映射到标准行；
-/// 营业利润 = 收入类 − 成本费用类（营业外收支与所得税之前）；
-/// 利润总额 = 营业利润 + 营业外收支净额；净利润 = 利润总额 − 所得税。
+/// 非 12 标准编码的损益科目（自定义科目）合并进"其他未列示损益"兜底行；
+/// 营业利润 = 收入类 − 成本费用类（营业外收支与所得税之前，不含兜底行）；
+/// 利润总额 = 营业利润 + 营业外收支净额；净利润 = 利润总额 + 其他未列示损益 − 所得税。
 pub fn build_income_statement(conn: &Connection, month: &str) -> AppResult<IncomeStatement> {
     let amounts = profit_loss_amounts(conn, month)?;
     let enabled = amounts.is_some();
@@ -1248,10 +1291,22 @@ pub fn build_income_statement(conn: &Connection, month: &str) -> AppResult<Incom
     let (non_in_m, non_in_y) = get("6301");
     let (non_out_m, non_out_y) = get("6711");
     let (tax_m, tax_y) = get("6801");
+    // other_pl 不在 INCOME_STATEMENT_ROWS，从 amounts 直接取
+    let (other_m, other_y) = match &amounts {
+        Some(map) => map.get("other_pl").copied().unwrap_or((0.0, 0.0)),
+        None => (0.0, 0.0),
+    };
     let total_m = op_m + non_in_m - non_out_m;
     let total_y = op_y + non_in_y - non_out_y;
-    let net_m = total_m - tax_m;
-    let net_y = total_y - tax_y;
+    // 净利润 = 利润总额 + 其他未列示损益 − 所得税费用（营业利润/利润总额不包含它）
+    let net_m = total_m + other_m - tax_m;
+    let net_y = total_y + other_y - tax_y;
+    rows.push(ReportRow {
+        key: "other_pl".into(),
+        label: "其他未列示损益".into(),
+        current: other_m,
+        comparative: other_y,
+    });
     rows.push(ReportRow {
         key: "operating_profit".into(),
         label: "营业利润".into(),
@@ -1278,9 +1333,6 @@ pub fn build_income_statement(conn: &Connection, month: &str) -> AppResult<Incom
         net_profit_year: net_y,
     })
 }
-
-/// 现金等价物科目（编制现金流量表时视为"现金"）。
-const CASH_ACCOUNTS: &[&str] = &["1001", "1002", "1012"];
 
 /// 现金流量表（直接法）：当月含现金科目行且含对方行的 active 凭证，
 /// 现金净流入（借-贷）按对方行金额占对方行总额比例分摊到对方科目的 cash_flow_category；
@@ -3093,6 +3145,145 @@ mod tests {
         approx(bs2.asset_total, 97000.0);
         approx(bs2.liability_equity_total, 97000.0);
         assert!(bs2.balanced);
+        // 年初口径：1 月的应付账款凭证不滚入 2 月报表的 comparative，
+        // 2202 行年初（启用期初）= 0、期末 = 1000
+        approx(
+            row_value(&bs2.liability_equity_rows, "2202").current,
+            1000.0,
+        );
+        approx(
+            row_value(&bs2.liability_equity_rows, "2202").comparative,
+            0.0,
+        );
+    }
+
+    /// 自定义损益科目（非 12 标准编码）通过"其他未列示损益"兜底行进入利润表与净利润，
+    /// 资产负债表仍平衡（Fix Round 1 Finding 2a）。
+    #[test]
+    fn test_reports_custom_profit_loss_fallback_row() {
+        let conn = setup();
+        save_opening_balances(
+            &conn,
+            "2026-01",
+            &[
+                OpeningBalanceRow {
+                    account_code: "1002".into(),
+                    debit_amount: 100000.0,
+                    credit_amount: 0.0,
+                },
+                OpeningBalanceRow {
+                    account_code: "3001".into(),
+                    debit_amount: 0.0,
+                    credit_amount: 100000.0,
+                },
+            ],
+        )
+        .unwrap();
+        // 自定义损益科目 660299（profit_loss/debit，映射放行可达）
+        create_account(
+            &conn,
+            &GlAccountInput {
+                code: "660299".into(),
+                name: "管理费用—其他".into(),
+                category: "profit_loss".into(),
+                direction: "debit".into(),
+                cash_flow_category: Some("operating".into()),
+                remark: None,
+            },
+        )
+        .unwrap();
+        // 手工凭证：借 660299 500 / 贷 1002 500（2026-02）
+        insert_voucher(
+            &conn,
+            &manual_draft(
+                "2026-02",
+                1,
+                vec![vline("660299", 500.0, 0.0), vline("1002", 0.0, 500.0)],
+            ),
+        )
+        .unwrap();
+
+        // 利润表：其他未列示损益 = 贷-借 = -500，计入净利润但不进营业利润/利润总额
+        let is = build_income_statement(&conn, "2026-02").unwrap();
+        approx(row_value(&is.rows, "other_pl").current, -500.0);
+        approx(row_value(&is.rows, "other_pl").comparative, -500.0);
+        approx(row_value(&is.rows, "operating_profit").current, 0.0);
+        approx(row_value(&is.rows, "total_profit").current, 0.0);
+        approx(row_value(&is.rows, "net_profit").current, -500.0);
+        approx(is.net_profit_month, -500.0);
+        approx(is.net_profit_year, -500.0);
+
+        // 资产负债表：货币资金 99500，未分配利润 -500（含兜底行），等式平衡
+        let bs = build_balance_sheet(&conn, "2026-02").unwrap();
+        approx(row_value(&bs.asset_rows, "monetary").current, 99500.0);
+        approx(
+            row_value(&bs.liability_equity_rows, "undistributed").current,
+            -500.0,
+        );
+        approx(bs.asset_total, 99500.0);
+        approx(bs.liability_equity_total, 99500.0);
+        assert!(bs.balanced);
+    }
+
+    /// 映射到 cost 类科目（5001）的凭证经"成本类科目"资产行兜底，资产负债表平衡
+    /// （Fix Round 1 Finding 2b）。
+    #[test]
+    fn test_reports_cost_accounts_balance_sheet_row() {
+        let conn = setup();
+        save_opening_balances(
+            &conn,
+            "2026-01",
+            &[
+                OpeningBalanceRow {
+                    account_code: "1002".into(),
+                    debit_amount: 100000.0,
+                    credit_amount: 0.0,
+                },
+                OpeningBalanceRow {
+                    account_code: "3001".into(),
+                    debit_amount: 0.0,
+                    credit_amount: 100000.0,
+                },
+            ],
+        )
+        .unwrap();
+        // 费用类型映射到 cost 类科目 5001（save_account_mapping 放行）
+        save_account_mapping(
+            &conn,
+            &AccountMappingInput {
+                scope: "expense_type".into(),
+                key: "office".into(),
+                account_code: "5001".into(),
+                remark: None,
+            },
+        )
+        .unwrap();
+        // 无报销关联发票：amount=500 tax=0 → invoice_expense 凭证 借 5001 500 / 贷 2241 500
+        conn.execute(
+            "INSERT INTO invoices (id, invoice_code, invoice_number, amount, tax_amount, total_amount,
+                 expense_type_code, employee_id, belong_month, status, created_at, updated_at)
+             VALUES (1, 'A', '001', 500.0, 0.0, 500.0, 'office', 1, '2026-02', 'normal',
+                     '2026-02-10', '2026-02-10')",
+            [],
+        )
+        .unwrap();
+        assert!(maybe_generate_invoice_expense_voucher(&conn, 1)
+            .unwrap()
+            .is_some());
+
+        // 资产负债表：成本类科目行 500（资产行末尾），资产合计 100000+500，平衡
+        let bs = build_balance_sheet(&conn, "2026-02").unwrap();
+        approx(row_value(&bs.asset_rows, "cost_accounts").current, 500.0);
+        approx(row_value(&bs.asset_rows, "monetary").current, 100000.0);
+        approx(row_value(&bs.liability_equity_rows, "2241").current, 500.0);
+        approx(bs.asset_total, 100500.0);
+        approx(bs.liability_equity_total, 100500.0);
+        assert!(bs.balanced);
+
+        // 利润表不含 cost 类科目：兜底行与净利润均为 0
+        let is = build_income_statement(&conn, "2026-02").unwrap();
+        approx(row_value(&is.rows, "other_pl").current, 0.0);
+        approx(is.net_profit_month, 0.0);
     }
 
     /// 对方科目 cash_flow_category=none 的现金支出归"其他"行并进入 unclassified 明细。
