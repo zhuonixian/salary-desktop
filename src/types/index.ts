@@ -799,3 +799,42 @@ export interface AccountMapping {
   account_code: string;
   remark?: string | null;
 }
+
+// ==================== 记账凭证 ====================
+
+export interface VoucherLine {
+  id: number;
+  account_code: string;
+  debit_amount: number;
+  credit_amount: number;
+  summary?: string | null;
+  line_order: number;
+}
+
+export interface Voucher {
+  id: number;
+  voucher_no: string;
+  voucher_date: string;
+  belong_month: string;
+  source_type: string;
+  source_id: number;
+  total_amount: number;
+  status: 'active' | 'void';
+  remark?: string | null;
+  lines: VoucherLine[];
+}
+
+export const VOUCHER_SOURCE_LABEL: Record<string, string> = {
+  salary_accrual: '工资计提',
+  salary_payment: '工资代发',
+  reimbursement_accrual: '报销计提',
+  reimbursement_payment: '报销付款',
+  invoice_expense: '发票入账',
+  bank_manual: '银行流水',
+};
+
+export interface VoucherQuery {
+  month?: string;
+  source_type?: string;
+  status?: string;
+}

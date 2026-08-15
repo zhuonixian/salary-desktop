@@ -64,6 +64,8 @@ import type {
   OpeningBalanceRow,
   OpeningBalanceState,
   AccountMapping,
+  Voucher,
+  VoucherQuery,
 } from '@/types';
 
 type BackendDashboardSummary = {
@@ -219,6 +221,8 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
     case 'export_month_close_package':
       return { success: true, output_dir: String(args?.dir ?? ''), files: [] };
     case 'query_payment_batches':
+      return [];
+    case 'get_vouchers':
       return [];
     case 'get_payment_batch_detail':
       return {
@@ -1111,4 +1115,10 @@ export async function saveAccountMapping(data: Omit<AccountMapping, 'id'>): Prom
 
 export async function deleteAccountMapping(id: number): Promise<boolean> {
   return invoke<boolean>('delete_account_mapping', { id });
+}
+
+// ==================== 记账凭证 ====================
+
+export async function getVouchers(query: VoucherQuery): Promise<Voucher[]> {
+  return invoke<Voucher[]>('get_vouchers', { query });
 }
