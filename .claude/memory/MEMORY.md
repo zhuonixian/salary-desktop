@@ -9,3 +9,4 @@
 - [架构模块](architecture.md) — 后端模块职责 + 数据库表 + 数据流示例
 - [第三阶段计划](stage3-local-finance.md) — 本地数据安全、正式月结、付款批次、银行流水、预算异常
 - [第四阶段安全配置](stage4-security.md) — 启动密码/锁屏/加密/脱敏/迁移
+- [第五阶段财务专业功能](stage5-accounting.md) — 科目表、自动凭证、三大报表、Excel 导出

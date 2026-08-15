@@ -51,6 +51,7 @@ npm run lint                             # ESLint
 - [架构模块](.claude/memory/architecture.md) — 后端模块职责 + 数据流
 - [第三阶段计划](.claude/memory/stage3-local-finance.md) — 本地数据安全、正式月结、付款批次、银行流水、预算异常；完整计划见 `docs/superpowers/plans/2026-08-10-stage3-local-finance.md`
 - [第四阶段安全配置](.claude/memory/stage4-security.md) — 启动密码/锁屏/加密/脱敏/迁移；spec 见 `docs/superpowers/specs/2026-08-10-stage4-security-config-design.md`、plan 见 `docs/superpowers/plans/2026-08-10-stage4-security-config.md`
+- [第五阶段财务专业功能](.claude/memory/stage5-accounting.md) — 科目表、自动凭证、三大报表、Excel 导出；spec 见 `docs/superpowers/specs/2026-08-15-stage5-accounting-reports-design.md`、plan 见 `docs/superpowers/plans/2026-08-15-stage5-accounting-reports.md`
 
 ## 第三阶段开发
 
@@ -59,6 +60,10 @@ npm run lint                             # ESLint
 ## 第四阶段开发
 
 第四阶段以本地单机应用访问安全为目标，按 KEK/DEK 加密 → 状态机 → 命令 → 前端 → 脱敏改造 → Tauri 配置收紧 → 全量回归顺序推进。开发时先读 `.claude/memory/stage4-security.md` 和 `docs/superpowers/plans/2026-08-10-stage4-progress.md`；spec 在 `docs/superpowers/specs/2026-08-10-stage4-security-config-design.md`。涉及多模块开发时用 subagent 按互不重叠文件范围协作，由主 agent 统一合并、测试、commit、push。
+
+## 第五阶段开发
+
+第五阶段以财务专业能力（科目表与三大报表）为目标，按凭证落库（事件驱动物化凭证）路线分四批推进：科目与期初 → 凭证引擎与业务挂接 → 报表与导出 → 前端页面与全量回归。开发时先读 `.claude/memory/stage5-accounting.md` 和 `docs/superpowers/plans/2026-08-15-stage5-progress.md`；spec 在 `docs/superpowers/specs/2026-08-15-stage5-accounting-reports-design.md`。涉及多模块开发时用 subagent 按互不重叠文件范围协作，由主 agent 统一合并、测试、commit、push。
 
 ## 编码约定
 
