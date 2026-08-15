@@ -560,6 +560,17 @@ pub fn create_bank_manual_voucher(
             "只有未匹配且未忽略的流水才能生成凭证".into(),
         ));
     }
+    // 已有 active bank_manual 凭证时先拦截，避免触发部分唯一索引裸 UNIQUE 报错
+    let exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM vouchers WHERE source_type='bank_manual' AND source_id=?1 AND status='active'",
+        params![transaction_id],
+        |r| r.get(0),
+    )?;
+    if exists > 0 {
+        return Err(AppError::General(
+            "该流水已生成入账凭证，不能重复生成".into(),
+        ));
+    }
     db::ensure_month_open(conn, &belong_month)?;
     let (amount, lines) = if expense > 0.0 {
         (
@@ -2098,8 +2109,9 @@ mod tests {
         let credit_line = v.lines.iter().find(|l| l.credit_amount > 0.0).unwrap();
         assert_eq!(credit_line.account_code, "1002");
         assert_eq!(credit_line.credit_amount, 30.0);
-        // 重复生成报错（active 唯一索引）
-        assert!(create_bank_manual_voucher(&conn, tx_id, "6603", None).is_err());
+        // 重复生成报错：入口拦截返回友好中文提示，而非裸 UNIQUE 索引错误（F2）
+        let err = create_bank_manual_voucher(&conn, tx_id, "6603", None).unwrap_err();
+        assert!(err.to_string().contains("不能重复生成"), "got: {err:?}");
         // 忽略流水后凭证 void：
         // db::ignore_bank_transaction(...) 后 active bank_manual 数为 0
         db::ignore_bank_transaction(
@@ -2206,7 +2218,7 @@ mod tests {
         assert_eq!(item.status, "blocking");
         assert_eq!(item.count, 1);
         assert!(
-            item.description.contains("不平衡"),
+            item.description.contains("不平衡") && item.description.contains("1 张"),
             "got: {}",
             item.description
         );
@@ -2220,6 +2232,41 @@ mod tests {
             .find(|c| c.title.contains("记账凭证平衡"))
             .unwrap();
         assert_eq!(item.status, "ok");
+        // 月份隔离：2026-07 存在 total_amount=0 的不平衡凭证，2026-08 检查仍通过
+        conn.execute(
+            "INSERT INTO vouchers (voucher_no, voucher_date, belong_month, source_type, source_id, total_amount, status, created_at, updated_at)
+             VALUES ('记-202607-001', '2026-07-31', '2026-07', 'bank_manual', 999, 0.0, 'active', '2026-07-31', '2026-07-31')",
+            [],
+        )
+        .unwrap();
+        let july_vid: i64 = conn
+            .query_row(
+                "SELECT id FROM vouchers WHERE voucher_no = '记-202607-001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT INTO voucher_lines (voucher_id, account_code, debit_amount, credit_amount, summary, line_order)
+             VALUES (?1, '6603', 10.0, 0.0, '他月不平衡凭证', 0)",
+            params![july_vid],
+        )
+        .unwrap();
+        let wb = db::get_month_close_workbench(&conn, "2026-08").unwrap();
+        let item = wb
+            .checks
+            .iter()
+            .find(|c| c.title.contains("记账凭证平衡"))
+            .unwrap();
+        assert_eq!(item.status, "ok");
+        // 而 2026-07 检查应阻塞（确认该凭证确实被检出，只是不影响他月）
+        let wb_july = db::get_month_close_workbench(&conn, "2026-07").unwrap();
+        let item_july = wb_july
+            .checks
+            .iter()
+            .find(|c| c.title.contains("记账凭证平衡"))
+            .unwrap();
+        assert_eq!(item_july.status, "blocking");
     }
 
     #[test]

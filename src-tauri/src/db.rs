@@ -1829,12 +1829,12 @@ pub fn get_month_close_workbench(conn: &Connection, month: &str) -> AppResult<Mo
             |row| row.get(0),
         )
         .unwrap_or(0.0);
-    // 记账凭证平衡：active 凭证总额需大于 0 且与借贷分录合计一致
+    // 记账凭证平衡：active 凭证总额需大于 0 且与借贷分录合计一致（0.005 容差，与 insert_voucher 阈值一致）
     let unbalanced_voucher_count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM vouchers v WHERE v.status = 'active' AND (
             v.total_amount <= 0
-            OR v.total_amount != (SELECT COALESCE(SUM(debit_amount),0) FROM voucher_lines WHERE voucher_id = v.id)
-            OR v.total_amount != (SELECT COALESCE(SUM(credit_amount),0) FROM voucher_lines WHERE voucher_id = v.id)
+            OR ABS(v.total_amount - (SELECT COALESCE(SUM(debit_amount),0) FROM voucher_lines WHERE voucher_id = v.id)) > 0.005
+            OR ABS(v.total_amount - (SELECT COALESCE(SUM(credit_amount),0) FROM voucher_lines WHERE voucher_id = v.id)) > 0.005
         ) AND v.belong_month = ?1",
         params![month],
         |row| row.get(0),
@@ -2923,6 +2923,19 @@ pub fn confirm_bank_transaction_match(
             tx.expense_amount, batch.total_amount
         )));
     }
+    // 已生成 active bank_manual 入账凭证的流水不能再匹配付款批次：
+    // 流水入账凭证与批次付款凭证会各贷记一次 1002，造成银行存款双重贷记
+    let voucher_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM vouchers
+         WHERE source_type='bank_manual' AND source_id=?1 AND status='active'",
+        params![input.transaction_id],
+        |r| r.get(0),
+    )?;
+    if voucher_count > 0 {
+        return Err(AppError::General(
+            "该流水已生成入账凭证，请先取消凭证或取消流水匹配后再匹配付款批次".into(),
+        ));
+    }
 
     let now = Utc::now().to_rfc3339();
     conn.execute(
@@ -2972,6 +2985,8 @@ pub fn cancel_bank_transaction_match(conn: &Connection, transaction_id: i64) -> 
         params![now, transaction_id],
     )?;
     // 取消匹配后流水回到 unmatched，其 bank_manual 凭证随之作废（spec 3.3）
+    // void 有意不检查 updated>0：无论是否存在 active 匹配，都要清理旧 bank_manual 凭证，
+    // 否则流水重新手工入账时会被 source 唯一索引（idx_vouchers_source_active）阻塞
     crate::accounting::void_vouchers_for_source(conn, "bank_manual", transaction_id)?;
     Ok(updated > 0)
 }
@@ -2998,6 +3013,9 @@ pub fn ignore_bank_transaction(
     Ok(updated > 0)
 }
 
+/// 自动匹配：金额相等的已付款批次与未匹配流水一一对应时匹配。
+/// 已生成 active bank_manual 入账凭证的流水被排除——若再匹配批次，
+/// 流水凭证与批次付款凭证会各贷记一次 1002（银行存款双重贷记）。
 pub fn auto_match_bank_transactions(
     conn: &Connection,
     month: &str,
@@ -3010,7 +3028,11 @@ pub fn auto_match_bank_transactions(
             status: Some("unmatched".to_string()),
             keyword: None,
         },
-    )?;
+    )?
+    .into_iter()
+    // 查询失败时保守排除（与下方 active_bank_match_* 的 unwrap_or(true) 口径一致）
+    .filter(|tx| !active_bank_manual_voucher_exists(conn, tx.id).unwrap_or(true))
+    .collect::<Vec<_>>();
     let batches = query_payment_batches(
         conn,
         &PaymentBatchQuery {
@@ -3081,6 +3103,17 @@ fn active_bank_match_for_transaction_exists(
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM bank_transaction_matches
          WHERE transaction_id=?1 AND status='active'",
+        params![transaction_id],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+/// 流水是否已有 active bank_manual 入账凭证。有则该流水不能再匹配付款批次（防双重贷记 1002）。
+fn active_bank_manual_voucher_exists(conn: &Connection, transaction_id: i64) -> AppResult<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM vouchers
+         WHERE source_type='bank_manual' AND source_id=?1 AND status='active'",
         params![transaction_id],
         |row| row.get(0),
     )?;
@@ -5756,6 +5789,90 @@ pub mod tests {
         let workbench = get_month_close_workbench(&conn, "2026-08").unwrap();
         assert_eq!(workbench.summary.unmatched_paid_batch_count, 0);
         close_month(&conn, "2026-08", "system", None).unwrap();
+    }
+
+    #[test]
+    fn test_bank_manual_voucher_blocks_batch_match() {
+        // F1：已生成 active bank_manual 凭证的流水不能再匹配付款批次（防 1002 双重贷记）
+        let mut conn = setup_financial_db();
+        fill_employee_bank_info(&conn);
+        make_august_closable(&conn);
+        let detail = create_payment_batch(
+            &mut conn,
+            &PaymentBatchInput {
+                belong_month: "2026-08".into(),
+                batch_type: "salary".into(),
+                source_ids: None,
+                remark: None,
+            },
+        )
+        .unwrap();
+        mark_payment_batch_exported(&conn, detail.batch.id).unwrap();
+        mark_payment_batch_paid(
+            &mut conn,
+            &PaymentBatchPaidInput {
+                id: detail.batch.id,
+                payment_date: "2026-08-31".into(),
+            },
+        )
+        .unwrap();
+
+        // 插入一条金额恰好等于批次支出的流水，并生成 bank_manual 凭证
+        assert!(insert_bank_transaction(
+            &conn,
+            &BankTransaction {
+                id: 0,
+                transaction_date: "2026-08-31".into(),
+                belong_month: "2026-08".into(),
+                summary: Some("手工入账支出".into()),
+                counterparty_name: Some("测试银行".into()),
+                counterparty_account: Some("62220000".into()),
+                income_amount: 0.0,
+                expense_amount: detail.batch.total_amount,
+                balance: Some(10000.0),
+                status: "unmatched".into(),
+                ignore_reason: None,
+                imported_file: None,
+                raw_json: None,
+                matched_batch_id: None,
+                matched_batch_no: None,
+                matched_batch_type: None,
+                matched_amount: None,
+                match_score: None,
+                match_remark: None,
+                created_at: None,
+                updated_at: None,
+            }
+        )
+        .unwrap());
+        let tx_id: i64 = conn
+            .query_row("SELECT MAX(id) FROM bank_transactions", [], |r| r.get(0))
+            .unwrap();
+        let voucher =
+            crate::accounting::create_bank_manual_voucher(&conn, tx_id, "6603", None).unwrap();
+        assert_eq!(voucher.source_type, "bank_manual");
+
+        // 人工确认匹配被拦截
+        let err = confirm_bank_transaction_match(
+            &conn,
+            &BankTransactionMatchInput {
+                transaction_id: tx_id,
+                payment_batch_id: detail.batch.id,
+                remark: Some("手工确认".into()),
+            },
+            100,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("已生成入账凭证"), "got: {err:?}");
+
+        // 自动匹配不选中该流水：匹配数不增
+        let result = auto_match_bank_transactions(&conn, "2026-08").unwrap();
+        assert_eq!(result.matched, 0);
+
+        // 取消匹配入口会 void 该 bank_manual 凭证，随后自动匹配恢复可用（拦截由凭证驱动而非流水状态）
+        cancel_bank_transaction_match(&conn, tx_id).unwrap();
+        let result = auto_match_bank_transactions(&conn, "2026-08").unwrap();
+        assert_eq!(result.matched, 1);
     }
 
     #[test]
