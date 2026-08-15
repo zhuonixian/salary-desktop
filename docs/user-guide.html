@@ -1,0 +1,1370 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>工资核算助手 · 产品使用说明书</title>
+<style>
+  :root {
+    --primary: #1677ff;
+    --primary-dark: #0958d9;
+    --primary-light: #e6f4ff;
+    --success: #52c41a;
+    --warning: #faad14;
+    --danger: #ff4d4f;
+    --text: #1f1f1f;
+    --text-secondary: #595959;
+    --text-tertiary: #8c8c8c;
+    --border: #d9d9d9;
+    --border-light: #f0f0f0;
+    --bg: #fafafa;
+    --bg-card: #ffffff;
+    --shadow: 0 1px 2px rgba(0,0,0,0.03), 0 1px 6px -1px rgba(0,0,0,0.02), 0 2px 4px rgba(0,0,0,0.02);
+    --shadow-hover: 0 4px 12px rgba(0,0,0,0.08);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', Roboto, sans-serif;
+    color: var(--text);
+    background: var(--bg);
+    line-height: 1.7;
+    font-size: 15px;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  .container { max-width: 1200px; margin: 0 auto; padding: 0 24px; }
+
+  /* ============ 封面 ============ */
+  .cover {
+    background: linear-gradient(135deg, #1677ff 0%, #0958d9 50%, #003eb3 100%);
+    color: #fff;
+    padding: 80px 0 60px;
+    position: relative;
+    overflow: hidden;
+  }
+  .cover::before {
+    content: '';
+    position: absolute;
+    top: -50%;
+    right: -20%;
+    width: 600px;
+    height: 600px;
+    background: radial-gradient(circle, rgba(255,255,255,0.1) 0%, transparent 70%);
+    border-radius: 50%;
+  }
+  .cover-content { position: relative; z-index: 1; }
+  .cover-tag {
+    display: inline-block;
+    padding: 4px 12px;
+    background: rgba(255,255,255,0.15);
+    backdrop-filter: blur(10px);
+    border-radius: 100px;
+    font-size: 13px;
+    margin-bottom: 16px;
+    border: 1px solid rgba(255,255,255,0.2);
+  }
+  .cover h1 {
+    font-size: 48px;
+    font-weight: 700;
+    letter-spacing: -1px;
+    margin-bottom: 12px;
+  }
+  .cover .subtitle {
+    font-size: 18px;
+    opacity: 0.9;
+    margin-bottom: 32px;
+    font-weight: 300;
+  }
+  .cover .meta {
+    display: flex;
+    gap: 32px;
+    flex-wrap: wrap;
+    font-size: 14px;
+    opacity: 0.85;
+  }
+  .cover .meta-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  /* ============ TOC ============ */
+  .toc {
+    background: var(--bg-card);
+    border-bottom: 1px solid var(--border-light);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    box-shadow: var(--shadow);
+  }
+  .toc-inner {
+    display: flex;
+    gap: 4px;
+    overflow-x: auto;
+    padding: 12px 0;
+    scrollbar-width: thin;
+  }
+  .toc-inner::-webkit-scrollbar { height: 4px; }
+  .toc-inner::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  .toc a {
+    color: var(--text-secondary);
+    text-decoration: none;
+    padding: 6px 14px;
+    border-radius: 6px;
+    font-size: 14px;
+    white-space: nowrap;
+    transition: all 0.2s;
+  }
+  .toc a:hover {
+    background: var(--primary-light);
+    color: var(--primary);
+  }
+  .toc a.active {
+    background: var(--primary);
+    color: #fff;
+  }
+
+  /* ============ 主体 ============ */
+  main { padding: 48px 0 80px; }
+  section { margin-bottom: 64px; scroll-margin-top: 80px; }
+  .section-header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 24px;
+    padding-bottom: 16px;
+    border-bottom: 2px solid var(--border-light);
+  }
+  .section-number {
+    width: 40px;
+    height: 40px;
+    background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+    color: #fff;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 18px;
+    flex-shrink: 0;
+  }
+  .section-title {
+    font-size: 26px;
+    font-weight: 700;
+    color: var(--text);
+  }
+  .section-desc {
+    color: var(--text-secondary);
+    font-size: 14px;
+    margin-top: 4px;
+  }
+
+  /* ============ 卡片 ============ */
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-light);
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 20px;
+    transition: box-shadow 0.2s;
+  }
+  .card:hover { box-shadow: var(--shadow-hover); }
+  .card-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 18px;
+    font-weight: 600;
+    margin-bottom: 12px;
+    color: var(--text);
+  }
+  .card-title .icon {
+    width: 32px;
+    height: 32px;
+    background: var(--primary-light);
+    color: var(--primary);
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    flex-shrink: 0;
+  }
+  .card p { color: var(--text-secondary); margin-bottom: 12px; }
+  .card p:last-child { margin-bottom: 0; }
+
+  /* ============ 步骤 ============ */
+  .steps {
+    counter-reset: step;
+    margin: 16px 0;
+  }
+  .step {
+    position: relative;
+    padding-left: 36px;
+    margin-bottom: 14px;
+    counter-increment: step;
+  }
+  .step::before {
+    content: counter(step);
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 24px;
+    height: 24px;
+    background: var(--primary);
+    color: #fff;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .step strong { color: var(--text); }
+  .step .note { color: var(--text-tertiary); font-size: 13px; display: block; margin-top: 2px; }
+
+  /* ============ 提示框 ============ */
+  .callout {
+    border-left: 4px solid;
+    padding: 12px 16px;
+    border-radius: 0 8px 8px 0;
+    margin: 14px 0;
+    font-size: 14px;
+  }
+  .callout-info { background: var(--primary-light); border-color: var(--primary); color: #003eb3; }
+  .callout-warn { background: #fffbe6; border-color: var(--warning); color: #613400; }
+  .callout-danger { background: #fff2f0; border-color: var(--danger); color: #5c0011; }
+  .callout-success { background: #f6ffed; border-color: var(--success); color: #135220; }
+  .callout strong { display: block; margin-bottom: 4px; font-size: 13px; }
+
+  /* ============ 表格 ============ */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 14px 0;
+    font-size: 14px;
+    background: var(--bg-card);
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: var(--shadow);
+  }
+  th {
+    background: #fafafa;
+    text-align: left;
+    padding: 12px 16px;
+    font-weight: 600;
+    color: var(--text);
+    border-bottom: 1px solid var(--border-light);
+  }
+  td {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border-light);
+    color: var(--text-secondary);
+  }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: #fafbfc; }
+  td strong { color: var(--text); }
+
+  /* ============ 特性矩阵 ============ */
+  .feature-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 16px;
+    margin: 20px 0;
+  }
+  .feature {
+    background: var(--bg-card);
+    border: 1px solid var(--border-light);
+    border-radius: 10px;
+    padding: 20px;
+    transition: all 0.2s;
+  }
+  .feature:hover {
+    border-color: var(--primary);
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-hover);
+  }
+  .feature-icon {
+    font-size: 28px;
+    margin-bottom: 10px;
+  }
+  .feature-name {
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 6px;
+    font-size: 15px;
+  }
+  .feature-desc {
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.6;
+  }
+
+  /* ============ 代码/快捷键 ============ */
+  code, kbd {
+    background: #f5f5f5;
+    border: 1px solid var(--border-light);
+    border-radius: 4px;
+    padding: 2px 6px;
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    font-size: 13px;
+    color: #c41d7f;
+  }
+  kbd {
+    background: #fff;
+    border-color: var(--border);
+    box-shadow: 0 2px 0 var(--border);
+    color: var(--text);
+    font-size: 12px;
+  }
+
+  /* ============ 章节内列表 ============ */
+  ul, ol { margin: 10px 0 10px 24px; color: var(--text-secondary); }
+  li { margin-bottom: 6px; }
+  li strong { color: var(--text); }
+
+  /* ============ FAQ ============ */
+  .faq-item {
+    background: var(--bg-card);
+    border: 1px solid var(--border-light);
+    border-radius: 10px;
+    margin-bottom: 12px;
+    overflow: hidden;
+  }
+  .faq-q {
+    padding: 16px 20px;
+    font-weight: 600;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--text);
+    background: #fafafa;
+  }
+  .faq-q::before {
+    content: 'Q';
+    background: var(--primary);
+    color: #fff;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+  .faq-a {
+    padding: 16px 20px 16px 52px;
+    color: var(--text-secondary);
+    font-size: 14px;
+    line-height: 1.7;
+  }
+
+  /* ============ 页脚 ============ */
+  footer {
+    background: #1f1f1f;
+    color: rgba(255,255,255,0.65);
+    padding: 40px 0 30px;
+    text-align: center;
+    font-size: 13px;
+  }
+  footer a { color: var(--primary); text-decoration: none; }
+  footer .footer-meta { margin-top: 8px; opacity: 0.6; }
+
+  /* ============ 徽章 ============ */
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 100px;
+    font-size: 12px;
+    font-weight: 500;
+    margin-left: 6px;
+    vertical-align: middle;
+  }
+  .badge-new { background: #e6fffb; color: #08979c; border: 1px solid #87e8de; }
+  .badge-pro { background: #f9f0ff; color: #531dab; border: 1px solid #d3adf7; }
+  .badge-secure { background: #fff2f0; color: #cf1322; border: 1px solid #ffccc7; }
+
+  @media (max-width: 768px) {
+    .cover h1 { font-size: 32px; }
+    .section-title { font-size: 22px; }
+    .feature-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ==================== 封面 ==================== -->
+<header class="cover">
+  <div class="container cover-content">
+    <span class="cover-tag">📋 产品白皮书 · 用户使用说明书</span>
+    <h1>工资核算助手</h1>
+    <p class="subtitle">面向中小微企业的本地工资核算与财务协同桌面工具</p>
+    <div class="meta">
+      <div class="meta-item">📦 当前版本：v0.5.0</div>
+      <div class="meta-item">📅 文档日期：2026-08-15</div>
+      <div class="meta-item">💻 适用平台：Windows 10 / 11（64 位）</div>
+      <div class="meta-item">👥 适用对象：出纳 / 财务 / 人事</div>
+    </div>
+  </div>
+</header>
+
+<!-- ==================== TOC ==================== -->
+<nav class="toc">
+  <div class="container toc-inner">
+    <a href="#overview">1. 产品简介</a>
+    <a href="#get-started">2. 快速开始</a>
+    <a href="#security">3. 安全配置</a>
+    <a href="#employee">4. 员工与考勤</a>
+    <a href="#salary">5. 工资核算</a>
+    <a href="#invoice">6. 发票与报销</a>
+    <a href="#month-close">7. 月结与付款</a>
+    <a href="#bank">8. 银行流水</a>
+    <a href="#budget">9. 预算与分析</a>
+    <a href="#accounting">10. 财务管理与报表</a>
+    <a href="#data-safety">11. 数据安全</a>
+    <a href="#faq">12. 常见问题</a>
+    <a href="#appendix">13. 附录</a>
+  </div>
+</nav>
+
+<main>
+<div class="container">
+
+<!-- ==================== 1. 产品简介 ==================== -->
+<section id="overview">
+  <div class="section-header">
+    <div class="section-number">1</div>
+    <div>
+      <div class="section-title">产品简介</div>
+      <div class="section-desc">了解工资核算助手的核心能力与适用场景</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">🎯</span>产品定位</div>
+    <p>工资核算助手是一款面向中小微企业的<strong>本地单机桌面工具</strong>，帮助出纳独立完成员工管理、考勤统计、工资核算、发票去重、报销付款、月结打包、银行流水匹配等全流程工作。所有数据存储在本地，不上云、不联网（仅调用百度 OCR 时联网），最大程度保护企业薪酬隐私。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">✨</span>核心能力</div>
+    <div class="feature-grid">
+      <div class="feature">
+        <div class="feature-icon">👥</div>
+        <div class="feature-name">员工考勤</div>
+        <div class="feature-desc">员工档案 Excel 批量导入；月度考勤表导入；打卡表 OCR 识别</div>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">💰</div>
+        <div class="feature-name">工资核算</div>
+        <div class="feature-desc">一键计算全员月度工资，自动扣社保公积金个税；支持单人重算与手工调整</div>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">🧾</div>
+        <div class="feature-name">发票去重</div>
+        <div class="feature-desc">百度 OCR 自动识别发票字段；同号发票自动去重；支持全电票与 PDF 直传</div>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">📑</div>
+        <div class="feature-name">报销付款</div>
+        <div class="feature-desc">报销单录入与审批；统一付款批次生成与导出；银行付款 Excel 模板</div>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">✅</div>
+        <div class="feature-name">正式月结</div>
+        <div class="feature-desc">关账前体检；锁账防误改；月结包 Excel 打包导出；支持反月结</div>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">🏦</div>
+        <div class="feature-name">银行流水</div>
+        <div class="feature-desc">CSV / Excel 流水导入；自动匹配付款批次；人工补对账</div>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">📊</div>
+        <div class="feature-name">预算分析</div>
+        <div class="feature-desc">部门 / 费用类型预算配置；执行率统计；超预算提醒</div>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">📚</div>
+        <div class="feature-name">自动记账 <span class="badge badge-new">新增</span></div>
+        <div class="feature-desc">业务自动生成借贷凭证；62 个《小企业会计准则》预置科目；期初余额一次录入</div>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">📈</div>
+        <div class="feature-name">三大报表 <span class="badge badge-new">新增</span></div>
+        <div class="feature-desc">资产负债表 / 利润表 / 现金流量表一键生成；支持导出 Excel</div>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">🔒</div>
+        <div class="feature-name">安全配置</div>
+        <div class="feature-desc">启动密码；闲置自动锁；敏感数据加密；默认脱敏展示</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">🆚</span>与传统方式对比</div>
+    <table>
+      <thead><tr><th>场景</th><th>传统手工 / Excel</th><th>工资核算助手</th></tr></thead>
+      <tbody>
+        <tr><td><strong>员工档案</strong></td><td>Excel 维护，多人多版本易冲突</td><td>本地数据库，单一可信源；Excel 双向同步</td></tr>
+        <tr><td><strong>考勤统计</strong></td><td>手工汇总纸质打卡表</td><td>拍照 OCR 识别打卡表 + Excel 导入双通道</td></tr>
+        <tr><td><strong>工资核算</strong></td><td>Excel 公式，易出错且难审计</td><td>引擎自动算（社保 / 公积金 / 个税），锁定防误改</td></tr>
+        <tr><td><strong>发票查重</strong></td><td>手工比对发票号</td><td>OCR 自动识别 + 同号去重 + 图片归档</td></tr>
+        <tr><td><strong>银行对账</strong></td><td>逐笔人工核对流水</td><td>自动按金额 / 摘要匹配付款批次</td></tr>
+        <tr><td><strong>数据安全</strong></td><td>Excel 明文存电脑，谁都能看</td><td>启动密码 + 图片加密 + 默认脱敏</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ==================== 2. 快速开始 ==================== -->
+<section id="get-started">
+  <div class="section-header">
+    <div class="section-number">2</div>
+    <div>
+      <div class="section-title">快速开始</div>
+      <div class="section-desc">从安装到首月工资核算的完整引导</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">⚙️</span>系统要求</div>
+    <ul>
+      <li><strong>操作系统</strong>：Windows 10 / 11（64 位）；支持 macOS / Linux（需自行编译）</li>
+      <li><strong>磁盘空间</strong>：≥ 500 MB（含发票图片归档）</li>
+      <li><strong>内存</strong>：≥ 4 GB</li>
+      <li><strong>OCR（可选）</strong>：百度智能云账号（用于发票 / 考勤 OCR）；本地 PaddleOCR（考勤 OCR 离线方案）</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">📦</span>安装步骤</div>
+    <div class="steps">
+      <div class="step">
+        <strong>下载安装包</strong>
+        <span class="note">从内部 release 渠道获取 <code>salary-desktop_0.4.x_x64-setup.exe</code>，约 5.2 MB</span>
+      </div>
+      <div class="step">
+        <strong>双击运行安装程序</strong>
+        <span class="note">如 Windows SmartScreen 蓝色拦截 → 点「更多信息」→ 点「仍要运行」（应用未购买代码签名证书，首次运行需手动绕过）</span>
+      </div>
+      <div class="step">
+        <strong>选择安装目录</strong>
+        <span class="note">默认安装到 <code>C:\Users\&lt;用户&gt;\AppData\Local\salary-desktop\</code>，可改任意目录</span>
+      </div>
+      <div class="step">
+        <strong>启动应用</strong>
+        <span class="note">桌面图标「工资核算助手」双击启动；首次启动会引导你设置启动密码</span>
+      </div>
+    </div>
+    <div class="callout callout-warn">
+      <strong>⚠️ 注意</strong>
+      未签名 Windows 构建的 SmartScreen 拦截是正常现象，应用本身没有病毒。详细绕过指南见 <code>docs/windows-install-guide.md</code>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">🚀</span>首月工资核算流程</div>
+    <p>从零开始到第一次发放工资，建议按以下顺序操作：</p>
+    <div class="steps">
+      <div class="step"><strong>初始化密码</strong>：首次启动设置启动密码 + 恢复码 + 安全问题</div>
+      <div class="step"><strong>配置工资规则</strong>：菜单「系统设置」→ 调整社保比例、起征点、扣款标准、个税税率表</div>
+      <div class="step"><strong>导入员工档案</strong>：菜单「人员考勤 → 员工管理」→ 下载模板 → 填写 → 批量导入</div>
+      <div class="step"><strong>录入月度考勤</strong>：菜单「考勤管理」→ Excel 导入或「打卡表管理」拍照 OCR</div>
+      <div class="step"><strong>计算工资</strong>：菜单「工资计算」→ 选择月份 → 点「一键计算」</div>
+      <div class="step"><strong>审核与调整</strong>：核对计算结果，必要时点「单人重算」或手工调整</div>
+      <div class="step"><strong>锁定工资</strong>：核对无误后点「锁定」，防止误改</div>
+      <div class="step"><strong>生成付款批次</strong>：菜单「薪酬核算 → 付款批次」→ 生成工资批次 → 导出银行代发 Excel</div>
+      <div class="step"><strong>月度关账</strong>：菜单「月结工作台」→ 体检 → 正式月结 → 导出月结包</div>
+    </div>
+  </div>
+</section>
+
+<!-- ==================== 3. 安全配置 ==================== -->
+<section id="security">
+  <div class="section-header">
+    <div class="section-number">3</div>
+    <div>
+      <div class="section-title">安全配置 <span class="badge badge-secure">v0.4.x 新增</span></div>
+      <div class="section-desc">启动密码、锁屏、加密、脱敏四大防线</div>
+    </div>
+  </div>
+
+  <div class="callout callout-danger">
+    <strong>🔑 重要：必须妥善保存恢复码</strong>
+    首次启动应用会强制设置启动密码 + 恢复码 + 安全问题。<strong>恢复码丢失 + 忘记密码 + 忘记安全问题答案 = 数据永久无法恢复</strong>。请将恢复码抄写到纸张或密码管理器中。
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">🔐</span>三层密码体系</div>
+    <table>
+      <thead><tr><th>层级</th><th>触发</th><th>解锁时长</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td><strong>① 启动密码</strong></td><td>每次启动应用</td><td>整个使用期间</td><td>≥8 位含字母 + 数字</td></tr>
+        <tr><td><strong>② 锁屏</strong></td><td>闲置 5 分钟（可配）/ 手动锁屏</td><td>重新输密码</td><td>防止他人趁你离开时偷看</td></tr>
+        <tr><td><strong>③ 敏感数据解锁</strong></td><td>点击身份证号 / 工资金额等小眼睛</td><td>5 分钟（可配）</td><td>解锁后全应用明文显示；到期自动恢复脱敏</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">🛡️</span>敏感数据加密</div>
+    <p>以下数据使用 AES-256-GCM 加密存储，即使他人拿到电脑也无法直接读取：</p>
+    <ul>
+      <li><strong>发票图片</strong>：归档时加密落盘</li>
+      <li><strong>备份包</strong>：导出时可勾选加密</li>
+      <li><strong>百度 OCR Token</strong>：API 凭证加密入库</li>
+    </ul>
+    <div class="callout callout-info">
+      <strong>ℹ️ 不加密项</strong>
+      数据库（salary.db）主体不加密，保证查询性能。身份证号、银行卡号等通过<strong>界面脱敏</strong>展示（中段打码），点小眼睛 + 输启动密码才能临时看明文。
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">👀</span>默认脱敏字段</div>
+    <table>
+      <thead><tr><th>类别</th><th>字段</th><th>脱敏格式</th></tr></thead>
+      <tbody>
+        <tr><td>身份信息</td><td>身份证号</td><td><code>110101********1234</code></td></tr>
+        <tr><td>账号信息</td><td>银行卡号</td><td><code>**** **** **** 1234</code></td></tr>
+        <tr><td>工资参数</td><td>基本工资 / 补贴 / 扣款</td><td><code>¥ ****</code></td></tr>
+        <tr><td>工资结果</td><td>应发 / 个税 / 实发</td><td><code>¥ ****</code></td></tr>
+        <tr><td>业务金额</td><td>报销 / 付款 / 流水 / 预算 / 发票价税</td><td><code>¥ ****</code></td></tr>
+        <tr><td>联络信息</td><td>手机号</td><td><code>138****1234</code></td></tr>
+      </tbody>
+    </table>
+    <div class="callout callout-warn">
+      <strong>⚠️ Excel 导出不脱敏</strong>
+      工资明细、银行代发等 Excel 导出<strong>保留真实数据</strong>（出纳对账需要）。请妥善保管导出文件，建议存到加密 U 盘或受限目录。
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">🔄</span>找回密码</div>
+    <p>忘记启动密码？提供两条找回路径：</p>
+    <div class="feature-grid">
+      <div class="feature">
+        <div class="feature-icon">🎫</div>
+        <div class="feature-name">恢复码（推荐）</div>
+        <div class="feature-desc">首次设置时生成的 24 字符字符串（如 AAAA-BBBB-CCCC-DDD-EEEE-FFFF），在锁屏界面点「忘记密码」→「恢复码」Tab 粘贴</div>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">❓</div>
+        <div class="feature-name">安全问题</div>
+        <div class="feature-desc">首次设置时选择的问题（如「你小学班主任姓什么」），输入答案 + 新密码即可重置</div>
+      </div>
+    </div>
+    <div class="callout callout-danger">
+      <strong>❌ 失败次数限制</strong>
+      密码错误 5 次锁定 5 分钟；恢复码 / 安全问题错误 3 次锁定 15 分钟。防止暴力破解。
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">🛠️</span>安全中心</div>
+    <p>菜单「系统设置 → 安全中心」提供：</p>
+    <ul>
+      <li><strong>改密码</strong>：输入原密码 + 新密码</li>
+      <li><strong>闲置锁定配置</strong>：开关 + 时长（1 / 5 / 15 / 30 分钟）</li>
+      <li><strong>敏感解锁时长</strong>：1 / 5 / 15 / 30 分钟</li>
+      <li><strong>手动锁屏</strong>：临时离开时一键锁定</li>
+      <li><strong>状态查看</strong>：失败尝试次数、上次改密时间</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ==================== 4. 员工与考勤 ==================== -->
+<section id="employee">
+  <div class="section-header">
+    <div class="section-number">4</div>
+    <div>
+      <div class="section-title">员工与考勤</div>
+      <div class="section-desc">员工档案、月度考勤、打卡表 OCR</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">👥</span>员工管理</div>
+    <p><strong>路径</strong>：菜单「人员考勤 → 员工管理」</p>
+    <div class="steps">
+      <div class="step"><strong>下载模板</strong>：点「下载模板」获取 <code>员工导入模板.xlsx</code></div>
+      <div class="step"><strong>填写员工信息</strong>：必填工号、姓名、身份证号、入职日期、基本工资；可选银行账号、社保公积金基数等</div>
+      <div class="step"><strong>批量导入</strong>：点「Excel 导入」→ 选择文件 → 自动校验 → 错误提示逐行修改</div>
+      <div class="step"><strong>手工新增 / 编辑</strong>：单员工场景直接点「新增」填写表单</div>
+      <div class="step"><strong>导出</strong>：点「Excel 导出」生成当前员工清单</div>
+    </div>
+    <div class="callout callout-info">
+      <strong>ℹ️ 工号规则</strong>
+      工号唯一且不可重复；建议用「部门缩写 + 序号」如 <code>FIN-001</code>。已离岗员工用「状态 = 离职」保留档案，不要删除（影响历史工资追溯）。
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">📅</span>考勤管理</div>
+    <p><strong>路径</strong>：菜单「人员考勤 → 考勤管理」</p>
+    <p>按月份维护每位员工的考勤数据：应出勤天数、实际出勤、迟到早退次数、加班时长、请假天数等。</p>
+    <div class="steps">
+      <div class="step"><strong>选择月份</strong>：右上角月份选择器</div>
+      <div class="step"><strong>Excel 导入</strong>：模板含员工工号 + 各考勤项列；导入时自动按工号匹配员工</div>
+      <div class="step"><strong>手工调整</strong>：点员工行进入编辑，逐项修改</div>
+      <div class="step"><strong>异常提示</strong>：实际出勤 &gt; 应出勤、加班为负数等情况自动标红</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">📷</span>打卡表 OCR</div>
+    <p><strong>路径</strong>：菜单「人员考勤 → 打卡表管理」</p>
+    <p>支持把纸质打卡表 / 钉钉考勤截图直接 OCR 识别为结构化考勤数据。</p>
+    <div class="feature-grid">
+      <div class="feature">
+        <div class="feature-icon">☁️</div>
+        <div class="feature-name">百度在线 OCR</div>
+        <div class="feature-desc">需要百度智能云账号；识别速度快、准确率高；按调用次数计费</div>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">💾</div>
+        <div class="feature-name">本地 PaddleOCR</div>
+        <div class="feature-desc">完全离线，无外部依赖；首次启动需安装 Python 依赖；适合隐私敏感场景</div>
+      </div>
+    </div>
+    <div class="callout callout-info">
+      <strong>ℹ️ OCR 配置</strong>
+      菜单「人员考勤 → OCR 识别中心」可切换百度 / 本地模式、配置百度 API Key。Token 自动加密缓存，110 错误时自动刷新一次。
+    </div>
+  </div>
+</section>
+
+<!-- ==================== 5. 工资核算 ==================== -->
+<section id="salary">
+  <div class="section-header">
+    <div class="section-number">5</div>
+    <div>
+      <div class="section-title">工资核算</div>
+      <div class="section-desc">规则配置、一键计算、单人重算、锁定导出</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">📐</span>工资规则配置</div>
+    <p><strong>路径</strong>：菜单「系统设置 → 工资规则」</p>
+    <table>
+      <thead><tr><th>规则项</th><th>说明</th><th>示例</th></tr></thead>
+      <tbody>
+        <tr><td><strong>社保比例</strong></td><td>养老 / 医疗 / 失业 / 工伤 / 生育，个人与公司分别配置</td><td>养老个人 8%、公司 16%</td></tr>
+        <tr><td><strong>公积金比例</strong></td><td>个人与公司分别配置，可设上下限</td><td>各 12%，上限 25201 元</td></tr>
+        <tr><td><strong>个税起征点</strong></td><td>累计预扣预缴税率计算</td><td>5000 元 / 月</td></tr>
+        <tr><td><strong>七级超额累进税率</strong></td><td>国家标准税率表，可按年度更新</td><td>3% / 10% / 20% ...</td></tr>
+        <tr><td><strong>扣款标准</strong></td><td>迟到、早退、旷工每次扣款金额</td><td>迟到 30 分钟扣 50 元</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">⚡</span>一键计算工资</div>
+    <p><strong>路径</strong>：菜单「薪酬核算 → 工资计算」</p>
+    <div class="steps">
+      <div class="step"><strong>选择月份</strong>：右上角选择需要计算的月份</div>
+      <div class="step"><strong>一键计算</strong>：点「一键计算」按钮，引擎读取全员考勤 + 规则，自动算出应发 / 社保 / 公积金 / 个税 / 实发</div>
+      <div class="step"><strong>查看结果</strong>：表格展示每位员工明细；点击员工行进入详情</div>
+      <div class="step"><strong>单人重算</strong>：发现某员工数据异常，修改考勤后点该员工的「重算」按钮（不影响其他人）</div>
+      <div class="step"><strong>手工调整</strong>：补贴 / 扣款项可在「其他补助」「其他扣款」列直接编辑，自动重算个税与实发</div>
+      <div class="step"><strong>锁定工资</strong>：核对无误点「锁定」，锁定后该月工资不可再修改（防止误改）</div>
+    </div>
+    <div class="callout callout-success">
+      <strong>✅ 计算公式</strong>
+      <code>应发 = 基本工资 + 岗位工资 + 各项补贴 + 加班费 - 迟到扣款 - 旷工扣款 - 缺勤扣款</code><br>
+      <code>实发 = 应发 - 社保个人 - 公积金个人 - 个税</code>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">📤</span>工资导出</div>
+    <p><strong>路径</strong>：菜单「输出审计 → 导出中心」</p>
+    <p>四种常用导出格式：</p>
+    <table>
+      <thead><tr><th>导出类型</th><th>用途</th><th>文件名</th></tr></thead>
+      <tbody>
+        <tr><td><strong>工资明细表</strong></td><td>内部存档 / 给老板看</td><td>工资明细_2026-07.xlsx</td></tr>
+        <tr><td><strong>银行代发表</strong></td><td>上传网银批量代发</td><td>银行代发_2026-07.xlsx</td></tr>
+        <tr><td><strong>工资条</strong></td><td>分员工单独打印发放</td><td>工资条_2026-07.xlsx</td></tr>
+        <tr><td><strong>考勤汇总</strong></td><td>人事存档</td><td>考勤汇总_2026-07.xlsx</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ==================== 6. 发票与报销 ==================== -->
+<section id="invoice">
+  <div class="section-header">
+    <div class="section-number">6</div>
+    <div>
+      <div class="section-title">发票与报销</div>
+      <div class="section-desc">OCR 录入、自动去重、报销审批</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">🧾</span>发票管理</div>
+    <p><strong>路径</strong>：菜单「票据报销 → 发票管理」</p>
+    <div class="steps">
+      <div class="step"><strong>上传发票</strong>：点「上传发票」→ 选择 PDF / JPG / PNG 文件 → 自动调用百度 vat_invoice OCR</div>
+      <div class="step"><strong>字段预览</strong>：OCR 识别后展示发票代码、号码、价税合计、销售方、购买方等字段</div>
+      <div class="step"><strong>自动查重</strong>：相同发票号（号码 + 代码）会标红警告，确认重复可拒绝录入</div>
+      <div class="step"><strong>手工补录</strong>：OCR 识别失败的字段可手工修改后保存</div>
+      <div class="step"><strong>费用类型分类</strong>：每张发票归属一个费用类型（如「办公」「差旅」「餐饮」）</div>
+      <div class="step"><strong>归档</strong>：发票原图自动加密保存到 <code>app_data_dir/invoices/{月份}/</code></div>
+    </div>
+    <div class="callout callout-info">
+      <strong>ℹ️ 支持的发票类型</strong>
+      增值税普通发票 / 专用发票 / 全电发票（含 PDF 直传，无需手动转图片）/ 电子发票（铁路客运发票未来扩展）
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">📑</span>报销管理</div>
+    <p><strong>路径</strong>：菜单「票据报销 → 报销管理」</p>
+    <div class="steps">
+      <div class="step"><strong>新建报销单</strong>：填写报销人、报销事由、报销金额</div>
+      <div class="step"><strong>关联发票</strong>：从发票库勾选多张发票纳入本次报销</div>
+      <div class="step"><strong>提交审批</strong>：状态变为「待审批」，等待财务审核</div>
+      <div class="step"><strong>财务审批</strong>：审核通过后状态变为「已审批」</div>
+      <div class="step"><strong>纳入付款</strong>：已审批的报销单可被纳入付款批次（见第 7 章）</div>
+    </div>
+  </div>
+</section>
+
+<!-- ==================== 7. 月结与付款 ==================== -->
+<section id="month-close">
+  <div class="section-header">
+    <div class="section-number">7</div>
+    <div>
+      <div class="section-title">月结与付款</div>
+      <div class="section-desc">付款批次统一管理 + 正式月结 + 反月结</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">💳</span>付款批次</div>
+    <p><strong>路径</strong>：菜单「薪酬核算 → 付款批次」</p>
+    <p>统一管理工资代发 + 报销付款两种场景：</p>
+    <div class="feature-grid">
+      <div class="feature">
+        <div class="feature-icon">💼</div>
+        <div class="feature-name">工资批次</div>
+        <div class="feature-desc">从已锁定工资结果生成；自动带出收款人账号、开户行；导出银行代发 Excel</div>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">📑</div>
+        <div class="feature-name">报销批次</div>
+        <div class="feature-desc">从已审批未付款报销单生成；标记已付款后自动同步报销单付款状态</div>
+      </div>
+    </div>
+    <p><strong>批次状态流转</strong>：</p>
+    <div class="steps">
+      <div class="step"><strong>草稿（draft）</strong>：刚生成，可修改</div>
+      <div class="step"><strong>已导出（exported）</strong>：导出 Excel 准备发银行</div>
+      <div class="step"><strong>已付款（paid）</strong>：银行确认付款完成</div>
+      <div class="step"><strong>作废（void）</strong>：错误批次可作废，释放引用</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">✅</span>正式月结</div>
+    <p><strong>路径</strong>：菜单「工作台 → 月结工作台」</p>
+    <div class="steps">
+      <div class="step"><strong>选择月份</strong>：月份选择器切换到需要关账的月份</div>
+      <div class="step"><strong>体检</strong>：点「体检」按钮，系统自动检查 8 项异常（未算工资、未锁工资、未付款批次、未匹配流水、超预算、未审批报销、重复金额、异常考勤）</div>
+      <div class="step"><strong>处理阻塞项</strong>：blocking 类型异常必须先处理才能关账；warning 类型可保留</div>
+      <div class="step"><strong>正式月结</strong>：所有阻塞项处理后点「正式月结」→ 输入备注 → 该月所有数据锁定</div>
+      <div class="step"><strong>导出月结包</strong>：点「导出月结包」生成 Excel 压缩包，含月结报告、工资明细、银行代发、发票清单、报销清单、付款批次</div>
+    </div>
+    <div class="callout callout-warn">
+      <strong>⚠️ 月结后不可修改</strong>
+      正式月结后，该月的工资 / 考勤 / 发票 / 报销 / 付款都不可修改。如需调整必须先「反月结」（需填写原因，记入操作日志）。
+    </div>
+  </div>
+</section>
+
+<!-- ==================== 8. 银行流水 ==================== -->
+<section id="bank">
+  <div class="section-header">
+    <div class="section-number">8</div>
+    <div>
+      <div class="section-title">银行流水匹配</div>
+      <div class="section-desc">替代手工逐笔对账</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">🏦</span>银行流水</div>
+    <p><strong>路径</strong>：菜单「薪酬核算 → 银行流水」</p>
+    <div class="steps">
+      <div class="step"><strong>导出银行流水</strong>：从企业网银导出 CSV 或 Excel 流水（含日期、摘要、对方户名、账号、收入、支出、余额）</div>
+      <div class="step"><strong>导入流水</strong>：点「导入流水」→ 选择文件 → 自动解析字段映射</div>
+      <div class="step"><strong>自动匹配</strong>：系统按金额一致 + 月份一致 + 已付款批次 + 摘要文本加分，自动一对一匹配</div>
+      <div class="step"><strong>人工补对账</strong>：未自动匹配的流水可手工选择对应付款批次（金额必须一致）</div>
+      <div class="step"><strong>忽略流水</strong>：非付款相关的流水（如手续费、利息）可标记为「忽略」</div>
+      <div class="step"><strong>生成凭证</strong>：未匹配流水也可选科目直接生成入账凭证（如手续费计财务费用、利息收入冲财务费用），计入当月现金流量表</div>
+      <div class="step"><strong>月结检查</strong>：存在已付款但未匹配银行流水的批次时，月结体检会阻塞</div>
+    </div>
+    <div class="callout callout-info">
+      <strong>ℹ️ 不做网银直连</strong>
+      本工具不集成银行 API。所有流水都通过文件导入，确保与企业内部财务系统隔离，零网络风险。
+    </div>
+  </div>
+</section>
+
+<!-- ==================== 9. 预算与分析 ==================== -->
+<section id="budget">
+  <div class="section-header">
+    <div class="section-number">9</div>
+    <div>
+      <div class="section-title">预算与财务分析</div>
+      <div class="section-desc">从看数到发现问题</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">📊</span>财务分析</div>
+    <p><strong>路径</strong>：菜单「工作台 → 财务分析」</p>
+    <p>多维度展示月度财务数据：</p>
+    <ul>
+      <li><strong>部门费用统计</strong>：按部门汇总工资 + 报销 + 发票费用</li>
+      <li><strong>员工费用排行</strong>：单人累计费用 Top N</li>
+      <li><strong>月度对比</strong>：环比 / 同比趋势图</li>
+      <li><strong>预算执行</strong>：实际发生 vs 预算，执行率进度条 + 超预算标红</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">🎯</span>预算管理</div>
+    <p><strong>路径</strong>：菜单「工作台 → 财务分析 → 预算执行 Tab」</p>
+    <div class="steps">
+      <div class="step"><strong>新增预算</strong>：选择月份 + 范围（全公司 / 部门 / 费用类型）+ 金额</div>
+      <div class="step"><strong>查看执行率</strong>：系统自动汇总实际发生，计算执行率 = 实际 / 预算</div>
+      <div class="step"><strong>超预算提醒</strong>：执行率 &gt; 100% 标红；月结体检会作为 warning 项提示</div>
+      <div class="step"><strong>删除预算</strong>：已正式月结的月份不可修改预算</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">📈</span>仪表盘</div>
+    <p><strong>路径</strong>：菜单「工作台 → 首页仪表盘」</p>
+    <p>进入应用首页即可看到：</p>
+    <ul>
+      <li>员工总数、本月已算工资人数</li>
+      <li>本月应发合计、实发合计</li>
+      <li>本月已开发票张数、报销金额</li>
+      <li>本月预算执行率概览</li>
+      <li>最近操作日志（最近 10 条）</li>
+    </ul>
+    <div class="callout callout-info">
+      <strong>ℹ️ 仪表盘金额默认脱敏</strong>
+      仪表盘所有金额数字默认显示为 <code>¥ ****</code>，需点小眼睛 + 输启动密码才能查看明文。
+    </div>
+  </div>
+</section>
+
+<!-- ==================== 10. 财务管理与报表 ==================== -->
+<section id="accounting">
+  <div class="section-header">
+    <div class="section-number">10</div>
+    <div>
+      <div class="section-title">财务管理与三大报表</div>
+      <div class="section-desc">业务自动记账，报表一键生成 <span class="badge badge-new">v0.5.0 新增</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">🧠</span>自动记账：业务发生即生成凭证</div>
+    <p><strong>路径</strong>：菜单「财务管理 → 记账凭证」</p>
+    <p>不需要手工做账。以下业务发生时，系统自动生成借贷平衡的记账凭证：</p>
+    <table>
+      <thead><tr><th>业务动作</th><th>自动生成的凭证</th></tr></thead>
+      <tbody>
+        <tr><td><strong>工资锁定</strong></td><td>借 费用科目（按部门映射，默认管理费用）／贷 应付职工薪酬</td></tr>
+        <tr><td><strong>付款批次标记已付款</strong></td><td>借 应付职工薪酬（或 其他应付款—报销）／贷 银行存款</td></tr>
+        <tr><td><strong>报销单审批通过</strong></td><td>借 费用科目（按发票费用类型映射）／贷 其他应付款—报销</td></tr>
+        <tr><td><strong>发票登记（未挂报销单）</strong></td><td>借 费用 + 进项税额 ／贷 其他应付款</td></tr>
+        <tr><td><strong>银行流水选科目入账</strong></td><td>如手续费：借 财务费用 ／贷 银行存款</td></tr>
+      </tbody>
+    </table>
+    <div class="steps">
+      <div class="step"><strong>查看凭证</strong>：按月筛选，来源类型中文标签（工资计提 / 工资代发 / 报销计提 / 报销付款 / 发票入账 / 银行流水）</div>
+      <div class="step"><strong>展开分录</strong>：点击行展开查看借方 / 贷方明细与摘要</div>
+      <div class="step"><strong>自动作废</strong>：源单据解锁、批次作废、反审批时对应凭证自动作废（留痕不删除）</div>
+    </div>
+    <div class="callout callout-info">
+      <strong>ℹ️ 已入账的流水不能再匹配付款批次</strong>
+      已生成入账凭证的银行流水，人工匹配与自动匹配都会被拒绝，避免银行存款被重复冲减。如需匹配，先取消流水匹配释放凭证。
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">📚</span>科目表与期初余额</div>
+    <p><strong>路径</strong>：菜单「财务管理 → 科目表」</p>
+    <div class="steps">
+      <div class="step"><strong>预置科目</strong>：内置《小企业会计准则》62 个一级科目（资产 / 负债 / 权益 / 成本 / 损益五大类），开箱即用</div>
+      <div class="step"><strong>自定义</strong>：可新增自定义科目、停用未使用的科目（已被凭证引用的科目不能停用）</div>
+      <div class="step"><strong>期初录入</strong>：点「期初余额」→ 选择启用月份 → 逐科目填入期初数 → 借贷合计必须平衡（差额实时显示）才能保存</div>
+      <div class="step"><strong>映射配置</strong>：费用类型 / 部门 可映射到指定科目，未映射的默认计入「管理费用」</div>
+    </div>
+    <div class="callout callout-info">
+      <strong>ℹ️ 启用月规则</strong>
+      全库只有一个启用月。报表 = 期初余额 + 启用月以来全部凭证累计；启用月之前的月份报表显示为空属正常。已生成记账凭证后不能再变更启用月。
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">📈</span>三大财务报表</div>
+    <p><strong>路径</strong>：菜单「财务管理 → 财务报表」</p>
+    <div class="feature-grid">
+      <div class="feature">
+        <div class="feature-icon">⚖️</div>
+        <div class="feature-name">资产负债表</div>
+        <div class="feature-desc">期末余额 / 年初余额两列；货币资金、未分配利润自动归集；表尾自动校验资产 = 负债 + 权益</div>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">💹</div>
+        <div class="feature-name">利润表</div>
+        <div class="feature-desc">本月金额 / 本年累计；营业收入 → 营业利润 → 利润总额 → 净利润逐级计算，空行显示 0 保持表式完整</div>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">💵</div>
+        <div class="feature-name">现金流量表</div>
+        <div class="feature-desc">直接法：经营 / 投资 / 筹资活动现金流入流出 + 现金净增加额；无法归类的明细单独列出提醒补科目分类</div>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">📤</div>
+        <div class="feature-name">Excel 导出</div>
+        <div class="feature-desc">每张报表独立导出 xlsx，文件名如 资产负债表_202608.xlsx</div>
+      </div>
+    </div>
+    <div class="steps">
+      <div class="step"><strong>选择月份</strong>：默认当月，可切换查看任意历史月份</div>
+      <div class="step"><strong>月结即关账</strong>：正式月结前系统会校验凭证借贷平衡；已月结月份的凭证随之冻结，报表数字不再变动</div>
+    </div>
+    <div class="callout callout-info">
+      <strong>ℹ️ 新启用报表为空属正常</strong>
+      升级到 v0.5.0 后，启用月之前的历史月份报表为 0、历史发票不会自动补凭证，这是预期行为——从启用月开始正常使用即可。
+    </div>
+  </div>
+</section>
+
+<!-- ==================== 11. 数据安全 ==================== -->
+<section id="data-safety">
+  <div class="section-header">
+    <div class="section-number">11</div>
+    <div>
+      <div class="section-title">数据安全</div>
+      <div class="section-desc">备份、恢复、体检、压缩</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">💾</span>数据安全中心</div>
+    <p><strong>路径</strong>：菜单「输出审计 → 数据安全」</p>
+    <div class="feature-grid">
+      <div class="feature">
+        <div class="feature-icon">📤</div>
+        <div class="feature-name">备份</div>
+        <div class="feature-desc">一键打包 salary.db + invoices/ 到指定目录；可选加密备份（输密码才能恢复）</div>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">📥</div>
+        <div class="feature-name">恢复</div>
+        <div class="feature-desc">从备份文件恢复；恢复前自动生成当前数据的保护备份，防止误覆盖</div>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">🩺</div>
+        <div class="feature-name">体检</div>
+        <div class="feature-desc">检查文件存在性、大小、主要表记录数、SQLite 完整性</div>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">🗜️</div>
+        <div class="feature-name">压缩</div>
+        <div class="feature-desc">VACUUM + WAL Checkpoint，回收空间，优化性能</div>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">📁</div>
+        <div class="feature-name">打开数据目录</div>
+        <div class="feature-desc">快速跳转到应用数据目录，便于人工备份或排查</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">📍</span>数据存储位置</div>
+    <table>
+      <thead><tr><th>平台</th><th>路径</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Windows</strong></td><td><code>%APPDATA%\com.salary.desktop\</code></td></tr>
+        <tr><td><strong>macOS</strong></td><td><code>~/Library/Application Support/com.salary.desktop/</code></td></tr>
+        <tr><td><strong>Linux</strong></td><td><code>~/.local/share/com.salary.desktop/</code></td></tr>
+      </tbody>
+    </table>
+    <p>目录结构：</p>
+    <ul>
+      <li><code>salary.db</code>：主数据库（员工 / 工资 / 发票 / 报销等所有业务数据）</li>
+      <li><code>invoices/{月份}/{时间戳}_{文件名}</code>：发票原图加密归档</li>
+      <li><code>backups/</code>：恢复操作产生的自动保护备份</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">📋</span>操作日志</div>
+    <p><strong>路径</strong>：菜单「输出审计 → 操作日志」</p>
+    <p>所有敏感操作自动入日志（不可篡改）：</p>
+    <ul>
+      <li><strong>业务操作</strong>：save_invoice、calculate_salary、close_month、backup_database、restore_database 等</li>
+      <li><strong>安全事件</strong>：unlock_success / unlock_failed、change_password、reset_by_recovery / question、lock、reveal_sensitive</li>
+      <li><strong>不记录</strong>：密码、恢复码、安全问题答案本身</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ==================== 11. FAQ ==================== -->
+<section id="faq">
+  <div class="section-header">
+    <div class="section-number">12</div>
+    <div>
+      <div class="section-title">常见问题</div>
+      <div class="section-desc">出纳使用最高频的问题与解答</div>
+    </div>
+  </div>
+
+  <div class="faq-item">
+    <div class="faq-q">忘记启动密码怎么办？</div>
+    <div class="faq-a">
+      锁屏界面点「忘记密码？」<br>
+      ① <strong>恢复码 Tab</strong>：粘贴首次设置时抄写的 24 字符恢复码 + 设新密码<br>
+      ② <strong>安全问题 Tab</strong>：回答初始化时设置的安全问题 + 设新密码<br><br>
+      注意：5 次密码错误、3 次恢复码错误、3 次安全问题错误会自动锁定。
+    </div>
+  </div>
+
+  <div class="faq-item">
+    <div class="faq-q">SmartScreen 蓝色拦截怎么办？</div>
+    <div class="faq-a">
+      这是 Windows 对未签名应用的默认警告，应用本身没有病毒。处理：<br>
+      ① 点蓝色弹窗中的「更多信息」<br>
+      ② 点「仍要运行」<br>
+      ③ 安装程序正常启动
+    </div>
+  </div>
+
+  <div class="faq-item">
+    <div class="faq-q">应用启动后白屏怎么办？</div>
+    <div class="faq-a">
+      通常是 WebView2 运行时缺失或显卡驱动兼容问题。排查：<br>
+      ① 升级到最新版 Edge / WebView2 Runtime<br>
+      ② 更新显卡驱动<br>
+      ③ 查看 <code>%TEMP%\salary-desktop-startup.log</code> 启动诊断日志<br>
+      详细指南见 <code>docs/troubleshooting-white-screen.md</code>
+    </div>
+  </div>
+
+  <div class="faq-item">
+    <div class="faq-q">如何把数据从一台电脑迁移到另一台？</div>
+    <div class="faq-a">
+      ① 在旧电脑「数据安全」→ 备份（建议勾选加密）→ 拷贝备份包到新电脑<br>
+      ② 新电脑安装应用 → 启动 → 设置同样的启动密码（恢复码可不同）<br>
+      ③ 「数据安全」→ 恢复 → 选择备份包 → 等待恢复完成<br>
+      ④ 重启应用
+    </div>
+  </div>
+
+  <div class="faq-item">
+    <div class="faq-q">月结后发现错误怎么办？</div>
+    <div class="faq-a">
+      菜单「月结工作台」→ 找到该月 → 点「反月结」→ 填写反月结原因（必填，会记录到操作日志）→ 该月数据恢复可编辑 → 修改后再次「正式月结」。<br><br>
+      反月结操作会留痕，建议月结前充分核对。
+    </div>
+  </div>
+
+  <div class="faq-item">
+    <div class="faq-q">财务报表打开全是 0 怎么回事？</div>
+    <div class="faq-a">
+      两种情况属正常：<br>
+      ① <strong>还没录期初余额</strong>：先到「财务管理 → 科目表 → 期初余额」选启用月逐科目录入（借贷必须平衡）；<br>
+      ② <strong>看的月份早于启用月</strong>：启用月之前的月份报表为空。从启用月开始，工资锁定、报销审批、付款等业务会自动生成凭证，报表随之有数。<br><br>
+      历史发票不会自动补凭证，需要从启用月正常使用开始积累。
+    </div>
+  </div>
+
+  <div class="faq-item">
+    <div class="faq-q">凭证能不能手工修改或补录分录？</div>
+    <div class="faq-a">
+      不能。本工具定位为<strong>自动记账</strong>：凭证全部由业务动作自动生成、自动作废，不提供手工凭证入口，避免账实不符。<br><br>
+      想调整某笔业务的入账科目：① 费用类 → 在「科目表」维护费用类型映射；② 部门工资 → 维护部门映射；③ 银行流水 → 取消后重新选科目生成。
+    </div>
+  </div>
+
+  <div class="faq-item">
+    <div class="faq-q">OCR 识别失败怎么办？</div>
+    <div class="faq-a">
+      ① <strong>网络问题</strong>：百度 OCR 需要联网，检查代理 / 防火墙<br>
+      ② <strong>Token 过期</strong>：系统会自动刷新一次；仍失败到「OCR 识别中心」重新配置 API Key<br>
+      ③ <strong>图片质量差</strong>：建议扫描件而非手机拍照；PDF 直接传，不用截图<br>
+      ④ <strong>切换本地 PaddleOCR</strong>：完全离线，准确率略低但稳定
+    </div>
+  </div>
+
+  <div class="faq-item">
+    <div class="faq-q">如何让某个员工不算工资？</div>
+    <div class="faq-a">
+      员工管理 → 编辑该员工 → 状态改为「离职」或「停薪」→ 该员工不会被纳入月度工资计算。<br>
+      离职员工的历史工资记录保留，方便查询和审计。
+    </div>
+  </div>
+
+  <div class="faq-item">
+    <div class="faq-q">导出 Excel 后金额是星号怎么办？</div>
+    <div class="faq-a">
+      这是因为当前处于「敏感数据脱敏」状态。两种处理：<br>
+      ① <strong>保持脱敏导出</strong>：导出文件也是星号（适合不希望被他人看到真实数字的场景）<br>
+      ② <strong>明文导出</strong>：先在任意小眼睛处输启动密码解锁 → 等待 5 分钟 → 期间导出 Excel 即为明文
+    </div>
+  </div>
+
+  <div class="faq-item">
+    <div class="faq-q">身份证号 / 工资金额显示星号怎么办？</div>
+    <div class="faq-a">
+      这是默认脱敏行为。点击字段右侧的小眼睛图标 → 输入启动密码 → 全应用解锁 5 分钟，期间所有 SensitiveText 显示明文。5 分钟后自动恢复脱敏。
+    </div>
+  </div>
+
+  <div class="faq-item">
+    <div class="faq-q">数据库可以放 U 盘 / 网盘吗？</div>
+    <div class="faq-a">
+      不建议。SQLite + WAL 在 U 盘 / 网盘上可能因同步问题导致数据损坏。<br>
+      推荐：本地硬盘 → 定期「数据安全 → 备份」到 U 盘 / 网盘（加密备份包）。
+    </div>
+  </div>
+
+  <div class="faq-item">
+    <div class="faq-q">应用能在 Mac / Linux 上用吗？</div>
+    <div class="faq-a">
+      官方发布 Windows 64 位安装包。Mac / Linux 用户需要自行从源码编译（需要 Rust + Node + 系统 WebKit 依赖）。<br>
+      建议：Windows 真机或虚拟机使用，保证最佳兼容性。
+    </div>
+  </div>
+</section>
+
+<!-- ==================== 12. 附录 ==================== -->
+<section id="appendix">
+  <div class="section-header">
+    <div class="section-number">13</div>
+    <div>
+      <div class="section-title">附录</div>
+      <div class="section-desc">术语表、菜单速查、版本历史</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">📜</span>术语表</div>
+    <table>
+      <thead><tr><th>术语</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td><strong>WAL</strong></td><td>Write-Ahead Logging，SQLite 模式，提升并发读写性能</td></tr>
+        <tr><td><strong>VACUUM</td><td>SQLite 命令，回收已删除数据的空间</td></tr>
+        <tr><td><strong>OCR</strong></td><td>Optical Character Recognition，光学字符识别</td></tr>
+        <tr><td><strong>DEK</strong></td><td>Data Encryption Key，AES-256 数据加密密钥</td></tr>
+        <tr><td><strong>KEK</strong></td><td>Key Encryption Key，用密码 Argon2id 派生，包裹 DEK</td></tr>
+        <tr><td><strong>Argon2id</strong></td><td>抗 GPU/ASIC 暴力破解的密码哈希算法</td></tr>
+        <tr><td><strong>AES-GCM-256</strong></td><td>对称加密标准，含认证标签，防篡改</td></tr>
+        <tr><td><strong>WKWebview / WebView2</strong></td><td>系统自带的网页渲染引擎，Tauri 2 用它承载前端界面</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">🗺️</span>菜单速查</div>
+    <table>
+      <thead><tr><th>分组</th><th>菜单</th><th>功能</th></tr></thead>
+      <tbody>
+        <tr><td rowspan="3"><strong>工作台</strong></td><td>首页仪表盘</td><td>汇总卡片 + 最近操作</td></tr>
+        <tr><td>月结工作台</td><td>体检 / 正式月结 / 反月结 / 月结包</td></tr>
+        <tr><td>财务分析</td><td>部门 / 员工 / 月度对比 / 预算执行</td></tr>
+        <tr><td rowspan="4"><strong>人员考勤</strong></td><td>员工管理</td><td>档案 CRUD + Excel 导入导出</td></tr>
+        <tr><td>考勤管理</td><td>月度考勤数据</td></tr>
+        <tr><td>打卡表管理</td><td>OCR 识别打卡表</td></tr>
+        <tr><td>OCR 识别中心</td><td>OCR 设置 / 百度 token 配置</td></tr>
+        <tr><td rowspan="3"><strong>薪酬核算</strong></td><td>工资计算</td><td>一键计算 / 单人重算 / 锁定</td></tr>
+        <tr><td>付款批次</td><td>工资 / 报销付款统一管理</td></tr>
+        <tr><td>银行流水</td><td>导入 / 自动匹配 / 人工对账</td></tr>
+        <tr><td rowspan="2"><strong>票据报销</strong></td><td>发票管理</td><td>OCR 上传 / 去重 / 详情</td></tr>
+        <tr><td>报销管理</td><td>报销单审批</td></tr>
+        <tr><td rowspan="3"><strong>输出审计</strong></td><td>导出中心</td><td>工资明细 / 银行代发 / 工资条 / 考勤汇总</td></tr>
+        <tr><td>操作日志</td><td>业务 + 安全事件审计</td></tr>
+        <tr><td>数据安全</td><td>备份 / 恢复 / 体检 / 压缩</td></tr>
+        <tr><td rowspan="2"><strong>系统设置</strong></td><td>工资规则</td><td>社保 / 公积金 / 个税 / 扣款标准</td></tr>
+        <tr><td>安全中心</td><td>改密 / 闲置锁 / 敏感解锁配置 / 手动锁屏</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">🏷️</span>版本历史</div>
+    <table>
+      <thead><tr><th>版本</th><th>主要能力</th></tr></thead>
+      <tbody>
+        <tr><td><strong>v0.4.x</strong></td><td>安全配置（启动密码 / 锁屏 / 加密 / 脱敏）</td></tr>
+        <tr><td><strong>v0.3.x</strong></td><td>本地财务管理（数据安全 / 月结 / 付款 / 银行流水 / 预算）</td></tr>
+        <tr><td><strong>v0.2.x</strong></td><td>发票管理（OCR / 去重 / 报销）</td></tr>
+        <tr><td><strong>v0.1.x</strong></td><td>员工 / 考勤 / 工资核算 / Excel 导出</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">📞</span>支持与反馈</div>
+    <p>使用过程中遇到任何问题，可通过以下渠道获取支持：</p>
+    <ul>
+      <li><strong>问题排查文档</strong>：<code>docs/troubleshooting-white-screen.md</code>（启动白屏）</li>
+      <li><strong>Windows 安装指南</strong>：<code>docs/windows-install-guide.md</code></li>
+      <li><strong>内部技术支持</strong>：联系内部 IT 或本工具维护者</li>
+    </ul>
+    <div class="callout callout-success">
+      <strong>💡 反馈建议</strong>
+      建议反馈时附上：<br>
+      ① 应用版本（菜单「安全中心」可看）<br>
+      ② 操作系统版本<br>
+      ③ 复现步骤<br>
+      ④ 截图（如有）<br>
+      ⑤ 期望结果 vs 实际结果
+    </div>
+  </div>
+</section>
+
+</div>
+</main>
+
+<footer>
+  <div class="container">
+    <div>工资核算助手 · 产品使用说明书 · v0.4.3</div>
+    <div class="footer-meta">本地单机桌面工具 · 不上云 · 不联网（仅 OCR 时调用百度） · 数据完全自主可控</div>
+  </div>
+</footer>
+
+<script>
+  // TOC active state on scroll
+  const sections = document.querySelectorAll('section[id]');
+  const tocLinks = document.querySelectorAll('.toc a');
+  window.addEventListener('scroll', () => {
+    let current = '';
+    sections.forEach(sec => {
+      const top = sec.offsetTop - 100;
+      if (window.scrollY >= top) current = sec.id;
+    });
+    tocLinks.forEach(a => {
+      a.classList.toggle('active', a.getAttribute('href') === '#' + current);
+    });
+  });
+</script>
+
+</body>
+</html>
