@@ -223,6 +223,7 @@ pub fn run() {
         security_commands::update_idle_settings,
         security_commands::update_sensitive_reveal_settings,
         security_commands::reveal_sensitive_data,
+        security_commands::unlock_salary_results,
         security_commands::get_legacy_migration_status,
         security_commands::migrate_legacy_resources,
         security_commands::get_decrypted_invoice_url,

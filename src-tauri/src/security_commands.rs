@@ -322,6 +322,65 @@ pub fn reveal_sensitive_data(
     Ok(RevealResult { expires_at })
 }
 
+/// 受控解锁已锁定工资：启动密码验证 + 必填原因 + 审计日志。
+/// 只打开 locked 这条保护线；月结冻结与付款批次保护不变。
+pub(crate) fn unlock_salary_results_impl(
+    conn: &Connection,
+    sec: &SecurityState,
+    password: &str,
+    month: &str,
+    reason: &str,
+) -> AppResult<bool> {
+    if reason.trim().chars().count() < 5 {
+        return Err(AppError::InvalidParam(
+            "请填写解锁原因（至少 5 个字）".into(),
+        ));
+    }
+    let r = security::unlock(conn, sec, password)?;
+    if !r.unlocked {
+        let detail = format!(
+            "{{\"month\":\"{}\",\"failed_attempts\":{}}}",
+            month, r.failed_attempts
+        );
+        let _ = db::log_operation(
+            conn,
+            "salary_unlock_failed",
+            "受控解锁工资失败（密码错误）",
+            SEC_OP_OPERATOR,
+            Some(&detail),
+        );
+        return Err(AppError::InvalidParam("密码错误，无法解锁".into()));
+    }
+    let voided = db::unlock_salary_results(conn, month)?;
+    let detail = format!(
+        "{{\"month\":\"{}\",\"reason\":\"{}\",\"voided_vouchers\":{}}}",
+        month,
+        json_escape(reason.trim()),
+        voided
+    );
+    db::log_operation(
+        conn,
+        "unlock_salary",
+        &format!("受控解锁{month}工资"),
+        SEC_OP_OPERATOR,
+        Some(&detail),
+    )?;
+    Ok(true)
+}
+
+/// 受控解锁已锁定工资的 Tauri 命令入口。
+#[tauri::command]
+pub fn unlock_salary_results(
+    password: String,
+    month: String,
+    reason: String,
+    state: State<'_, Mutex<Connection>>,
+    sec: State<'_, SecurityState>,
+) -> AppResult<bool> {
+    let conn = lock_conn(&state)?;
+    unlock_salary_results_impl(&conn, &sec, &password, &month, &reason)
+}
+
 /// 读取旧版迁移进度。表为空（首次启动）→ 视为已完成，避免老用户被强制迁移引导打断。
 #[tauri::command]
 pub fn get_legacy_migration_status(
@@ -420,6 +479,110 @@ pub fn get_decrypted_invoice_url(
     }
 
     Ok(dst.to_string_lossy().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 测试 helper：建库（db::create_tables + seed_gl_accounts，含安全态/工资/凭证/月结/审计全部表）
+    /// + security::setup 初始化安全配置 + 插入一行 2026-08 已锁定工资结果。
+    /// 本文件此前没有测试模块，故新建；建库方式参考 accounting.rs 的 setup（需要完整财务表，
+    /// 不能复用 security.rs 的 setup_db——那张表集只有发票/安全态，缺工资与凭证表）。
+    fn sec_setup_with_salary() -> (Connection, SecurityState) {
+        let conn = Connection::open_in_memory().unwrap();
+        db::create_tables(&conn).unwrap();
+        db::seed_gl_accounts(&conn).unwrap();
+        let sec = SecurityState::new();
+        security::setup(&conn, &sec, "Abcd1234", "RC-AAAA", "Q", "A").unwrap();
+        // 工资行 INSERT 参考 accounting.rs 测试 test_salary_accrual_voucher
+        conn.execute(
+            "INSERT INTO salary_monthly_results
+                (salary_month, employee_no, name, department, gross_salary, net_salary,
+                 social_security_personal, housing_fund_personal, attendance_deduction,
+                 tax_amount, other_deduction, status, locked, created_at, updated_at)
+             VALUES ('2026-08', 'E001', '张三', '销售部', 10000, 7400, 1000, 800, 500, 200, 100,
+                     'locked', 1, '2026-08-31', '2026-08-31')",
+            [],
+        )
+        .unwrap();
+        (conn, sec)
+    }
+
+    #[test]
+    fn test_unlock_salary_results_impl() {
+        // 1) 原因太短
+        let (conn, sec) = sec_setup_with_salary();
+        let err = unlock_salary_results_impl(&conn, &sec, "Abcd1234", "2026-08", "短").unwrap_err();
+        assert!(err.to_string().contains("至少 5 个字"));
+        // 2) 密码错误：仍锁定 + 日志
+        let err =
+            unlock_salary_results_impl(&conn, &sec, "Wrong123", "2026-08", "计算有误需要调整")
+                .unwrap_err();
+        assert!(err.to_string().contains("密码错误"));
+        let locked: i64 = conn
+            .query_row(
+                "SELECT locked FROM salary_monthly_results WHERE salary_month='2026-08'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(locked, 1);
+        // operation_logs 的列名以 db.rs 实测为准（operation_type，非 op_type）
+        let logs: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM operation_logs WHERE operation_type='salary_unlock_failed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(logs, 1);
+        // 3) 成功：解锁 + 凭证 void + 日志含原因
+        //    （先回退到未锁定，再 db::lock_salary_results 生成计提凭证，断言 voided_vouchers 进日志）
+        conn.execute(
+            "UPDATE salary_monthly_results SET locked = 0, status = 'reviewed'
+             WHERE salary_month = '2026-08'",
+            [],
+        )
+        .unwrap();
+        db::lock_salary_results(&conn, "2026-08").unwrap();
+        unlock_salary_results_impl(&conn, &sec, "Abcd1234", "2026-08", "社保基数算错需要调整")
+            .unwrap();
+        let locked2: i64 = conn
+            .query_row(
+                "SELECT locked FROM salary_monthly_results WHERE salary_month='2026-08'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(locked2, 0);
+        let detail: String = conn
+            .query_row(
+                "SELECT COALESCE(detail,'') FROM operation_logs
+                 WHERE operation_type='unlock_salary' ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(detail.contains("社保基数算错需要调整"));
+        assert!(detail.contains("\"voided_vouchers\":1"));
+        // 4) 月结月拒绝
+        conn.execute(
+            "INSERT INTO month_closes (month, status, created_at, updated_at)
+             VALUES ('2026-08', 'closed', '2026-08-31', '2026-08-31')",
+            [],
+        )
+        .unwrap();
+        let err =
+            unlock_salary_results_impl(&conn, &sec, "Abcd1234", "2026-08", "重新核算需要调整")
+                .unwrap_err();
+        assert!(err.to_string().contains("已正式月结"));
+        // 5) 无锁定拒绝（换月份）
+        let err =
+            unlock_salary_results_impl(&conn, &sec, "Abcd1234", "2026-09", "重新核算需要调整")
+                .unwrap_err();
+        assert!(err.to_string().contains("没有已锁定"));
+    }
 }
 
 /// 把任意字符串转义成安全的 JSON 字符串内容（不含两侧引号）。
