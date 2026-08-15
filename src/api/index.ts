@@ -351,6 +351,18 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
       return { id: Date.now(), total_amount: 0, invoice_count: 0, ...(args?.data as object) };
     case 'ocr_invoice':
       return {};
+    case 'get_gl_accounts':
+    case 'get_account_mappings':
+      return [];
+    case 'get_opening_balances':
+      return { month: '', rows: [] };
+    case 'set_gl_account_active':
+    case 'save_opening_balances':
+    case 'delete_account_mapping':
+      return true;
+    case 'create_gl_account':
+    case 'save_account_mapping':
+      throw new Error('预览模式不支持该操作，请在桌面应用中操作');
     case 'get_balance_sheet':
       return {
         month: String(args?.month ?? ''),
