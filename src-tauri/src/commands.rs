@@ -1635,6 +1635,35 @@ pub fn delete_account_mapping(
     accounting::delete_account_mapping(&conn, id)
 }
 
+/// 未匹配银行流水手工指定科目生成凭证（bank_manual）。
+#[tauri::command]
+pub fn create_bank_manual_voucher(
+    transaction_id: i64,
+    account_code: String,
+    summary: Option<String>,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Voucher, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let v = accounting::create_bank_manual_voucher(&conn, transaction_id, &account_code, summary)?;
+    db::log_operation(
+        &conn,
+        "create_bank_manual_voucher",
+        &format!("流水生成凭证 {}", v.voucher_no),
+        "system",
+        None,
+    )?;
+    Ok(v)
+}
+
+#[tauri::command]
+pub fn get_vouchers(
+    query: VoucherQuery,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<Voucher>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(accounting::get_vouchers(&conn, &query)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

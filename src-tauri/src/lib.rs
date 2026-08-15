@@ -203,6 +203,9 @@ pub fn run() {
         commands::get_account_mappings,
         commands::save_account_mapping,
         commands::delete_account_mapping,
+        // ===== Accounting（第五阶段 凭证查询/银行流水凭证） =====
+        commands::get_vouchers,
+        commands::create_bank_manual_voucher,
         // ===== Security（Task 6） =====
         security_commands::is_security_initialized,
         security_commands::setup_security,

@@ -1,3 +1,4 @@
+use crate::db;
 use crate::errors::{AppError, AppResult};
 use crate::models::*;
 use chrono::Utc;
@@ -523,6 +524,96 @@ pub fn void_payment_voucher(conn: &Connection, batch_id: i64) -> AppResult<usize
     let n1 = void_vouchers_for_source(conn, "salary_payment", batch_id)?;
     let n2 = void_vouchers_for_source(conn, "reimbursement_payment", batch_id)?;
     Ok(n1 + n2)
+}
+
+/// 未匹配银行流水手工指定科目生成凭证（bank_manual）。
+/// 流水必须 unmatched 且未忽略；支出流水：借所选科目/贷 1002；收入流水：借 1002/贷所选科目。
+pub fn create_bank_manual_voucher(
+    conn: &Connection,
+    transaction_id: i64,
+    account_code: &str,
+    summary: Option<String>,
+) -> AppResult<Voucher> {
+    let (belong_month, transaction_date, income, expense, status, ignore_reason): (
+        String,
+        String,
+        f64,
+        f64,
+        String,
+        Option<String>,
+    ) = conn.query_row(
+        "SELECT belong_month, transaction_date, income_amount, expense_amount, status, ignore_reason FROM bank_transactions WHERE id = ?1",
+        params![transaction_id],
+        |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        },
+    )?;
+    if status != "unmatched" || ignore_reason.is_some() {
+        return Err(AppError::General(
+            "只有未匹配且未忽略的流水才能生成凭证".into(),
+        ));
+    }
+    db::ensure_month_open(conn, &belong_month)?;
+    let (amount, lines) = if expense > 0.0 {
+        (
+            expense,
+            vec![
+                VoucherLineDraft {
+                    account_code: account_code.into(),
+                    debit_amount: expense,
+                    credit_amount: 0.0,
+                    summary: summary.clone(),
+                },
+                VoucherLineDraft {
+                    account_code: "1002".into(),
+                    debit_amount: 0.0,
+                    credit_amount: expense,
+                    summary,
+                },
+            ],
+        )
+    } else {
+        (
+            income,
+            vec![
+                VoucherLineDraft {
+                    account_code: "1002".into(),
+                    debit_amount: income,
+                    credit_amount: 0.0,
+                    summary: summary.clone(),
+                },
+                VoucherLineDraft {
+                    account_code: account_code.into(),
+                    debit_amount: 0.0,
+                    credit_amount: income,
+                    summary,
+                },
+            ],
+        )
+    };
+    if amount <= 0.0 {
+        return Err(AppError::General(
+            "流水收入支出金额均为 0，不能生成凭证".into(),
+        ));
+    }
+    insert_voucher(
+        conn,
+        &VoucherDraft {
+            belong_month,
+            voucher_date: transaction_date,
+            source_type: "bank_manual".into(),
+            source_id: transaction_id,
+            remark: Some("银行流水入账".into()),
+            lines,
+        },
+    )
 }
 
 /// 报销计提凭证借方行：按报销单关联发票的费用类型映射生成借方行，税额进 2221，贷方 2241 汇总。
@@ -1979,6 +2070,156 @@ mod tests {
         assert!(maybe_generate_invoice_expense_voucher(&conn, invoice.id)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn test_bank_manual_voucher() {
+        let conn = setup();
+        // 插入 1 条 unmatched 支出流水 expense=30 belong_month=2026-08（参考现有流水测试构造）
+        conn.execute(
+            "INSERT INTO bank_transactions (transaction_date, belong_month, summary, income_amount, expense_amount, balance, status, ignore_reason)
+             VALUES ('2026-08-05', '2026-08', '手续费', 0.0, 30.0, 9970.0, 'unmatched', NULL)",
+            [],
+        )
+        .unwrap();
+        let tx_id: i64 = conn
+            .query_row("SELECT MAX(id) FROM bank_transactions", [], |r| r.get(0))
+            .unwrap();
+        let v = create_bank_manual_voucher(&conn, tx_id, "6603", Some("手续费".into())).unwrap();
+        assert_eq!(v.total_amount, 30.0);
+        assert_eq!(v.source_type, "bank_manual");
+        assert_eq!(v.source_id, tx_id);
+        assert_eq!(v.belong_month, "2026-08");
+        assert_eq!(v.voucher_date, "2026-08-05");
+        // 借 6603 贷 1002
+        let debit_line = v.lines.iter().find(|l| l.debit_amount > 0.0).unwrap();
+        assert_eq!(debit_line.account_code, "6603");
+        assert_eq!(debit_line.debit_amount, 30.0);
+        let credit_line = v.lines.iter().find(|l| l.credit_amount > 0.0).unwrap();
+        assert_eq!(credit_line.account_code, "1002");
+        assert_eq!(credit_line.credit_amount, 30.0);
+        // 重复生成报错（active 唯一索引）
+        assert!(create_bank_manual_voucher(&conn, tx_id, "6603", None).is_err());
+        // 忽略流水后凭证 void：
+        // db::ignore_bank_transaction(...) 后 active bank_manual 数为 0
+        db::ignore_bank_transaction(
+            &conn,
+            &crate::models::BankTransactionIgnoreInput {
+                transaction_id: tx_id,
+                reason: "非业务流水".into(),
+            },
+        )
+        .unwrap();
+        let active = get_vouchers(
+            &conn,
+            &VoucherQuery {
+                month: None,
+                source_type: Some("bank_manual".into()),
+                status: Some("active".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(active.len(), 0);
+
+        // 收入流水：借 1002 / 贷所选科目（如利息收入进 6603 之外的 6011 不在预置科目，改用 6603 验证方向即可）
+        conn.execute(
+            "INSERT INTO bank_transactions (transaction_date, belong_month, summary, income_amount, expense_amount, balance, status, ignore_reason)
+             VALUES ('2026-08-06', '2026-08', '利息收入', 12.0, 0.0, 9982.0, 'unmatched', NULL)",
+            [],
+        )
+        .unwrap();
+        let tx_id2: i64 = conn
+            .query_row("SELECT MAX(id) FROM bank_transactions", [], |r| r.get(0))
+            .unwrap();
+        let v2 = create_bank_manual_voucher(&conn, tx_id2, "6603", None).unwrap();
+        assert_eq!(v2.total_amount, 12.0);
+        let debit2 = v2.lines.iter().find(|l| l.debit_amount > 0.0).unwrap();
+        assert_eq!(debit2.account_code, "1002");
+        let credit2 = v2.lines.iter().find(|l| l.credit_amount > 0.0).unwrap();
+        assert_eq!(credit2.account_code, "6603");
+        // 取消匹配也 void bank_manual（spec 3.3：取消匹配 → void bank_manual）
+        db::cancel_bank_transaction_match(&conn, tx_id2).unwrap();
+        let active2 = get_vouchers(
+            &conn,
+            &VoucherQuery {
+                month: None,
+                source_type: Some("bank_manual".into()),
+                status: Some("active".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(active2.len(), 0);
+        // 已忽略流水不能再生成凭证
+        assert!(create_bank_manual_voucher(&conn, tx_id, "6603", None).is_err());
+    }
+
+    #[test]
+    fn test_month_close_voucher_balance_check() {
+        let conn = setup();
+        // 无凭证时检查项通过
+        let wb = db::get_month_close_workbench(&conn, "2026-08").unwrap();
+        let item = wb
+            .checks
+            .iter()
+            .find(|c| c.title.contains("记账凭证平衡"))
+            .unwrap();
+        assert_eq!(item.status, "ok");
+        // 平衡凭证不触发
+        let draft = VoucherDraft {
+            belong_month: "2026-08".into(),
+            voucher_date: "2026-08-31".into(),
+            source_type: "bank_manual".into(),
+            source_id: 1,
+            remark: None,
+            lines: vec![
+                VoucherLineDraft {
+                    account_code: "6603".into(),
+                    debit_amount: 30.0,
+                    credit_amount: 0.0,
+                    summary: None,
+                },
+                VoucherLineDraft {
+                    account_code: "1002".into(),
+                    debit_amount: 0.0,
+                    credit_amount: 30.0,
+                    summary: None,
+                },
+            ],
+        };
+        insert_voucher(&conn, &draft).unwrap();
+        let wb = db::get_month_close_workbench(&conn, "2026-08").unwrap();
+        let item = wb
+            .checks
+            .iter()
+            .find(|c| c.title.contains("记账凭证平衡"))
+            .unwrap();
+        assert_eq!(item.status, "ok");
+        // 手动 UPDATE vouchers SET total_amount=0 制造异常（模拟不平衡），断言月结检查返回阻塞项
+        conn.execute("UPDATE vouchers SET total_amount = 0", [])
+            .unwrap();
+        let wb = db::get_month_close_workbench(&conn, "2026-08").unwrap();
+        let item = wb
+            .checks
+            .iter()
+            .find(|c| c.title.contains("记账凭证平衡"))
+            .unwrap();
+        assert_eq!(item.status, "blocking");
+        assert_eq!(item.count, 1);
+        assert!(
+            item.description.contains("不平衡"),
+            "got: {}",
+            item.description
+        );
+        // 其他月份的不平衡凭证不影响本月检查
+        conn.execute("UPDATE vouchers SET total_amount = 30.0", [])
+            .unwrap();
+        let wb = db::get_month_close_workbench(&conn, "2026-08").unwrap();
+        let item = wb
+            .checks
+            .iter()
+            .find(|c| c.title.contains("记账凭证平衡"))
+            .unwrap();
+        assert_eq!(item.status, "ok");
     }
 
     #[test]

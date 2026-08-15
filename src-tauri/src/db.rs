@@ -1829,6 +1829,16 @@ pub fn get_month_close_workbench(conn: &Connection, month: &str) -> AppResult<Mo
             |row| row.get(0),
         )
         .unwrap_or(0.0);
+    // 记账凭证平衡：active 凭证总额需大于 0 且与借贷分录合计一致
+    let unbalanced_voucher_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM vouchers v WHERE v.status = 'active' AND (
+            v.total_amount <= 0
+            OR v.total_amount != (SELECT COALESCE(SUM(debit_amount),0) FROM voucher_lines WHERE voucher_id = v.id)
+            OR v.total_amount != (SELECT COALESCE(SUM(credit_amount),0) FROM voucher_lines WHERE voucher_id = v.id)
+        ) AND v.belong_month = ?1",
+        params![month],
+        |row| row.get(0),
+    )?;
 
     let summary = MonthCloseSummary {
         month: month.to_string(),
@@ -1854,7 +1864,24 @@ pub fn get_month_close_workbench(conn: &Connection, month: &str) -> AppResult<Mo
         approved_reimbursement_amount,
         paid_reimbursement_amount,
     };
-    let checks = build_month_close_checks(&summary);
+    let mut checks = build_month_close_checks(&summary);
+    checks.push(MonthCloseCheckItem {
+        key: "voucher_balance".to_string(),
+        title: "记账凭证平衡".to_string(),
+        status: if unbalanced_voucher_count == 0 {
+            "ok"
+        } else {
+            "blocking"
+        }
+        .to_string(),
+        count: unbalanced_voucher_count as i32,
+        description: if unbalanced_voucher_count == 0 {
+            "本月记账凭证借贷平衡".to_string()
+        } else {
+            format!("存在 {unbalanced_voucher_count} 张借贷不平衡凭证")
+        },
+        action_route: Some("/bank-transactions".to_string()),
+    });
     let month_close = get_month_close_record(conn, month)?;
     Ok(MonthCloseWorkbench {
         summary,
@@ -2944,6 +2971,8 @@ pub fn cancel_bank_transaction_match(conn: &Connection, transaction_id: i64) -> 
         "UPDATE bank_transactions SET status='unmatched', updated_at=?1 WHERE id=?2",
         params![now, transaction_id],
     )?;
+    // 取消匹配后流水回到 unmatched，其 bank_manual 凭证随之作废（spec 3.3）
+    crate::accounting::void_vouchers_for_source(conn, "bank_manual", transaction_id)?;
     Ok(updated > 0)
 }
 
@@ -2964,6 +2993,8 @@ pub fn ignore_bank_transaction(
         "UPDATE bank_transactions SET status='ignored', ignore_reason=?1, updated_at=?2 WHERE id=?3",
         params![input.reason.trim(), now, input.transaction_id],
     )?;
+    // 忽略流水后凭证作废（流水不再构成银行业务）
+    crate::accounting::void_vouchers_for_source(conn, "bank_manual", input.transaction_id)?;
     Ok(updated > 0)
 }
 
