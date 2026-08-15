@@ -936,3 +936,56 @@ pub struct VoucherQuery {
     pub source_type: Option<String>,
     pub status: Option<String>,
 }
+
+// ==================== Accounting（第五阶段 财务报表） ====================
+
+/// 报表通用行：current=本期数，comparative=比较期数
+/// （资产负债表为年初数，利润表为启用月至当月累计数，现金流量表不使用 comparative）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportRow {
+    pub key: String,
+    pub label: String,
+    pub current: f64,
+    pub comparative: f64,
+}
+
+/// 资产负债表。month 小于期初启用月（或未录期初）时 enabled=false 且行/合计全空。
+/// 资产端 1001+1002+1012 合并为"货币资金"行，其余科目一科目一行；3104 行替换为"未分配利润"。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BalanceSheet {
+    pub month: String,
+    pub enabled: bool,
+    pub asset_rows: Vec<ReportRow>,
+    pub liability_equity_rows: Vec<ReportRow>,
+    pub asset_total: f64,
+    pub liability_equity_total: f64,
+    pub balanced: bool,
+}
+
+/// 利润表。rows 为固定标准行（空行显示 0）：current=当月发生额，comparative=年初至当月累计。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IncomeStatement {
+    pub month: String,
+    /// comparative 列是否为启用月至当月累计数（启用月之前无累计概念，为 false 且全 0）
+    pub year_cumulative: bool,
+    pub rows: Vec<ReportRow>,
+    pub net_profit_month: f64,
+    pub net_profit_year: f64,
+}
+
+/// 现金流量表（直接法）：六行汇总（经营/投资/筹资 × 流入/流出）+ 其他行 + 现金净增加额。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CashFlowStatement {
+    pub month: String,
+    pub rows: Vec<ReportRow>,
+    pub net_increase: f64,
+    pub unclassified: Vec<UnclassifiedCashItem>,
+}
+
+/// 对方科目现金流量分类为 none 的现金收支明细（负数 = 流出），提示用户补充科目分类。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnclassifiedCashItem {
+    pub voucher_no: String,
+    pub summary: Option<String>,
+    pub amount: f64,
+}

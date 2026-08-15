@@ -3,7 +3,7 @@ use crate::errors::{AppError, AppResult};
 use crate::models::*;
 use chrono::Utc;
 use rusqlite::{params, Connection};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// 查询全部会计科目（按编码排序）。
 pub fn get_accounts(conn: &Connection) -> AppResult<Vec<GlAccount>> {
@@ -903,6 +903,550 @@ pub fn get_vouchers(conn: &Connection, q: &VoucherQuery) -> AppResult<Vec<Vouche
         rows
     };
     ids.iter().map(|id| get_voucher(conn, *id)).collect()
+}
+
+// ==================== 报表计算引擎（Task 10） ====================
+
+/// 科目余额中间结构：opening 按科目方向取正负号（借方科目借正，贷方科目贷正）。
+struct AccountBalance {
+    code: String,
+    name: String,
+    category: String,
+    direction: String,
+    opening: f64,
+    period_debit: f64,
+    period_credit: f64,
+}
+
+impl AccountBalance {
+    /// 期末余额（按科目方向为正）。ending = opening + (借-贷) × 方向系数。
+    fn ending(&self) -> f64 {
+        self.opening
+            + (self.period_debit - self.period_credit)
+                * if self.direction == "debit" { 1.0 } else { -1.0 }
+    }
+}
+
+/// 期初启用月：opening_balances 的 MIN(month)。无期初数据时 None（所有报表 enabled=false）。
+fn opening_month(conn: &Connection) -> Option<String> {
+    conn.query_row("SELECT MIN(month) FROM opening_balances", [], |r| r.get(0))
+        .unwrap_or(None)
+}
+
+/// 计算 month 及其之前所有月份中落在启用月之后的月份是否有效（month >= 启用月）。
+fn month_enabled(conn: &Connection, month: &str) -> bool {
+    match opening_month(conn) {
+        Some(m) => month >= m.as_str(),
+        None => false,
+    }
+}
+
+/// 计算 month 各科目的 期初/本期借贷/期末。
+/// - opening：启用月 <= month 时 = 启用月期初余额（按科目方向正负号）
+///   + 启用月至 month 前一月的 active 凭证累计净发生额（借-贷 × 方向系数）；
+///   跨月查看报表时此前月份的凭证必须滚入期初，否则资产负债表无法平衡
+/// - period_debit/credit：当月 active 凭证分录按科目合计
+fn compute_balances(conn: &Connection, month: &str) -> AppResult<Vec<AccountBalance>> {
+    let mut stmt =
+        conn.prepare("SELECT code, name, category, direction FROM gl_accounts ORDER BY code")?;
+    let mut balances: Vec<AccountBalance> = stmt
+        .query_map([], |r| {
+            Ok(AccountBalance {
+                code: r.get(0)?,
+                name: r.get(1)?,
+                category: r.get(2)?,
+                direction: r.get(3)?,
+                opening: 0.0,
+                period_debit: 0.0,
+                period_credit: 0.0,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+    if let Some(open_month) = opening_month(conn) {
+        if month >= open_month.as_str() {
+            // 启用月期初（按方向正负号：借方科目取借方金额，贷方科目取贷方金额为正）
+            let mut stmt = conn.prepare(
+                "SELECT account_code, debit_amount, credit_amount FROM opening_balances",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, f64>(1)?,
+                    r.get::<_, f64>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (code, debit, credit) = row?;
+                if let Some(b) = balances.iter_mut().find(|b| b.code == code) {
+                    b.opening = if b.direction == "debit" {
+                        debit
+                    } else {
+                        credit
+                    };
+                }
+            }
+            drop(stmt);
+            // 启用月至 month 前一月的累计净发生额滚入期初
+            let mut stmt = conn.prepare(
+                "SELECT vl.account_code, SUM(vl.debit_amount), SUM(vl.credit_amount)
+                 FROM voucher_lines vl JOIN vouchers v ON v.id = vl.voucher_id
+                 WHERE v.belong_month >= ?1 AND v.belong_month < ?2 AND v.status = 'active'
+                 GROUP BY vl.account_code",
+            )?;
+            let rows = stmt.query_map(params![open_month, month], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, f64>(1)?,
+                    r.get::<_, f64>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (code, debit, credit) = row?;
+                if let Some(b) = balances.iter_mut().find(|b| b.code == code) {
+                    let net = (debit - credit) * if b.direction == "debit" { 1.0 } else { -1.0 };
+                    b.opening += net;
+                }
+            }
+        }
+    }
+    // 当月发生额
+    let mut stmt = conn.prepare(
+        "SELECT vl.account_code, SUM(vl.debit_amount), SUM(vl.credit_amount)
+         FROM voucher_lines vl JOIN vouchers v ON v.id = vl.voucher_id
+         WHERE v.belong_month = ?1 AND v.status = 'active'
+         GROUP BY vl.account_code",
+    )?;
+    let rows = stmt.query_map(params![month], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, f64>(1)?,
+            r.get::<_, f64>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (code, debit, credit) = row?;
+        if let Some(b) = balances.iter_mut().find(|b| b.code == code) {
+            b.period_debit = debit;
+            b.period_credit = credit;
+        }
+    }
+    Ok(balances)
+}
+
+/// 利润表标准行顺序（code, 中文名, 科目方向）。金额按发生额展示：
+/// 收入类（贷方向）取 贷-借，费用类（借方向）取 借-贷（正数展示）。
+const INCOME_STATEMENT_ROWS: &[(&str, &str, &str)] = &[
+    ("6001", "主营业务收入", "credit"),
+    ("6051", "其他业务收入", "credit"),
+    ("6111", "投资收益", "credit"),
+    ("6401", "主营业务成本", "debit"),
+    ("6402", "其他业务成本", "debit"),
+    ("6403", "税金及附加", "debit"),
+    ("6601", "销售费用", "debit"),
+    ("6602", "管理费用", "debit"),
+    ("6603", "财务费用", "debit"),
+    ("6301", "营业外收入", "credit"),
+    ("6711", "营业外支出", "debit"),
+    ("6801", "所得税费用", "debit"),
+];
+
+/// 计算损益类科目的发生额：返回 (当月, 年初至当月累计)，金额为正数展示值
+/// （收入类取 贷-借，费用类取 借-贷）。month < 启用月时返回 None；
+/// 累计范围为 启用月..=month 的 active 凭证。
+fn profit_loss_amounts(
+    conn: &Connection,
+    month: &str,
+) -> AppResult<Option<HashMap<String, (f64, f64)>>> {
+    let Some(open_month) = opening_month(conn) else {
+        return Ok(None);
+    };
+    if month < open_month.as_str() {
+        return Ok(None);
+    }
+    // 方向系数：贷方科目 贷-借（收入为正），借方科目 借-贷（费用为正）
+    let sign = |code: &str| -> f64 {
+        INCOME_STATEMENT_ROWS
+            .iter()
+            .find(|(c, _, _)| *c == code)
+            .map(|(_, _, dir)| if *dir == "credit" { 1.0 } else { -1.0 })
+            .unwrap_or(1.0)
+    };
+    // 当月发生额（贷-借）
+    let mut month_map: HashMap<String, f64> = HashMap::new();
+    let mut stmt = conn.prepare(
+        "SELECT vl.account_code, SUM(vl.credit_amount - vl.debit_amount)
+         FROM voucher_lines vl JOIN vouchers v ON v.id = vl.voucher_id
+         WHERE v.belong_month = ?1 AND v.status = 'active'
+           AND vl.account_code IN (SELECT code FROM gl_accounts WHERE category = 'profit_loss')
+         GROUP BY vl.account_code",
+    )?;
+    let rows = stmt.query_map(params![month], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
+    })?;
+    for row in rows {
+        let (code, amt) = row?;
+        month_map.insert(code, amt);
+    }
+    drop(stmt);
+    // 年初（启用月）至当月累计（贷-借）
+    let mut year_map: HashMap<String, f64> = HashMap::new();
+    let mut stmt = conn.prepare(
+        "SELECT vl.account_code, SUM(vl.credit_amount - vl.debit_amount)
+         FROM voucher_lines vl JOIN vouchers v ON v.id = vl.voucher_id
+         WHERE v.belong_month >= ?1 AND v.belong_month <= ?2 AND v.status = 'active'
+           AND vl.account_code IN (SELECT code FROM gl_accounts WHERE category = 'profit_loss')
+         GROUP BY vl.account_code",
+    )?;
+    let rows = stmt.query_map(params![open_month, month], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
+    })?;
+    for row in rows {
+        let (code, amt) = row?;
+        year_map.insert(code, amt);
+    }
+    let mut result = HashMap::new();
+    for (code, _, _) in INCOME_STATEMENT_ROWS {
+        let s = sign(code);
+        let m = *month_map.get(*code).unwrap_or(&0.0) * s;
+        let y = *year_map.get(*code).unwrap_or(&0.0) * s;
+        result.insert((*code).to_string(), (m, y));
+    }
+    Ok(Some(result))
+}
+
+/// 净利润 = 收入类合计 − 费用类合计（贷方向科目为正、借方向科目为负）。
+/// 返回 (当月, 年初至当月累计)；未启用返回 (0, 0)。
+fn net_profit(conn: &Connection, month: &str) -> AppResult<(f64, f64)> {
+    match profit_loss_amounts(conn, month)? {
+        Some(map) => {
+            let mut m = 0.0;
+            let mut y = 0.0;
+            for (code, _, dir) in INCOME_STATEMENT_ROWS {
+                let (mv, yv) = map.get(*code).copied().unwrap_or((0.0, 0.0));
+                let s = if *dir == "credit" { 1.0 } else { -1.0 };
+                m += mv * s;
+                y += yv * s;
+            }
+            Ok((m, y))
+        }
+        None => Ok((0.0, 0.0)),
+    }
+}
+
+/// 资产负债表：asset 科目期末 → 资产行（1001+1002+1012 合并"货币资金"，其余一科目一行）；
+/// 未分配利润 = 3104 期末 + 启用月至当月累计净利润；comparative = 年初（期初口径）；
+/// balanced 兜底校验 |资产合计 - 负债权益合计| < 0.005。
+pub fn build_balance_sheet(conn: &Connection, month: &str) -> AppResult<BalanceSheet> {
+    let mut sheet = BalanceSheet {
+        month: month.to_string(),
+        enabled: month_enabled(conn, month),
+        asset_rows: Vec::new(),
+        liability_equity_rows: Vec::new(),
+        asset_total: 0.0,
+        liability_equity_total: 0.0,
+        balanced: false,
+    };
+    if !sheet.enabled {
+        return Ok(sheet);
+    }
+    let balances = compute_balances(conn, month)?;
+    let (_, year_profit) = net_profit(conn, month)?;
+    // 资产端：货币资金合并行 + 其余一科目一行
+    let mut monetary_row = ReportRow {
+        key: "monetary".into(),
+        label: "货币资金".into(),
+        current: 0.0,
+        comparative: 0.0,
+    };
+    for b in balances.iter().filter(|b| b.category == "asset") {
+        let ending = b.ending();
+        if ["1001", "1002", "1012"].contains(&b.code.as_str()) {
+            monetary_row.current += ending;
+            monetary_row.comparative += b.opening;
+        } else {
+            sheet.asset_rows.push(ReportRow {
+                key: b.code.clone(),
+                label: b.name.clone(),
+                current: ending,
+                comparative: b.opening,
+            });
+        }
+    }
+    sheet.asset_rows.insert(0, monetary_row);
+    sheet.asset_total = sheet.asset_rows.iter().map(|r| r.current).sum();
+    // 负债与权益端：3104 替换为"未分配利润" = 3104 期末 + 启用月至当月累计净利润
+    for b in balances
+        .iter()
+        .filter(|b| b.category == "liability" || b.category == "equity")
+    {
+        let (ending, comp) = if b.code == "3104" {
+            (b.ending() + year_profit, b.opening)
+        } else {
+            (b.ending(), b.opening)
+        };
+        sheet.liability_equity_rows.push(ReportRow {
+            key: if b.code == "3104" {
+                "undistributed".into()
+            } else {
+                b.code.clone()
+            },
+            label: if b.code == "3104" {
+                "未分配利润".into()
+            } else {
+                b.name.clone()
+            },
+            current: ending,
+            comparative: comp,
+        });
+    }
+    sheet.liability_equity_total = sheet.liability_equity_rows.iter().map(|r| r.current).sum();
+    sheet.balanced = (sheet.asset_total - sheet.liability_equity_total).abs() < 0.005;
+    Ok(sheet)
+}
+
+/// 利润表：profit_loss 科目当月与年初至当月累计发生额（贷-借）映射到标准行；
+/// 营业利润 = 收入类 − 成本费用类（营业外收支与所得税之前）；
+/// 利润总额 = 营业利润 + 营业外收支净额；净利润 = 利润总额 − 所得税。
+pub fn build_income_statement(conn: &Connection, month: &str) -> AppResult<IncomeStatement> {
+    let amounts = profit_loss_amounts(conn, month)?;
+    let enabled = amounts.is_some();
+    let mut rows = Vec::new();
+    for (code, label, _) in INCOME_STATEMENT_ROWS {
+        let (m, y) = match &amounts {
+            Some(map) => map.get(*code).copied().unwrap_or((0.0, 0.0)),
+            None => (0.0, 0.0),
+        };
+        rows.push(ReportRow {
+            key: (*code).to_string(),
+            label: (*label).to_string(),
+            current: m,
+            comparative: y,
+        });
+    }
+    let get = |code: &str| -> (f64, f64) {
+        rows.iter()
+            .find(|r| r.key == code)
+            .map(|r| (r.current, r.comparative))
+            .unwrap_or((0.0, 0.0))
+    };
+    // 营业利润 = 收入(6001/6051/6111) − 成本费用(6401/6402/6403/6601/6602/6603)
+    let op_m = get("6001").0 + get("6051").0 + get("6111").0
+        - get("6401").0
+        - get("6402").0
+        - get("6403").0
+        - get("6601").0
+        - get("6602").0
+        - get("6603").0;
+    let op_y = get("6001").1 + get("6051").1 + get("6111").1
+        - get("6401").1
+        - get("6402").1
+        - get("6403").1
+        - get("6601").1
+        - get("6602").1
+        - get("6603").1;
+    let (non_in_m, non_in_y) = get("6301");
+    let (non_out_m, non_out_y) = get("6711");
+    let (tax_m, tax_y) = get("6801");
+    let total_m = op_m + non_in_m - non_out_m;
+    let total_y = op_y + non_in_y - non_out_y;
+    let net_m = total_m - tax_m;
+    let net_y = total_y - tax_y;
+    rows.push(ReportRow {
+        key: "operating_profit".into(),
+        label: "营业利润".into(),
+        current: op_m,
+        comparative: op_y,
+    });
+    rows.push(ReportRow {
+        key: "total_profit".into(),
+        label: "利润总额".into(),
+        current: total_m,
+        comparative: total_y,
+    });
+    rows.push(ReportRow {
+        key: "net_profit".into(),
+        label: "净利润".into(),
+        current: net_m,
+        comparative: net_y,
+    });
+    Ok(IncomeStatement {
+        month: month.to_string(),
+        year_cumulative: enabled,
+        rows,
+        net_profit_month: net_m,
+        net_profit_year: net_y,
+    })
+}
+
+/// 现金等价物科目（编制现金流量表时视为"现金"）。
+const CASH_ACCOUNTS: &[&str] = &["1001", "1002", "1012"];
+
+/// 现金流量表（直接法）：当月含现金科目行且含对方行的 active 凭证，
+/// 现金净流入（借-贷）按对方行金额占对方行总额比例分摊到对方科目的 cash_flow_category；
+/// 对方科目 category=none 的部分归"其他"行并记入 unclassified 明细。
+pub fn build_cash_flow_statement(conn: &Connection, month: &str) -> AppResult<CashFlowStatement> {
+    let vouchers = get_vouchers(
+        conn,
+        &VoucherQuery {
+            month: Some(month.to_string()),
+            source_type: None,
+            status: Some("active".into()),
+        },
+    )?;
+    let mut cash = CashFlowSums::default();
+    let mut unclassified: Vec<UnclassifiedCashItem> = Vec::new();
+    let cfc_map = cash_flow_categories(conn)?;
+    for v in &vouchers {
+        // 现金行净流入（借方为正、贷方为负）；无现金行的凭证不参与
+        let cash_net: f64 = v
+            .lines
+            .iter()
+            .filter(|l| CASH_ACCOUNTS.contains(&l.account_code.as_str()))
+            .map(|l| l.debit_amount - l.credit_amount)
+            .sum();
+        if cash_net.abs() < 0.005 {
+            continue;
+        }
+        // 对方行（非现金科目行），金额取借+贷发生额绝对值合计作为分摊权重
+        let counter_lines: Vec<&VoucherLine> = v
+            .lines
+            .iter()
+            .filter(|l| !CASH_ACCOUNTS.contains(&l.account_code.as_str()))
+            .collect();
+        let counter_total: f64 = counter_lines
+            .iter()
+            .map(|l| l.debit_amount + l.credit_amount)
+            .sum();
+        if counter_lines.is_empty() || counter_total.abs() < 0.005 {
+            // 凭证只有现金行（不应发生）：整笔归 unclassified 提示
+            unclassified.push(UnclassifiedCashItem {
+                voucher_no: v.voucher_no.clone(),
+                summary: v.remark.clone(),
+                amount: cash_net,
+            });
+            cash.other += cash_net;
+            continue;
+        }
+        // 按对方行金额比例分摊现金净流入/流出
+        for l in &counter_lines {
+            let weight = (l.debit_amount + l.credit_amount) / counter_total;
+            let amount = cash_net * weight;
+            let cfc = cfc_map
+                .get(l.account_code.as_str())
+                .map(|s| s.as_str())
+                .unwrap_or("none");
+            match cfc {
+                "operating" => {
+                    if amount >= 0.0 {
+                        cash.operating_in += amount
+                    } else {
+                        cash.operating_out += -amount
+                    }
+                }
+                "investing" => {
+                    if amount >= 0.0 {
+                        cash.investing_in += amount
+                    } else {
+                        cash.investing_out += -amount
+                    }
+                }
+                "financing" => {
+                    if amount >= 0.0 {
+                        cash.financing_in += amount
+                    } else {
+                        cash.financing_out += -amount
+                    }
+                }
+                _ => {
+                    cash.other += amount;
+                    unclassified.push(UnclassifiedCashItem {
+                        voucher_no: v.voucher_no.clone(),
+                        summary: l.summary.clone(),
+                        amount,
+                    });
+                }
+            }
+        }
+    }
+    let rows = vec![
+        ReportRow {
+            key: "operating_inflow".into(),
+            label: "经营活动现金流入".into(),
+            current: cash.operating_in,
+            comparative: 0.0,
+        },
+        ReportRow {
+            key: "operating_outflow".into(),
+            label: "经营活动现金流出".into(),
+            current: cash.operating_out,
+            comparative: 0.0,
+        },
+        ReportRow {
+            key: "investing_inflow".into(),
+            label: "投资活动现金流入".into(),
+            current: cash.investing_in,
+            comparative: 0.0,
+        },
+        ReportRow {
+            key: "investing_outflow".into(),
+            label: "投资活动现金流出".into(),
+            current: cash.investing_out,
+            comparative: 0.0,
+        },
+        ReportRow {
+            key: "financing_inflow".into(),
+            label: "筹资活动现金流入".into(),
+            current: cash.financing_in,
+            comparative: 0.0,
+        },
+        ReportRow {
+            key: "financing_outflow".into(),
+            label: "筹资活动现金流出".into(),
+            current: cash.financing_out,
+            comparative: 0.0,
+        },
+        ReportRow {
+            key: "other".into(),
+            label: "其他（未分类）".into(),
+            current: cash.other,
+            comparative: 0.0,
+        },
+    ];
+    let net_increase = cash.operating_in + cash.investing_in + cash.financing_in + cash.other
+        - cash.operating_out
+        - cash.investing_out
+        - cash.financing_out;
+    Ok(CashFlowStatement {
+        month: month.to_string(),
+        rows,
+        net_increase,
+        unclassified,
+    })
+}
+
+/// 现金流量表六行汇总中间结构。
+#[derive(Default)]
+struct CashFlowSums {
+    operating_in: f64,
+    operating_out: f64,
+    investing_in: f64,
+    investing_out: f64,
+    financing_in: f64,
+    financing_out: f64,
+    other: f64,
+}
+
+/// 科目编码 → cash_flow_category 映射。
+fn cash_flow_categories(conn: &Connection) -> AppResult<HashMap<String, String>> {
+    let mut stmt = conn.prepare("SELECT code, cash_flow_category FROM gl_accounts")?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    let mut map = HashMap::new();
+    for row in rows {
+        let (code, cfc) = row?;
+        map.insert(code, cfc);
+    }
+    Ok(map)
 }
 
 #[cfg(test)]
@@ -2285,5 +2829,376 @@ mod tests {
         let maps = get_account_mappings(&conn).unwrap();
         assert_eq!(maps.len(), 1);
         assert!(delete_account_mapping(&conn, maps[0].id).unwrap());
+    }
+
+    // ==================== 报表计算引擎（Task 10） ====================
+
+    fn approx(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 0.005,
+            "期望 {expected}，实际 {actual}"
+        );
+    }
+
+    fn row_value<'a>(rows: impl IntoIterator<Item = &'a ReportRow>, key: &str) -> &'a ReportRow {
+        rows.into_iter()
+            .find(|r| r.key == key)
+            .unwrap_or_else(|| panic!("报表缺少行 {key}"))
+    }
+
+    fn vline(code: &str, debit: f64, credit: f64) -> VoucherLineDraft {
+        VoucherLineDraft {
+            account_code: code.into(),
+            debit_amount: debit,
+            credit_amount: credit,
+            summary: Some(format!("{code} 摘要")),
+        }
+    }
+
+    fn manual_draft(month: &str, source_id: i64, lines: Vec<VoucherLineDraft>) -> VoucherDraft {
+        VoucherDraft {
+            belong_month: month.into(),
+            voucher_date: format!("{month}-28"),
+            source_type: "bank_manual".into(),
+            source_id,
+            remark: None,
+            lines,
+        }
+    }
+
+    #[test]
+    fn test_reports() {
+        let conn = setup();
+        // 期初：1002 借 100000，2001 贷 40000，3001 贷 60000，启用月 2026-01
+        save_opening_balances(
+            &conn,
+            "2026-01",
+            &[
+                OpeningBalanceRow {
+                    account_code: "1002".into(),
+                    debit_amount: 100000.0,
+                    credit_amount: 0.0,
+                },
+                OpeningBalanceRow {
+                    account_code: "2001".into(),
+                    debit_amount: 0.0,
+                    credit_amount: 40000.0,
+                },
+                OpeningBalanceRow {
+                    account_code: "3001".into(),
+                    debit_amount: 0.0,
+                    credit_amount: 60000.0,
+                },
+            ],
+        )
+        .unwrap();
+        // 2026-02 三张手工凭证：
+        //   借 6602 5000 / 贷 1002 5000（管理费用，经营流出）
+        //   借 1002 2000 / 贷 6301 2000（营业外收入，经营流入）
+        //   借 1601 30000 / 贷 1002 30000（购固定资产，投资流出）
+        insert_voucher(
+            &conn,
+            &manual_draft(
+                "2026-02",
+                1,
+                vec![vline("6602", 5000.0, 0.0), vline("1002", 0.0, 5000.0)],
+            ),
+        )
+        .unwrap();
+        insert_voucher(
+            &conn,
+            &manual_draft(
+                "2026-02",
+                2,
+                vec![vline("1002", 2000.0, 0.0), vline("6301", 0.0, 2000.0)],
+            ),
+        )
+        .unwrap();
+        insert_voucher(
+            &conn,
+            &manual_draft(
+                "2026-02",
+                3,
+                vec![vline("1601", 30000.0, 0.0), vline("1002", 0.0, 30000.0)],
+            ),
+        )
+        .unwrap();
+
+        // ---- 资产负债表 2026-02 ----
+        let bs = build_balance_sheet(&conn, "2026-02").unwrap();
+        assert!(bs.enabled);
+        // 货币资金 = 100000 - 5000 + 2000 - 30000 = 67000；年初（期初口径）100000
+        approx(row_value(&bs.asset_rows, "monetary").current, 67000.0);
+        approx(row_value(&bs.asset_rows, "monetary").comparative, 100000.0);
+        approx(row_value(&bs.asset_rows, "1601").current, 30000.0);
+        approx(row_value(&bs.asset_rows, "1601").comparative, 0.0);
+        approx(
+            row_value(&bs.liability_equity_rows, "2001").current,
+            40000.0,
+        );
+        approx(
+            row_value(&bs.liability_equity_rows, "3001").current,
+            60000.0,
+        );
+        // 未分配利润 = 3104 期末 + 启用月至当月累计净利润 = 0 + (-5000 + 2000) = -3000
+        approx(
+            row_value(&bs.liability_equity_rows, "undistributed").current,
+            -3000.0,
+        );
+        approx(bs.asset_total, 97000.0);
+        approx(bs.liability_equity_total, 97000.0);
+        assert!(bs.balanced);
+
+        // ---- 利润表 2026-02 ----
+        let is = build_income_statement(&conn, "2026-02").unwrap();
+        assert!(is.year_cumulative);
+        approx(row_value(&is.rows, "6602").current, 5000.0);
+        approx(row_value(&is.rows, "6301").current, 2000.0);
+        approx(row_value(&is.rows, "operating_profit").current, -5000.0);
+        approx(row_value(&is.rows, "total_profit").current, -3000.0);
+        approx(row_value(&is.rows, "net_profit").current, -3000.0);
+        approx(is.net_profit_month, -3000.0);
+        approx(is.net_profit_year, -3000.0);
+        // 无 1 月损益时本年累计与当月一致
+        approx(row_value(&is.rows, "6602").comparative, 5000.0);
+        approx(row_value(&is.rows, "6001").current, 0.0);
+
+        // ---- 现金流量表 2026-02 ----
+        let cf = build_cash_flow_statement(&conn, "2026-02").unwrap();
+        approx(row_value(&cf.rows, "operating_inflow").current, 2000.0);
+        approx(row_value(&cf.rows, "operating_outflow").current, 5000.0);
+        approx(row_value(&cf.rows, "investing_inflow").current, 0.0);
+        approx(row_value(&cf.rows, "investing_outflow").current, 30000.0);
+        approx(row_value(&cf.rows, "financing_inflow").current, 0.0);
+        approx(row_value(&cf.rows, "financing_outflow").current, 0.0);
+        approx(row_value(&cf.rows, "other").current, 0.0);
+        approx(cf.net_increase, -33000.0);
+        assert!(cf.unclassified.is_empty());
+
+        // ---- 启用月之前：enabled=false 全 0 ----
+        let bs_prev = build_balance_sheet(&conn, "2025-12").unwrap();
+        assert!(!bs_prev.enabled);
+        assert!(bs_prev.asset_rows.is_empty());
+        assert!(bs_prev.liability_equity_rows.is_empty());
+        approx(bs_prev.asset_total, 0.0);
+        approx(bs_prev.liability_equity_total, 0.0);
+        let is_prev = build_income_statement(&conn, "2025-12").unwrap();
+        assert!(!is_prev.year_cumulative);
+        approx(is_prev.net_profit_month, 0.0);
+        approx(is_prev.net_profit_year, 0.0);
+        approx(row_value(&is_prev.rows, "6602").current, 0.0);
+        let cf_prev = build_cash_flow_statement(&conn, "2025-12").unwrap();
+        approx(cf_prev.net_increase, 0.0);
+        assert!(cf_prev.unclassified.is_empty());
+    }
+
+    /// 跨月累计：2026-01 的损益凭证应计入 2026-02 报表的"本年累计"与未分配利润。
+    #[test]
+    fn test_reports_cross_month_cumulative_profit() {
+        let conn = setup();
+        save_opening_balances(
+            &conn,
+            "2026-01",
+            &[
+                OpeningBalanceRow {
+                    account_code: "1002".into(),
+                    debit_amount: 100000.0,
+                    credit_amount: 0.0,
+                },
+                OpeningBalanceRow {
+                    account_code: "2001".into(),
+                    debit_amount: 0.0,
+                    credit_amount: 40000.0,
+                },
+                OpeningBalanceRow {
+                    account_code: "3001".into(),
+                    debit_amount: 0.0,
+                    credit_amount: 60000.0,
+                },
+            ],
+        )
+        .unwrap();
+        // 2026-01：计提管理费用 1000（贷应付账款，不涉现金）
+        insert_voucher(
+            &conn,
+            &manual_draft(
+                "2026-01",
+                1,
+                vec![vline("6602", 1000.0, 0.0), vline("2202", 0.0, 1000.0)],
+            ),
+        )
+        .unwrap();
+        // 2026-02：同主场景三张凭证
+        insert_voucher(
+            &conn,
+            &manual_draft(
+                "2026-02",
+                2,
+                vec![vline("6602", 5000.0, 0.0), vline("1002", 0.0, 5000.0)],
+            ),
+        )
+        .unwrap();
+        insert_voucher(
+            &conn,
+            &manual_draft(
+                "2026-02",
+                3,
+                vec![vline("1002", 2000.0, 0.0), vline("6301", 0.0, 2000.0)],
+            ),
+        )
+        .unwrap();
+        insert_voucher(
+            &conn,
+            &manual_draft(
+                "2026-02",
+                4,
+                vec![vline("1601", 30000.0, 0.0), vline("1002", 0.0, 30000.0)],
+            ),
+        )
+        .unwrap();
+
+        // 1 月利润表：当月 = 本年累计（启用月即 1 月）
+        let is1 = build_income_statement(&conn, "2026-01").unwrap();
+        assert!(is1.year_cumulative);
+        approx(row_value(&is1.rows, "6602").current, 1000.0);
+        approx(row_value(&is1.rows, "6602").comparative, 1000.0);
+        approx(is1.net_profit_month, -1000.0);
+        approx(is1.net_profit_year, -1000.0);
+        // 1 月资产负债表：未分配利润 -1000，货币资金 100000（1 月凭证不涉现金）
+        let bs1 = build_balance_sheet(&conn, "2026-01").unwrap();
+        approx(row_value(&bs1.asset_rows, "monetary").current, 100000.0);
+        approx(
+            row_value(&bs1.liability_equity_rows, "undistributed").current,
+            -1000.0,
+        );
+        approx(
+            row_value(&bs1.liability_equity_rows, "2202").current,
+            1000.0,
+        );
+        assert!(bs1.balanced);
+
+        // 2 月利润表：管理费用当月 5000 / 本年累计 6000；净利润当月 -3000 / 累计 -4000
+        let is2 = build_income_statement(&conn, "2026-02").unwrap();
+        approx(row_value(&is2.rows, "6602").current, 5000.0);
+        approx(row_value(&is2.rows, "6602").comparative, 6000.0);
+        approx(is2.net_profit_month, -3000.0);
+        approx(is2.net_profit_year, -4000.0);
+
+        // 2 月资产负债表：未分配利润含 1 月亏损 = -4000，等式仍平衡
+        let bs2 = build_balance_sheet(&conn, "2026-02").unwrap();
+        approx(
+            row_value(&bs2.liability_equity_rows, "undistributed").current,
+            -4000.0,
+        );
+        approx(bs2.asset_total, 97000.0);
+        approx(bs2.liability_equity_total, 97000.0);
+        assert!(bs2.balanced);
+    }
+
+    /// 对方科目 cash_flow_category=none 的现金支出归"其他"行并进入 unclassified 明细。
+    #[test]
+    fn test_cash_flow_unclassified_none_category() {
+        let conn = setup();
+        save_opening_balances(
+            &conn,
+            "2026-01",
+            &[
+                OpeningBalanceRow {
+                    account_code: "1002".into(),
+                    debit_amount: 50000.0,
+                    credit_amount: 0.0,
+                },
+                OpeningBalanceRow {
+                    account_code: "3001".into(),
+                    debit_amount: 0.0,
+                    credit_amount: 50000.0,
+                },
+            ],
+        )
+        .unwrap();
+        // 借 3103（本年利润，cfc=none）800 / 贷 1002 800
+        insert_voucher(
+            &conn,
+            &VoucherDraft {
+                belong_month: "2026-02".into(),
+                voucher_date: "2026-02-28".into(),
+                source_type: "bank_manual".into(),
+                source_id: 1,
+                remark: Some("手工凭证".into()),
+                lines: vec![
+                    VoucherLineDraft {
+                        account_code: "3103".into(),
+                        debit_amount: 800.0,
+                        credit_amount: 0.0,
+                        summary: Some("结转损益".into()),
+                    },
+                    VoucherLineDraft {
+                        account_code: "1002".into(),
+                        debit_amount: 0.0,
+                        credit_amount: 800.0,
+                        summary: Some("银行支出".into()),
+                    },
+                ],
+            },
+        )
+        .unwrap();
+        let cf = build_cash_flow_statement(&conn, "2026-02").unwrap();
+        // 六行全 0，其他行 -800，净增加 -800
+        approx(row_value(&cf.rows, "operating_inflow").current, 0.0);
+        approx(row_value(&cf.rows, "operating_outflow").current, 0.0);
+        approx(row_value(&cf.rows, "investing_inflow").current, 0.0);
+        approx(row_value(&cf.rows, "investing_outflow").current, 0.0);
+        approx(row_value(&cf.rows, "financing_inflow").current, 0.0);
+        approx(row_value(&cf.rows, "financing_outflow").current, 0.0);
+        approx(row_value(&cf.rows, "other").current, -800.0);
+        approx(cf.net_increase, -800.0);
+        // unclassified 明细：凭证号 + 对方行摘要 + 负数金额（流出）
+        assert_eq!(cf.unclassified.len(), 1);
+        assert_eq!(cf.unclassified[0].voucher_no, "记-202602-001");
+        assert_eq!(cf.unclassified[0].summary.as_deref(), Some("结转损益"));
+        approx(cf.unclassified[0].amount, -800.0);
+    }
+
+    /// 一张凭证多个对方行：现金净流出按对方行金额比例分摊（3:7 → 经营 300 / 投资 700）。
+    #[test]
+    fn test_cash_flow_split_allocation_across_counter_lines() {
+        let conn = setup();
+        save_opening_balances(
+            &conn,
+            "2026-01",
+            &[
+                OpeningBalanceRow {
+                    account_code: "1002".into(),
+                    debit_amount: 50000.0,
+                    credit_amount: 0.0,
+                },
+                OpeningBalanceRow {
+                    account_code: "3001".into(),
+                    debit_amount: 0.0,
+                    credit_amount: 50000.0,
+                },
+            ],
+        )
+        .unwrap();
+        // 借 6602 300（经营）/ 借 1601 700（投资）/ 贷 1002 1000
+        insert_voucher(
+            &conn,
+            &manual_draft(
+                "2026-02",
+                1,
+                vec![
+                    vline("6602", 300.0, 0.0),
+                    vline("1601", 700.0, 0.0),
+                    vline("1002", 0.0, 1000.0),
+                ],
+            ),
+        )
+        .unwrap();
+        let cf = build_cash_flow_statement(&conn, "2026-02").unwrap();
+        approx(row_value(&cf.rows, "operating_outflow").current, 300.0);
+        approx(row_value(&cf.rows, "investing_outflow").current, 700.0);
+        approx(row_value(&cf.rows, "operating_inflow").current, 0.0);
+        approx(cf.net_increase, -1000.0);
+        assert!(cf.unclassified.is_empty());
     }
 }
