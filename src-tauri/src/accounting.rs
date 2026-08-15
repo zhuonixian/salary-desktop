@@ -1867,6 +1867,13 @@ mod tests {
     }
 
     #[test]
+    fn test_unlock_salary_results_no_locked() {
+        let conn = setup(); // 既有 helper：create_tables + seed_gl_accounts
+        let err = db::unlock_salary_results(&conn, "2026-08").unwrap_err();
+        assert!(err.to_string().contains("没有已锁定"));
+    }
+
+    #[test]
     fn test_payment_voucher() {
         let mut conn = db::tests::setup_financial_db();
         db::tests::fill_employee_bank_info(&conn);

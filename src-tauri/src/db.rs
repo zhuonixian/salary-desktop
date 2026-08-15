@@ -1469,7 +1469,7 @@ pub fn lock_salary_results(conn: &Connection, month: &str) -> AppResult<bool> {
     Ok(updated > 0)
 }
 
-pub fn unlock_salary_results(conn: &Connection, month: &str) -> AppResult<bool> {
+pub fn unlock_salary_results(conn: &Connection, month: &str) -> AppResult<usize> {
     ensure_month_open(conn, month)?;
     // 解锁 UPDATE 与计提凭证作废放在同一事务：任一失败整体回滚
     let tx = conn.unchecked_transaction()?;
@@ -1477,11 +1477,12 @@ pub fn unlock_salary_results(conn: &Connection, month: &str) -> AppResult<bool> 
         "UPDATE salary_monthly_results SET locked = 0, status = 'reviewed', updated_at = ?1 WHERE salary_month = ?2 AND locked = 1",
         params![Utc::now().to_rfc3339(), month],
     )?;
-    if updated > 0 {
-        crate::accounting::void_salary_accrual_vouchers(&tx, month)?;
+    if updated == 0 {
+        return Err(AppError::InvalidParam("该月没有已锁定的工资结果".into()));
     }
+    let voided = crate::accounting::void_salary_accrual_vouchers(&tx, month)?;
     tx.commit()?;
-    Ok(updated > 0)
+    Ok(voided)
 }
 
 pub fn review_salary_results(conn: &Connection, month: &str) -> AppResult<bool> {
