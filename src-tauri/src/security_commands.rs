@@ -359,13 +359,14 @@ pub(crate) fn unlock_salary_results_impl(
         json_escape(reason.trim()),
         voided
     );
-    db::log_operation(
+    // 日志失败不否定已提交的解锁：db::unlock_salary_results 已 commit，审计写库仅在库损坏时才可能失败
+    let _ = db::log_operation(
         conn,
         "unlock_salary",
         &format!("受控解锁{month}工资"),
         SEC_OP_OPERATOR,
         Some(&detail),
-    )?;
+    );
     Ok(true)
 }
 

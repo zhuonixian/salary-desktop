@@ -178,7 +178,10 @@ const SalaryCalculate: React.FC = () => {
       setUnlockedMonths((prev) => new Set(prev).add(monthStr));
       fetchData(monthStr);
     } catch (err: unknown) {
-      message.error(String(err));
+      const msg = err instanceof Error ? err.message : String(err);
+      message.error('解锁失败: ' + msg);
+      // 解锁失败清空密码输入，避免误以为已解锁；原因保留便于修正后重试
+      setUnlockModal((s) => ({ ...s, password: '' }));
     } finally {
       setUnlockModal((s) => ({ ...s, loading: false }));
     }
@@ -405,7 +408,7 @@ const SalaryCalculate: React.FC = () => {
           type="error"
           showIcon
           message="高风险操作"
-          description="解锁后该月工资恢复可编辑，已有计提凭证将作废；需输入启动密码，操作将完整记录到操作日志。修改完成后请重新锁定。"
+          description="解锁后该月工资恢复可编辑，已有计提凭证将作废；需输入启动密码，操作将完整记录到操作日志。修改完成后请重新锁定。月结前必须重新锁定，否则月结体检会阻塞。"
           style={{ marginBottom: 16 }}
         />
         <Form layout="vertical">

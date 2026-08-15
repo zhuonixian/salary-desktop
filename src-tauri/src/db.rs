@@ -1840,6 +1840,18 @@ pub fn get_month_close_workbench(conn: &Connection, month: &str) -> AppResult<Mo
         params![month],
         |row| row.get(0),
     )?;
+    // 受控解锁未重锁：本月工资计提凭证已作废且同源没有 active 凭证，直接月结会把月份冻结在不一致状态
+    let unlocked_accrual_voucher_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM vouchers
+         WHERE source_type='salary_accrual' AND belong_month = ?1
+           AND status='void'
+           AND NOT EXISTS (
+             SELECT 1 FROM vouchers v2
+             WHERE v2.source_type='salary_accrual' AND v2.source_id = vouchers.source_id AND v2.status='active'
+           )",
+        params![month],
+        |row| row.get(0),
+    )?;
 
     let summary = MonthCloseSummary {
         month: month.to_string(),
@@ -1882,6 +1894,26 @@ pub fn get_month_close_workbench(conn: &Connection, month: &str) -> AppResult<Mo
             format!("存在 {unbalanced_voucher_count} 张借贷不平衡凭证")
         },
         action_route: Some("/bank-transactions".to_string()),
+    });
+    // 受控解锁未重锁：存在已作废且同源无 active 的工资计提凭证时阻塞月结
+    checks.push(MonthCloseCheckItem {
+        key: "salary_unlocked_accrual".to_string(),
+        title: "工资计提凭证完整".to_string(),
+        status: if unlocked_accrual_voucher_count == 0 {
+            "ok"
+        } else {
+            "blocking"
+        }
+        .to_string(),
+        count: unlocked_accrual_voucher_count as i32,
+        description: if unlocked_accrual_voucher_count == 0 {
+            "本月工资计提凭证与锁定状态一致".to_string()
+        } else {
+            format!(
+                "存在 {unlocked_accrual_voucher_count} 条已作废且未重锁的工资计提凭证，请重新锁定工资后再月结"
+            )
+        },
+        action_route: Some("/salary".to_string()),
     });
     let month_close = get_month_close_record(conn, month)?;
     Ok(MonthCloseWorkbench {
@@ -5274,6 +5306,84 @@ pub mod tests {
         assert_eq!(workbench.summary.reimbursement_count, 1);
         assert_eq!(workbench.summary.approved_reimbursement_amount, 500.0);
         assert_eq!(workbench.summary.paid_reimbursement_amount, 0.0);
+    }
+
+    #[test]
+    fn test_month_close_blocks_unlocked_accrual_vouchers() {
+        let conn = setup_financial_db();
+        // 锁定前无计提凭证，检查项通过
+        let workbench = get_month_close_workbench(&conn, "2026-08").unwrap();
+        let item = workbench
+            .checks
+            .iter()
+            .find(|c| c.key == "salary_unlocked_accrual")
+            .unwrap();
+        assert_eq!(item.status, "ok");
+        // 锁定 → 生成计提凭证，检查项仍通过
+        lock_salary_results(&conn, "2026-08").unwrap();
+        let workbench = get_month_close_workbench(&conn, "2026-08").unwrap();
+        let item = workbench
+            .checks
+            .iter()
+            .find(|c| c.key == "salary_unlocked_accrual")
+            .unwrap();
+        assert_eq!(item.status, "ok");
+        // 受控解锁 → 计提凭证作废，检查项阻塞
+        unlock_salary_results(&conn, "2026-08").unwrap();
+        let workbench = get_month_close_workbench(&conn, "2026-08").unwrap();
+        let item = workbench
+            .checks
+            .iter()
+            .find(|c| c.key == "salary_unlocked_accrual")
+            .unwrap();
+        assert_eq!(item.status, "blocking");
+        assert!(item.count > 0);
+        assert!(
+            item.description.contains("已作废且未重锁") && item.description.contains("重新锁定"),
+            "got: {}",
+            item.description
+        );
+        // 阻塞项应让正式月结失败
+        let err = close_month(&conn, "2026-08", "system", None).unwrap_err();
+        assert!(err.to_string().contains("工资计提凭证完整"), "got: {err:?}");
+        // 重新锁定 → active 凭证恢复，检查项回到 ok，月结恢复放行
+        lock_salary_results(&conn, "2026-08").unwrap();
+        let workbench = get_month_close_workbench(&conn, "2026-08").unwrap();
+        let item = workbench
+            .checks
+            .iter()
+            .find(|c| c.key == "salary_unlocked_accrual")
+            .unwrap();
+        assert_eq!(item.status, "ok");
+        // 其他月份的作废计提凭证不影响本月检查：2026-07 存在未重锁的作废计提凭证，2026-08 检查仍通过
+        let july_salary_id: i64 = conn
+            .query_row(
+                "SELECT id FROM salary_monthly_results WHERE salary_month='2026-07' LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT INTO vouchers (voucher_no, voucher_date, belong_month, source_type, source_id, total_amount, status, created_at, updated_at)
+             VALUES ('记-202607-002', '2026-07-28', '2026-07', 'salary_accrual', ?1, 7400.0, 'void', '2026-07-31', '2026-07-31')",
+            params![july_salary_id],
+        )
+        .unwrap();
+        let workbench = get_month_close_workbench(&conn, "2026-08").unwrap();
+        let item = workbench
+            .checks
+            .iter()
+            .find(|c| c.key == "salary_unlocked_accrual")
+            .unwrap();
+        assert_eq!(item.status, "ok");
+        // 而 2026-07 检查应阻塞（确认该凭证确实被检出，只是不影响他月）
+        let workbench_july = get_month_close_workbench(&conn, "2026-07").unwrap();
+        let item_july = workbench_july
+            .checks
+            .iter()
+            .find(|c| c.key == "salary_unlocked_accrual")
+            .unwrap();
+        assert_eq!(item_july.status, "blocking");
     }
 
     fn make_august_closable(conn: &Connection) {
