@@ -158,6 +158,23 @@ pub fn save_opening_balances(
             )));
         }
     }
+    // 启用月变更守卫：已有 active 记账凭证时不允许变更启用月，否则报表滚入窗口
+    // （"启用月起的累计发生额"）会整体漂移，与已入账凭证口径脱钩；同月重录不受影响
+    let (old_month, _) = get_opening_balances(conn)?;
+    if let Some(old) = old_month {
+        if old != month {
+            let active_vouchers: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM vouchers WHERE status = 'active'",
+                [],
+                |r| r.get(0),
+            )?;
+            if active_vouchers > 0 {
+                return Err(AppError::General(
+                    "已存在记账凭证，不能变更启用月；如需调整请联系管理员清理凭证后重录".into(),
+                ));
+            }
+        }
+    }
     let now = Utc::now().to_rfc3339();
     // DELETE + INSERT 事务包裹，保证整体覆盖的原子性（&Connection 下用 unchecked_transaction）
     let tx = conn.unchecked_transaction()?;
@@ -1632,6 +1649,74 @@ mod tests {
         let (month3, loaded3) = get_opening_balances(&conn).unwrap();
         assert_eq!(month3.as_deref(), Some("2026-02"));
         assert_eq!(loaded3.len(), 2);
+    }
+
+    /// 启用月变更守卫：已有 active 记账凭证后变更启用月应报错；同月重录仍成功。
+    #[test]
+    fn test_opening_balance_month_change_guard() {
+        let conn = setup();
+        let rows = vec![
+            OpeningBalanceRow {
+                account_code: "1002".into(),
+                debit_amount: 100000.0,
+                credit_amount: 0.0,
+            },
+            OpeningBalanceRow {
+                account_code: "2001".into(),
+                debit_amount: 0.0,
+                credit_amount: 40000.0,
+            },
+            OpeningBalanceRow {
+                account_code: "3001".into(),
+                debit_amount: 0.0,
+                credit_amount: 60000.0,
+            },
+        ];
+        // 2026-01 期初
+        save_opening_balances(&conn, "2026-01", &rows).unwrap();
+        // 生成一张 active 凭证
+        insert_voucher(
+            &conn,
+            &manual_draft(
+                "2026-01",
+                1,
+                vec![vline("6602", 500.0, 0.0), vline("1002", 0.0, 500.0)],
+            ),
+        )
+        .unwrap();
+        // 改存 2026-02 期初：已有 active 凭证，应拒绝（报表滚入窗口不可漂移）
+        let err = save_opening_balances(&conn, "2026-02", &rows).unwrap_err();
+        assert!(
+            matches!(err, AppError::General(ref msg) if msg.contains("不能变更启用月")),
+            "expected month-change guard error, got {:?}",
+            err
+        );
+        // 原数据未被破坏
+        let (month, loaded) = get_opening_balances(&conn).unwrap();
+        assert_eq!(month.as_deref(), Some("2026-01"));
+        assert_eq!(loaded.len(), 3);
+        // 同月重录（金额调整后平衡）不受影响
+        let rows_same_month = vec![
+            OpeningBalanceRow {
+                account_code: "1002".into(),
+                debit_amount: 90000.0,
+                credit_amount: 0.0,
+            },
+            OpeningBalanceRow {
+                account_code: "2001".into(),
+                debit_amount: 0.0,
+                credit_amount: 40000.0,
+            },
+            OpeningBalanceRow {
+                account_code: "3001".into(),
+                debit_amount: 0.0,
+                credit_amount: 50000.0,
+            },
+        ];
+        save_opening_balances(&conn, "2026-01", &rows_same_month).unwrap();
+        let (month2, loaded2) = get_opening_balances(&conn).unwrap();
+        assert_eq!(month2.as_deref(), Some("2026-01"));
+        assert_eq!(loaded2.len(), 3);
     }
 
     #[test]

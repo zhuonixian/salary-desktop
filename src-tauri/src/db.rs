@@ -4274,6 +4274,16 @@ pub fn update_invoice(
             rows.collect::<Result<Vec<_>, _>>()?
         };
         for claim_id in claim_ids {
+            // 跨月防护：发票月份开放不代表报销单月份开放，计提凭证挂在 claim 的
+            // belong_month 上，改动作废重建前必须校验该月未正式月结（fail-fast，放在 void 之前）
+            let claim_month: Option<String> = tx.query_row(
+                "SELECT belong_month FROM reimbursement_claims WHERE id = ?1",
+                params![claim_id],
+                |r| r.get(0),
+            )?;
+            if let Some(month) = claim_month.as_deref() {
+                ensure_month_open(&tx, month)?;
+            }
             crate::accounting::void_reimbursement_accrual_voucher(&tx, claim_id)?;
             crate::accounting::generate_reimbursement_accrual_voucher(&tx, claim_id)?;
         }
@@ -4309,6 +4319,16 @@ pub fn soft_delete_invoice(conn: &Connection, id: i64) -> AppResult<bool> {
                 rows.collect::<Result<Vec<_>, _>>()?
             };
             for claim_id in claim_ids {
+                // 跨月防护：与 update_invoice 同口径，作废重建计提前校验 claim 的
+                // belong_month 未正式月结（fail-fast，放在 void 之前）
+                let claim_month: Option<String> = tx.query_row(
+                    "SELECT belong_month FROM reimbursement_claims WHERE id = ?1",
+                    params![claim_id],
+                    |r| r.get(0),
+                )?;
+                if let Some(month) = claim_month.as_deref() {
+                    ensure_month_open(&tx, month)?;
+                }
                 crate::accounting::void_reimbursement_accrual_voucher(&tx, claim_id)?;
                 crate::accounting::generate_reimbursement_accrual_voucher(&tx, claim_id)?;
             }
@@ -6200,5 +6220,119 @@ pub mod tests {
             )
             .unwrap();
         assert_eq!(bad, 0);
+    }
+
+    /// 跨月发票编辑/软删绕过报销单月份锁账的防护：
+    /// approved 报销单 2026-08 已正式月结，挂在其上的发票归属开放月 2026-09，
+    /// 编辑/软删该发票时应以 claim 的 belong_month 锁账报错，且 2026-08 计提凭证不被改动。
+    fn setup_cross_month_claim_scenario() -> (Connection, i64, String) {
+        let conn = setup_financial_db();
+        make_august_closable(&conn);
+        close_month(&conn, "2026-08", "system", None).unwrap();
+        // 生成 claim 1 的报销计提凭证（approved 计提入账，模拟审批链路已走完）
+        crate::accounting::generate_reimbursement_accrual_voucher(&conn, 1).unwrap();
+        // 新增一张归属 2026-09（开放月）的发票并挂到已月结的 claim 1 上
+        let inv = insert_invoice(
+            &conn,
+            &InvoiceInput {
+                invoice_code: Some("X".into()),
+                invoice_number: Some("X20260901".into()),
+                invoice_type: Some("普通发票".into()),
+                issue_date: Some("2026-09-05".into()),
+                check_code: None,
+                amount: Some(200.0),
+                tax_amount: Some(12.0),
+                total_amount: Some(212.0),
+                seller_name: Some("跨月销售方".into()),
+                seller_tax_id: None,
+                buyer_name: None,
+                buyer_tax_id: None,
+                expense_type_code: Some("office".into()),
+                employee_id: Some(1),
+                belong_month: Some("2026-09".into()),
+                remark: None,
+                image_path: Some("/tmp/cross.pdf".into()),
+                raw_ocr_json: Some("{}".into()),
+            },
+            "/stored/cross.pdf",
+            0,
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO reimbursement_claim_invoices (claim_id, invoice_id, created_at)
+             VALUES (1, ?1, '2026-09-06')",
+            params![inv.id],
+        )
+        .unwrap();
+        (conn, inv.id, format!("X20260901"))
+    }
+
+    fn active_accrual_voucher_id(conn: &Connection, claim_id: i64) -> Option<i64> {
+        conn.query_row(
+            "SELECT id FROM vouchers WHERE source_type='reimbursement_accrual'
+             AND source_id=?1 AND status='active'",
+            params![claim_id],
+            |r| r.get(0),
+        )
+        .ok()
+    }
+
+    #[test]
+    fn test_update_invoice_blocked_by_closed_claim_month() {
+        let (conn, inv_id, number) = setup_cross_month_claim_scenario();
+        let voucher_before = active_accrual_voucher_id(&conn, 1);
+        assert!(voucher_before.is_some(), "计提凭证应已生成");
+
+        // 编辑发票（改金额，发票自身归属 2026-09 开放）：claim 1 月份 2026-08 已月结，应报错
+        let mut input = sample_input("X", &number);
+        input.belong_month = Some("2026-09".into());
+        input.amount = Some(300.0);
+        input.tax_amount = Some(18.0);
+        input.total_amount = Some(318.0);
+        let err = update_invoice(&conn, inv_id, &input, None).unwrap_err();
+        assert!(
+            matches!(err, AppError::InvalidParam(ref msg) if msg.contains("2026-08")),
+            "expected closed-month InvalidParam, got {:?}",
+            err
+        );
+
+        // 事务回滚：发票未被改动，2026-08 计提凭证保持原样
+        let (amount, updated_count): (f64, i64) = conn
+            .query_row(
+                "SELECT amount, (SELECT COUNT(*) FROM vouchers WHERE source_type='reimbursement_accrual' AND source_id=1) FROM invoices WHERE id=?1",
+                params![inv_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(amount, 200.0, "发票金额不应被改动");
+        assert_eq!(updated_count, 1, "计提凭证不应被 void");
+        assert_eq!(active_accrual_voucher_id(&conn, 1), voucher_before);
+    }
+
+    #[test]
+    fn test_soft_delete_invoice_blocked_by_closed_claim_month() {
+        let (conn, inv_id, _number) = setup_cross_month_claim_scenario();
+        let voucher_before = active_accrual_voucher_id(&conn, 1);
+        assert!(voucher_before.is_some(), "计提凭证应已生成");
+
+        // 软删发票（发票自身归属 2026-09 开放）：claim 1 月份 2026-08 已月结，应报错
+        let err = soft_delete_invoice(&conn, inv_id).unwrap_err();
+        assert!(
+            matches!(err, AppError::InvalidParam(ref msg) if msg.contains("2026-08")),
+            "expected closed-month InvalidParam, got {:?}",
+            err
+        );
+
+        // 事务回滚：发票仍 normal，2026-08 计提凭证保持原样
+        let (status, updated_count): (String, i64) = conn
+            .query_row(
+                "SELECT status, (SELECT COUNT(*) FROM vouchers WHERE source_type='reimbursement_accrual' AND source_id=1) FROM invoices WHERE id=?1",
+                params![inv_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "normal", "发票不应被作废");
+        assert_eq!(updated_count, 1, "计提凭证不应被 void");
+        assert_eq!(active_accrual_voucher_id(&conn, 1), voucher_before);
     }
 }
