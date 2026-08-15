@@ -1210,11 +1210,17 @@ pub fn build_balance_sheet(conn: &Connection, month: &str) -> AppResult<BalanceS
         .filter(|b| b.category == "cost")
         .map(|b| b.ending())
         .sum();
+    // 年初口径：cost 类科目 Σ opening_raw（启用月期初余额合计）
+    let cost_opening_total: f64 = balances
+        .iter()
+        .filter(|b| b.category == "cost")
+        .map(|b| b.opening_raw)
+        .sum();
     sheet.asset_rows.push(ReportRow {
         key: "cost_accounts".into(),
         label: "成本类科目".into(),
         current: cost_total,
-        comparative: 0.0,
+        comparative: cost_opening_total,
     });
     sheet.asset_total = sheet.asset_rows.iter().map(|r| r.current).sum();
     // 负债与权益端：3104 替换为"未分配利润" = 3104 期末 + 启用月至当月累计净利润
@@ -3242,7 +3248,12 @@ mod tests {
                 OpeningBalanceRow {
                     account_code: "3001".into(),
                     debit_amount: 0.0,
-                    credit_amount: 100000.0,
+                    credit_amount: 100300.0,
+                },
+                OpeningBalanceRow {
+                    account_code: "5001".into(),
+                    debit_amount: 300.0,
+                    credit_amount: 0.0,
                 },
             ],
         )
@@ -3271,13 +3282,18 @@ mod tests {
             .unwrap()
             .is_some());
 
-        // 资产负债表：成本类科目行 500（资产行末尾），资产合计 100000+500，平衡
+        // 资产负债表：成本类科目行期末 = 300 期初 + 500 当月 = 800（资产行末尾），
+        // 年初 = Σ opening_raw = 300；资产合计 100000+800，负债端 2241 500 + 3001 100300，平衡
         let bs = build_balance_sheet(&conn, "2026-02").unwrap();
-        approx(row_value(&bs.asset_rows, "cost_accounts").current, 500.0);
+        approx(row_value(&bs.asset_rows, "cost_accounts").current, 800.0);
+        approx(
+            row_value(&bs.asset_rows, "cost_accounts").comparative,
+            300.0,
+        );
         approx(row_value(&bs.asset_rows, "monetary").current, 100000.0);
         approx(row_value(&bs.liability_equity_rows, "2241").current, 500.0);
-        approx(bs.asset_total, 100500.0);
-        approx(bs.liability_equity_total, 100500.0);
+        approx(bs.asset_total, 100800.0);
+        approx(bs.liability_equity_total, 100800.0);
         assert!(bs.balanced);
 
         // 利润表不含 cost 类科目：兜底行与净利润均为 0

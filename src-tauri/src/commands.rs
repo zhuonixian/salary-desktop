@@ -9,7 +9,7 @@ use tauri::Manager;
 use crate::accounting;
 use crate::data_safety;
 use crate::db;
-use crate::errors::AppError;
+use crate::errors::{AppError, AppResult};
 use crate::excel;
 use crate::models::*;
 use crate::ocr;
@@ -1662,6 +1662,94 @@ pub fn get_vouchers(
 ) -> Result<Vec<Voucher>, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     Ok(accounting::get_vouchers(&conn, &query)?)
+}
+
+// ===== Accounting（第五阶段 报表命令/导出） =====
+
+#[tauri::command]
+pub fn get_balance_sheet(
+    month: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<BalanceSheet, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(accounting::build_balance_sheet(&conn, &month)?)
+}
+
+#[tauri::command]
+pub fn get_income_statement(
+    month: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<IncomeStatement, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(accounting::build_income_statement(&conn, &month)?)
+}
+
+#[tauri::command]
+pub fn get_cash_flow_statement(
+    month: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<CashFlowStatement, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(accounting::build_cash_flow_statement(&conn, &month)?)
+}
+
+/// 导出三大财务报表（report_type: balance_sheet / income_statement / cash_flow_statement）。
+/// path 由前端保存对话框产生（与 export_month_close_report 等导出命令一致），返回实际写入路径。
+#[tauri::command]
+pub fn export_financial_report(
+    month: String,
+    report_type: String,
+    path: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<String, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    // 文件名 资产负债表_YYYYMM.xlsx（与 brief 约定一致；后端只在路径缺扩展名时补默认名）
+    let (report_name, build_and_export): (&str, fn(&Connection, &str, &str) -> AppResult<()>) =
+        match report_type.as_str() {
+            "balance_sheet" => (
+                "资产负债表",
+                |c, m, p| {
+                    excel::export_balance_sheet(&accounting::build_balance_sheet(c, m)?, p)?;
+                    Ok(())
+                },
+            ),
+            "income_statement" => (
+                "利润表",
+                |c, m, p| {
+                    excel::export_income_statement(&accounting::build_income_statement(c, m)?, p)?;
+                    Ok(())
+                },
+            ),
+            "cash_flow_statement" => (
+                "现金流量表",
+                |c, m, p| {
+                    excel::export_cash_flow_statement(&accounting::build_cash_flow_statement(c, m)?, p)?;
+                    Ok(())
+                },
+            ),
+            _ => {
+                return Err(AppError::InvalidParam(format!(
+                    "未知报表类型: {report_type}（可选 balance_sheet / income_statement / cash_flow_statement）"
+                )))
+            }
+        };
+    // 前端 save() 对话框通常带扩展名；无扩展名时按约定补 资产负债表_YYYYMM.xlsx
+    let final_path = PathBuf::from(&path);
+    let final_path = if final_path.extension().is_some() {
+        final_path
+    } else {
+        final_path.join(format!("{report_name}_{}.xlsx", month.replace('-', "")))
+    };
+    let final_path_str = final_path.to_string_lossy().to_string();
+    build_and_export(&conn, &month, &final_path_str)?;
+    db::log_operation(
+        &conn,
+        "export_financial_report",
+        &format!("导出{month}{report_name}到{final_path_str}"),
+        "system",
+        None,
+    )?;
+    Ok(final_path_str)
 }
 
 #[cfg(test)]

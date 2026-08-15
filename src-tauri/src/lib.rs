@@ -206,6 +206,11 @@ pub fn run() {
         // ===== Accounting（第五阶段 凭证查询/银行流水凭证） =====
         commands::get_vouchers,
         commands::create_bank_manual_voucher,
+        // ===== Accounting（第五阶段 报表命令/导出） =====
+        commands::get_balance_sheet,
+        commands::get_income_statement,
+        commands::get_cash_flow_statement,
+        commands::export_financial_report,
         // ===== Security（Task 6） =====
         security_commands::is_security_initialized,
         security_commands::setup_security,

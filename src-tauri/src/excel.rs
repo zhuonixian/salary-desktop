@@ -1716,6 +1716,149 @@ pub fn export_month_close_report(
     Ok(true)
 }
 
+// ==================== Financial Statements Export（第五阶段 Task 11） ====================
+
+/// 三大报表共用区段写入器：区段标题行、表头（项目/本期金额/对比金额）、数据行、合计行。
+/// 返回写入完成后下一个可用行号。
+#[allow(clippy::too_many_arguments)]
+fn write_statement_section(
+    worksheet: &mut rust_xlsxwriter::Worksheet,
+    start_row: u32,
+    section: &str,
+    headers: [&str; 3],
+    rows: &[ReportRow],
+    total_label: &str,
+    total_current: f64,
+    total_comparative: f64,
+) -> AppResult<u32> {
+    let header_fmt = report_header_format();
+    let money_fmt = report_money_format();
+    worksheet.write_string(start_row, 0, section)?;
+    for (col, header) in headers.iter().enumerate() {
+        worksheet.write_with_format(start_row + 1, col as u16, *header, &header_fmt)?;
+    }
+    let mut row = start_row + 2;
+    for r in rows {
+        worksheet.write_string(row, 0, &r.label)?;
+        worksheet.write_number_with_format(row, 1, r.current, &money_fmt)?;
+        worksheet.write_number_with_format(row, 2, r.comparative, &money_fmt)?;
+        row += 1;
+    }
+    worksheet.write_string(row, 0, total_label)?;
+    worksheet.write_number_with_format(row, 1, total_current, &money_fmt)?;
+    worksheet.write_number_with_format(row, 2, total_comparative, &money_fmt)?;
+    Ok(row + 1)
+}
+
+/// 资产负债表：资产 / 负债和所有者权益两个区段，各含期末余额与年初余额两列；
+/// 不平衡时尾部红字提示。
+pub fn export_balance_sheet(report: &BalanceSheet, path: &str) -> AppResult<bool> {
+    let mut workbook = Workbook::new();
+    let worksheet = workbook.add_worksheet();
+    worksheet.set_name("资产负债表")?;
+    worksheet.write_string(0, 0, format!("资产负债表 {}", report.month))?;
+    let headers = ["项目", "期末余额", "年初余额"];
+    let next = write_statement_section(
+        worksheet,
+        1,
+        "资产",
+        headers,
+        &report.asset_rows,
+        "资产总计",
+        report.asset_total,
+        report.asset_rows.iter().map(|r| r.comparative).sum(),
+    )?;
+    write_statement_section(
+        worksheet,
+        next + 1,
+        "负债和所有者权益",
+        headers,
+        &report.liability_equity_rows,
+        "负债和所有者权益总计",
+        report.liability_equity_total,
+        report
+            .liability_equity_rows
+            .iter()
+            .map(|r| r.comparative)
+            .sum(),
+    )?;
+    if !report.balanced {
+        worksheet.write_with_format(
+            next + 1 + report.liability_equity_rows.len() as u32 + 4,
+            0,
+            "提示：资产合计与负债及所有者权益合计不平，请检查期初余额与凭证",
+            &Format::new().set_font_color("#CC0000"),
+        )?;
+    }
+    set_report_columns(worksheet, 3)?;
+    workbook.save(path)?;
+    Ok(true)
+}
+
+/// 利润表：固定标准行（含营业利润/利润总额/净利润计算行），本月金额与本年累计两列。
+pub fn export_income_statement(report: &IncomeStatement, path: &str) -> AppResult<bool> {
+    let mut workbook = Workbook::new();
+    let worksheet = workbook.add_worksheet();
+    worksheet.set_name("利润表")?;
+    worksheet.write_string(0, 0, format!("利润表 {}", report.month))?;
+    let header_fmt = report_header_format();
+    let money_fmt = report_money_format();
+    for (col, header) in ["项目", "本月金额", "本年累计"].iter().enumerate() {
+        worksheet.write_with_format(1, col as u16, *header, &header_fmt)?;
+    }
+    let mut row = 2u32;
+    for r in &report.rows {
+        worksheet.write_string(row, 0, &r.label)?;
+        worksheet.write_number_with_format(row, 1, r.current, &money_fmt)?;
+        worksheet.write_number_with_format(row, 2, r.comparative, &money_fmt)?;
+        row += 1;
+    }
+    set_report_columns(worksheet, 3)?;
+    workbook.save(path)?;
+    Ok(true)
+}
+
+/// 现金流量表：六行汇总 + 其他行 + 现金净增加额合计行；
+/// 存在未分类现金收支时附加"未分类现金收支"明细 sheet。
+pub fn export_cash_flow_statement(report: &CashFlowStatement, path: &str) -> AppResult<bool> {
+    let mut workbook = Workbook::new();
+    let worksheet = workbook.add_worksheet();
+    worksheet.set_name("现金流量表")?;
+    worksheet.write_string(0, 0, format!("现金流量表 {}", report.month))?;
+    write_statement_section(
+        worksheet,
+        1,
+        "现金流量",
+        ["项目", "本期金额", "本年累计"],
+        &report.rows,
+        "现金净增加额",
+        report.net_increase,
+        report.rows.iter().map(|r| r.comparative).sum(),
+    )?;
+    set_report_columns(worksheet, 3)?;
+
+    if !report.unclassified.is_empty() {
+        let detail = workbook.add_worksheet();
+        detail.set_name("未分类现金收支")?;
+        let header_fmt = report_header_format();
+        let money_fmt = report_money_format();
+        detail.write_string(0, 0, format!("未分类现金收支明细 {}", report.month))?;
+        for (col, header) in ["凭证号", "摘要", "金额"].iter().enumerate() {
+            detail.write_with_format(1, col as u16, *header, &header_fmt)?;
+        }
+        for (idx, item) in report.unclassified.iter().enumerate() {
+            let row = (idx + 2) as u32;
+            detail.write_string(row, 0, &item.voucher_no)?;
+            detail.write_string(row, 1, item.summary.as_deref().unwrap_or(""))?;
+            detail.write_number_with_format(row, 2, item.amount, &money_fmt)?;
+        }
+        set_report_columns(detail, 3)?;
+    }
+
+    workbook.save(path)?;
+    Ok(true)
+}
+
 fn report_header_format() -> Format {
     use rust_xlsxwriter::FormatBorder;
     Format::new()
@@ -1804,6 +1947,114 @@ mod tests {
 
         export_reimbursement_claim_list(&claims, &path.to_string_lossy()).unwrap();
         assert!(path.exists());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_export_balance_sheet_creates_file() {
+        let path = std::env::temp_dir().join(format!(
+            "salary-balance-sheet-{}.xlsx",
+            uuid::Uuid::new_v4()
+        ));
+        let report = BalanceSheet {
+            month: "2026-02".into(),
+            enabled: true,
+            asset_rows: vec![
+                ReportRow {
+                    key: "monetary".into(),
+                    label: "货币资金".into(),
+                    current: 67000.0,
+                    comparative: 100000.0,
+                },
+                ReportRow {
+                    key: "1601".into(),
+                    label: "固定资产".into(),
+                    current: 30000.0,
+                    comparative: 0.0,
+                },
+            ],
+            liability_equity_rows: vec![ReportRow {
+                key: "3001".into(),
+                label: "实收资本".into(),
+                current: 97000.0,
+                comparative: 100000.0,
+            }],
+            asset_total: 97000.0,
+            liability_equity_total: 97000.0,
+            balanced: true,
+        };
+
+        export_balance_sheet(&report, &path.to_string_lossy()).unwrap();
+        assert_file_nonempty(&path);
+    }
+
+    #[test]
+    fn test_export_income_statement_creates_file() {
+        let path = std::env::temp_dir().join(format!(
+            "salary-income-statement-{}.xlsx",
+            uuid::Uuid::new_v4()
+        ));
+        let report = IncomeStatement {
+            month: "2026-02".into(),
+            year_cumulative: true,
+            rows: vec![
+                ReportRow {
+                    key: "6001".into(),
+                    label: "主营业务收入".into(),
+                    current: 20000.0,
+                    comparative: 50000.0,
+                },
+                ReportRow {
+                    key: "net_profit".into(),
+                    label: "净利润".into(),
+                    current: 8000.0,
+                    comparative: 21000.0,
+                },
+            ],
+            net_profit_month: 8000.0,
+            net_profit_year: 21000.0,
+        };
+
+        export_income_statement(&report, &path.to_string_lossy()).unwrap();
+        assert_file_nonempty(&path);
+    }
+
+    #[test]
+    fn test_export_cash_flow_statement_creates_file() {
+        let path =
+            std::env::temp_dir().join(format!("salary-cash-flow-{}.xlsx", uuid::Uuid::new_v4()));
+        let report = CashFlowStatement {
+            month: "2026-02".into(),
+            rows: vec![
+                ReportRow {
+                    key: "operating_inflow".into(),
+                    label: "经营活动现金流入".into(),
+                    current: 2000.0,
+                    comparative: 0.0,
+                },
+                ReportRow {
+                    key: "operating_outflow".into(),
+                    label: "经营活动现金流出".into(),
+                    current: 5000.0,
+                    comparative: 0.0,
+                },
+            ],
+            net_increase: -3000.0,
+            unclassified: vec![UnclassifiedCashItem {
+                voucher_no: "JZ-202602-001".into(),
+                summary: Some("未分类支出".into()),
+                amount: -100.0,
+            }],
+        };
+
+        export_cash_flow_statement(&report, &path.to_string_lossy()).unwrap();
+        assert_file_nonempty(&path);
+    }
+
+    fn assert_file_nonempty(path: &Path) {
+        assert!(path.exists(), "导出文件未生成: {}", path.display());
+        let size = std::fs::metadata(path).unwrap().len();
+        assert!(size > 0, "导出文件为空: {}", path.display());
         let _ = std::fs::remove_file(path);
     }
 
