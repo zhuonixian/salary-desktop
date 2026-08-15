@@ -377,6 +377,8 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
       };
     case 'export_financial_report':
       return '';
+    case 'create_bank_manual_voucher':
+      throw new Error('预览模式不支持生成凭证，请在桌面应用中操作');
     default:
       if (command.startsWith('get_') || command.startsWith('query_')) return [];
       if (command.startsWith('export_') || command.startsWith('delete_') || command.startsWith('update_')) return true;
@@ -629,6 +631,14 @@ export async function cancelBankTransactionMatch(transactionId: number): Promise
 
 export async function ignoreBankTransaction(data: BankTransactionIgnoreInput): Promise<boolean> {
   return invoke<boolean>('ignore_bank_transaction', { data });
+}
+
+export async function createBankManualVoucher(
+  transactionId: number,
+  accountCode: string,
+  summary?: string,
+): Promise<Voucher> {
+  return invoke<Voucher>('create_bank_manual_voucher', { transactionId, accountCode, summary });
 }
 
 export async function queryBudgets(query: BudgetQuery): Promise<Budget[]> {

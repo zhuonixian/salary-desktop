@@ -19,6 +19,7 @@ import {
 import {
   CheckCircleOutlined,
   DisconnectOutlined,
+  FileDoneOutlined,
   ImportOutlined,
   ReloadOutlined,
   SearchOutlined,
@@ -31,6 +32,8 @@ import {
   autoMatchBankTransactions,
   cancelBankTransactionMatch,
   confirmBankTransactionMatch,
+  createBankManualVoucher,
+  getGlAccounts,
   ignoreBankTransaction,
   importBankTransactionsFile,
   queryBankTransactions,
@@ -41,6 +44,7 @@ import { SensitiveStatistic } from '@/components/SensitiveStatistic';
 import type {
   BankTransaction,
   BankTransactionStatus,
+  GlAccount,
   PaymentBatch,
   PaymentBatchType,
 } from '@/types';
@@ -72,6 +76,10 @@ const BankTransactions: React.FC = () => {
   const [matchRemark, setMatchRemark] = useState('');
   const [ignoreTx, setIgnoreTx] = useState<BankTransaction | null>(null);
   const [ignoreReason, setIgnoreReason] = useState('');
+  const [voucherTx, setVoucherTx] = useState<BankTransaction | null>(null);
+  const [voucherAccounts, setVoucherAccounts] = useState<GlAccount[]>([]);
+  const [voucherAccountCode, setVoucherAccountCode] = useState<string | undefined>(undefined);
+  const [voucherSummary, setVoucherSummary] = useState('');
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -216,6 +224,45 @@ const BankTransactions: React.FC = () => {
     }
   };
 
+  // 生成凭证弹窗：仅未匹配且未忽略的流水（后端同口径校验）。
+  // 支出流水选借方科目（贷方固定 1002），收入流水选贷方科目（借方固定 1002）。
+  const isExpenseTx = (tx: BankTransaction | null): boolean => (tx?.expense_amount ?? 0) > 0;
+
+  const openVoucherModal = async (tx: BankTransaction) => {
+    setVoucherAccountCode(undefined);
+    setVoucherSummary(tx.summary || '');
+    setVoucherTx(tx);
+    if (voucherAccounts.length === 0) {
+      try {
+        setVoucherAccounts((await getGlAccounts()).filter((a) => a.is_active === 1));
+      } catch (e: unknown) {
+        message.error('获取科目列表失败: ' + (e instanceof Error ? e.message : String(e)));
+      }
+    }
+  };
+
+  const handleCreateVoucher = async () => {
+    if (!voucherTx || !voucherAccountCode) {
+      message.warning('请选择科目');
+      return;
+    }
+    setAction(`voucher-${voucherTx.id}`);
+    try {
+      const voucher = await createBankManualVoucher(
+        voucherTx.id,
+        voucherAccountCode,
+        voucherSummary.trim() || undefined,
+      );
+      message.success(`凭证已生成：${voucher.voucher_no}`);
+      setVoucherTx(null);
+      await fetchData();
+    } catch (e: unknown) {
+      message.error('生成凭证失败: ' + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setAction(null);
+    }
+  };
+
   const columns = [
     { title: '交易日期', dataIndex: 'transaction_date', key: 'transaction_date', width: 110, fixed: 'left' as const },
     {
@@ -268,7 +315,7 @@ const BankTransactions: React.FC = () => {
     {
       title: '操作',
       key: 'actions',
-      width: 250,
+      width: 320,
       fixed: 'right' as const,
       render: (_: unknown, tx: BankTransaction) => (
         <Space size={6} wrap>
@@ -280,6 +327,15 @@ const BankTransactions: React.FC = () => {
             onClick={() => openMatchModal(tx)}
           >
             匹配
+          </Button>
+          <Button
+            size="small"
+            icon={<FileDoneOutlined />}
+            disabled={tx.status !== 'unmatched' || !!tx.ignore_reason}
+            loading={action === `voucher-${tx.id}`}
+            onClick={() => openVoucherModal(tx)}
+          >
+            生成凭证
           </Button>
           <Button
             size="small"
@@ -376,7 +432,7 @@ const BankTransactions: React.FC = () => {
             columns={columns}
             dataSource={transactions}
             pagination={{ pageSize: 12, showSizeChanger: true }}
-            scroll={{ x: 1450 }}
+            scroll={{ x: 1520 }}
           />
         </Card>
       </Spin>
@@ -435,6 +491,54 @@ const BankTransactions: React.FC = () => {
           value={ignoreReason}
           onChange={(event) => setIgnoreReason(event.target.value)}
         />
+      </Modal>
+
+      <Modal
+        title="流水生成凭证"
+        open={!!voucherTx}
+        okText="生成凭证"
+        cancelText="取消"
+        confirmLoading={!!voucherTx && action === `voucher-${voucherTx.id}`}
+        onOk={handleCreateVoucher}
+        onCancel={() => setVoucherTx(null)}
+      >
+        {voucherTx && (
+          <Space direction="vertical" style={{ width: '100%' }} size={12}>
+            <div>
+              <div>
+                {voucherTx.transaction_date} /{' '}
+                {isExpenseTx(voucherTx) ? '支出' : '收入'}{' '}
+                <SensitiveText
+                  type="amount"
+                  value={fmtMoney(isExpenseTx(voucherTx) ? voucherTx.expense_amount : voucherTx.income_amount)}
+                />
+              </div>
+              <div>{voucherTx.summary || voucherTx.counterparty_name || '-'}</div>
+            </div>
+            <div style={{ color: '#8c8c8c' }}>
+              {isExpenseTx(voucherTx)
+                ? '支出流水：借所选科目，贷 1002 银行存款（如手续费选 6603 财务费用）'
+                : '收入流水：借 1002 银行存款，贷所选科目（如利息收入选 6603 财务费用）'}
+            </div>
+            <Select
+              showSearch
+              optionFilterProp="label"
+              placeholder={isExpenseTx(voucherTx) ? '选择借方科目' : '选择贷方科目'}
+              value={voucherAccountCode}
+              onChange={setVoucherAccountCode}
+              style={{ width: '100%' }}
+              options={voucherAccounts.map((a) => ({
+                value: a.code,
+                label: `${a.code} ${a.name}`,
+              }))}
+            />
+            <Input
+              placeholder="摘要（可选）"
+              value={voucherSummary}
+              onChange={(event) => setVoucherSummary(event.target.value)}
+            />
+          </Space>
+        )}
       </Modal>
     </div>
   );

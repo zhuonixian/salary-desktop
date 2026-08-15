@@ -46,6 +46,9 @@ const operationTypeLabels: Record<string, string> = {
   ignore_bank_transaction: '忽略银行流水',
   save_budget: '保存预算',
   delete_budget: '删除预算',
+  save_opening_balances: '保存期初余额',
+  create_bank_manual_voucher: '银行流水生成凭证',
+  export_financial_report: '导出财务报表',
 };
 
 const getOperationLabel = (value?: string) =>

@@ -122,7 +122,7 @@ const FinancialReports: React.FC = () => {
     </Button>
   );
 
-  const renderAmount = (value: number) => <SensitiveText type="amount" value={value} />;
+  const renderAmount = (value: number) => <SensitiveText type="amount" value={fmtMoney(value)} />;
 
   const reportColumns = (currentTitle: string, comparativeTitle: string, summaryKeys?: Set<string>) => [
     { title: '项目', dataIndex: 'label', key: 'label' },
