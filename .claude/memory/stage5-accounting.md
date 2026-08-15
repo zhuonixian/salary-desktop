@@ -52,5 +52,5 @@ cd src-tauri && cargo test --lib
 
 ## 已知边界
 
-- **工资月锁定不可逆（有意行为）**：`unlock_salary_results` 后端函数未暴露为 Tauri 命令/UI 入口——锁定不可逆、accrual 凭证不可作废是设计决定，防止已入账/已月结月份的工资数据被静默改写；是否暴露留待下一阶段决策。
+- **`unlock_salary_results` 已通过 security_commands 以受控方式暴露（密码+原因+审计），仅打开 locked 线，月结/付款批次保护不变**：工资月锁定不再不可逆——需启动密码验证、解锁原因（≥5 字）并写入 operation_logs（unlock_salary / salary_unlock_failed），解锁时同事务作废计提凭证；已正式月结的月份仍拒绝解锁。
 - **存量数据报表为 0 属预期**：启用月之前或无凭证期间的存量数据不会出现在报表滚入窗口中（启用月之前的 0 是预期值），Windows 验收时不要误判为 bug；历史发票不会自动补凭证，仅新生成的业务事件入账。

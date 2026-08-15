@@ -391,6 +391,8 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
       return '';
     case 'create_bank_manual_voucher':
       throw new Error('预览模式不支持生成凭证，请在桌面应用中操作');
+    case 'unlock_salary_results':
+      throw new Error('预览模式不支持该操作，请在桌面应用中操作');
     default:
       if (command.startsWith('get_') || command.startsWith('query_')) return [];
       if (command.startsWith('export_') || command.startsWith('delete_') || command.startsWith('update_')) return true;
@@ -892,6 +894,9 @@ export async function updateSalaryResult(id: number, data: SalaryResultUpdate): 
 export async function lockSalary(month: string): Promise<void> {
   await invoke('lock_salary_results', { month });
 }
+
+export const unlockSalaryResults = (password: string, month: string, reason: string) =>
+  invoke<boolean>('unlock_salary_results', { password, month, reason });
 
 export async function reviewSalary(month: string): Promise<void> {
   await invoke('review_salary_results', { month });

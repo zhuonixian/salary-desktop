@@ -1,15 +1,15 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
-  Table, Button, DatePicker, Tag, Modal, Form, InputNumber, Input, Space, message, Popconfirm,
+  Table, Button, DatePicker, Tag, Modal, Form, InputNumber, Input, Space, message, Popconfirm, Alert,
 } from 'antd';
 import {
-  CalculatorOutlined, LockOutlined, CheckCircleOutlined, ReloadOutlined,
+  CalculatorOutlined, LockOutlined, CheckCircleOutlined, ReloadOutlined, UnlockOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import type { Dayjs } from 'dayjs';
 import {
   getSalaryResults, calculateSalary, recalculateSingle,
-  updateSalaryResult, lockSalary, reviewSalary,
+  updateSalaryResult, lockSalary, unlockSalaryResults, reviewSalary,
   getEmployees, getAttendanceRecords, getSalaryRule, getTaxRules,
 } from '@/api';
 import type { SalaryResult, SalaryResultUpdate, SalaryStatus } from '@/types';
@@ -29,6 +29,8 @@ const SalaryCalculate: React.FC = () => {
   const [adjustModalOpen, setAdjustModalOpen] = useState(false);
   const [adjustingRecord, setAdjustingRecord] = useState<SalaryResult | null>(null);
   const [adjustForm] = Form.useForm();
+  const [unlockModal, setUnlockModal] = useState({ visible: false, password: '', reason: '', loading: false });
+  const [unlockedMonths, setUnlockedMonths] = useState<Set<string>>(new Set());
 
   const fetchData = useCallback(async (m: string) => {
     setLoading(true);
@@ -50,6 +52,7 @@ const SalaryCalculate: React.FC = () => {
   const monthStr = month.format('YYYY-MM');
   const isLocked = results.length > 0 && results.every((r) => r.status === '已锁定');
   const isReviewed = results.length > 0 && results.some((r) => r.status === '已复核');
+  const isControlUnlocked = unlockedMonths.has(monthStr);
 
   const handleCalculate = async () => {
     setCalculating(true);
@@ -149,10 +152,35 @@ const SalaryCalculate: React.FC = () => {
     try {
       await lockSalary(monthStr);
       message.success('锁定成功');
+      setUnlockedMonths((prev) => {
+        if (!prev.has(monthStr)) return prev;
+        const next = new Set(prev);
+        next.delete(monthStr);
+        return next;
+      });
       fetchData(monthStr);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       message.error('锁定失败: ' + msg);
+    }
+  };
+
+  const handleUnlock = async () => {
+    if (unlockModal.reason.trim().length < 5) {
+      message.warning('请填写解锁原因（至少 5 个字）');
+      return;
+    }
+    setUnlockModal((s) => ({ ...s, loading: true }));
+    try {
+      await unlockSalaryResults(unlockModal.password, monthStr, unlockModal.reason);
+      message.success('已受控解锁，修改完成后请重新锁定');
+      setUnlockModal({ visible: false, password: '', reason: '', loading: false });
+      setUnlockedMonths((prev) => new Set(prev).add(monthStr));
+      fetchData(monthStr);
+    } catch (err: unknown) {
+      message.error(String(err));
+    } finally {
+      setUnlockModal((s) => ({ ...s, loading: false }));
     }
   };
 
@@ -281,10 +309,20 @@ const SalaryCalculate: React.FC = () => {
               复核
             </Button>
           )}
+          {isLocked && (
+            <Button
+              danger
+              icon={<UnlockOutlined />}
+              onClick={() => setUnlockModal({ visible: true, password: '', reason: '', loading: false })}
+            >
+              受控解锁
+            </Button>
+          )}
+          {isControlUnlocked && <Tag color="orange" style={{ marginRight: 0 }}>已受控解锁</Tag>}
           {isReviewed && !isLocked && (
             <Popconfirm title="锁定后将无法修改，确认锁定?" onConfirm={handleLock} okText="确认锁定" cancelText="取消">
               <Button danger icon={<LockOutlined />}>
-                锁定
+                {isControlUnlocked ? '重新锁定' : '锁定'}
               </Button>
             </Popconfirm>
           )}
@@ -349,6 +387,40 @@ const SalaryCalculate: React.FC = () => {
           </Form.Item>
           <Form.Item name="remark" label="备注">
             <Input.TextArea rows={3} placeholder="备注信息" />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        title="受控解锁工资"
+        open={unlockModal.visible}
+        confirmLoading={unlockModal.loading}
+        okText="解锁"
+        okButtonProps={{ danger: true }}
+        cancelText="取消"
+        onCancel={() => setUnlockModal({ visible: false, password: '', reason: '', loading: false })}
+        onOk={handleUnlock}
+      >
+        <Alert
+          type="error"
+          showIcon
+          message="高风险操作"
+          description="解锁后该月工资恢复可编辑，已有计提凭证将作废；需输入启动密码，操作将完整记录到操作日志。修改完成后请重新锁定。"
+          style={{ marginBottom: 16 }}
+        />
+        <Form layout="vertical">
+          <Form.Item label="启动密码" required>
+            <Input.Password
+              value={unlockModal.password}
+              onChange={(e) => setUnlockModal((s) => ({ ...s, password: e.target.value }))}
+            />
+          </Form.Item>
+          <Form.Item label="解锁原因" required extra="至少 5 个字，将记入操作日志">
+            <Input.TextArea
+              rows={3}
+              value={unlockModal.reason}
+              onChange={(e) => setUnlockModal((s) => ({ ...s, reason: e.target.value }))}
+            />
           </Form.Item>
         </Form>
       </Modal>

@@ -19,6 +19,8 @@ const operationTypeLabels: Record<string, string> = {
   calculate_salary: '计算工资',
   review_salary: '复核工资',
   lock_salary: '锁定工资',
+  unlock_salary: '受控解锁工资',
+  salary_unlock_failed: '受控解锁工资失败',
   export: '导出工资/考勤文件',
   create_expense_type: '新增费用类型',
   update_expense_type: '更新费用类型',
