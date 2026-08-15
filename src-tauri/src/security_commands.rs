@@ -340,7 +340,8 @@ pub(crate) fn unlock_salary_results_impl(
     if !r.unlocked {
         let detail = format!(
             "{{\"month\":\"{}\",\"failed_attempts\":{}}}",
-            month, r.failed_attempts
+            json_escape(month),
+            r.failed_attempts
         );
         let _ = db::log_operation(
             conn,
@@ -354,7 +355,7 @@ pub(crate) fn unlock_salary_results_impl(
     let voided = db::unlock_salary_results(conn, month)?;
     let detail = format!(
         "{{\"month\":\"{}\",\"reason\":\"{}\",\"voided_vouchers\":{}}}",
-        month,
+        json_escape(month),
         json_escape(reason.trim()),
         voided
     );
@@ -520,6 +521,15 @@ mod tests {
             unlock_salary_results_impl(&conn, &sec, "Wrong123", "2026-08", "计算有误需要调整")
                 .unwrap_err();
         assert!(err.to_string().contains("密码错误"));
+        // 密码错误计入 security_state 共享失败计数（与启动解锁同一计数器）
+        let failed: i64 = conn
+            .query_row(
+                "SELECT failed_attempts FROM security_state WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(failed, 1);
         let locked: i64 = conn
             .query_row(
                 "SELECT locked FROM salary_monthly_results WHERE salary_month='2026-08'",
