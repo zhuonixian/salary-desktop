@@ -52,6 +52,7 @@ import Payments from '@/pages/Payments';
 import BankTransactions from '@/pages/BankTransactions';
 import ChartOfAccounts from '@/pages/ChartOfAccounts';
 import Vouchers from '@/pages/Vouchers';
+import FinancialReports from '@/pages/FinancialReports';
 import SecurityCenter from '@/pages/SecurityCenter';
 import LockScreen from '@/components/LockScreen';
 import SetupSecurity from '@/components/SetupSecurity';
@@ -229,6 +230,7 @@ const AppLayout: React.FC = () => {
             <Route path="/bank-transactions" element={<BankTransactions />} />
             <Route path="/accounts" element={<ChartOfAccounts />} />
             <Route path="/vouchers" element={<Vouchers />} />
+            <Route path="/reports" element={<FinancialReports />} />
             <Route path="/export" element={<ExportCenter />} />
             <Route path="/logs" element={<OperationLogs />} />
             <Route path="/data-safety" element={<DataSafety />} />

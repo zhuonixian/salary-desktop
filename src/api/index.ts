@@ -66,6 +66,10 @@ import type {
   AccountMapping,
   Voucher,
   VoucherQuery,
+  BalanceSheet,
+  IncomeStatement,
+  CashFlowStatement,
+  FinancialReportType,
 } from '@/types';
 
 type BackendDashboardSummary = {
@@ -347,6 +351,32 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
       return { id: Date.now(), total_amount: 0, invoice_count: 0, ...(args?.data as object) };
     case 'ocr_invoice':
       return {};
+    case 'get_balance_sheet':
+      return {
+        month: String(args?.month ?? ''),
+        enabled: false,
+        asset_rows: [],
+        liability_equity_rows: [],
+        asset_total: 0,
+        liability_equity_total: 0,
+        balanced: true,
+      };
+    case 'get_income_statement':
+      return {
+        month: String(args?.month ?? ''),
+        rows: [],
+        net_profit_month: 0,
+        net_profit_year: 0,
+      };
+    case 'get_cash_flow_statement':
+      return {
+        month: String(args?.month ?? ''),
+        rows: [],
+        net_increase: 0,
+        unclassified: [],
+      };
+    case 'export_financial_report':
+      return '';
     default:
       if (command.startsWith('get_') || command.startsWith('query_')) return [];
       if (command.startsWith('export_') || command.startsWith('delete_') || command.startsWith('update_')) return true;
@@ -1121,4 +1151,27 @@ export async function deleteAccountMapping(id: number): Promise<boolean> {
 
 export async function getVouchers(query: VoucherQuery): Promise<Voucher[]> {
   return invoke<Voucher[]>('get_vouchers', { query });
+}
+
+// ==================== 财务报表 ====================
+// invoke 参数 key 用 camelCase（Tauri 2 自动映射 snake_case），与本文件既有约定一致。
+
+export async function getBalanceSheet(month: string): Promise<BalanceSheet> {
+  return invoke<BalanceSheet>('get_balance_sheet', { month });
+}
+
+export async function getIncomeStatement(month: string): Promise<IncomeStatement> {
+  return invoke<IncomeStatement>('get_income_statement', { month });
+}
+
+export async function getCashFlowStatement(month: string): Promise<CashFlowStatement> {
+  return invoke<CashFlowStatement>('get_cash_flow_statement', { month });
+}
+
+export async function exportFinancialReport(
+  month: string,
+  reportType: FinancialReportType,
+  path: string,
+): Promise<string> {
+  return invoke<string>('export_financial_report', { month, reportType, path });
 }

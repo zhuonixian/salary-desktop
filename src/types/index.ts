@@ -838,3 +838,44 @@ export interface VoucherQuery {
   source_type?: string;
   status?: string;
 }
+
+// ==================== 财务报表 ====================
+
+export type FinancialReportType = 'balance_sheet' | 'income_statement' | 'cash_flow_statement';
+
+export interface ReportRow {
+  key: string;
+  label: string;
+  current: number;
+  comparative: number;
+}
+
+export interface BalanceSheet {
+  month: string;
+  enabled: boolean;
+  asset_rows: ReportRow[];
+  liability_equity_rows: ReportRow[];
+  asset_total: number;
+  liability_equity_total: number;
+  balanced: boolean;
+}
+
+export interface IncomeStatement {
+  month: string;
+  rows: ReportRow[];
+  net_profit_month: number;
+  net_profit_year: number;
+}
+
+export interface UnclassifiedCashItem {
+  voucher_no: string;
+  summary?: string | null;
+  amount: number;
+}
+
+export interface CashFlowStatement {
+  month: string;
+  rows: ReportRow[];
+  net_increase: number;
+  unclassified: UnclassifiedCashItem[];
+}
