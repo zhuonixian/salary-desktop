@@ -942,13 +942,16 @@ pub struct VoucherQuery {
 // ==================== Accounting（第五阶段 财务报表） ====================
 
 /// 报表通用行：current=本期数，comparative=比较期数
-/// （资产负债表为年初数，利润表为启用月至当月累计数，现金流量表不使用 comparative）。
+/// （资产负债表为年初数，利润表为启用月至当月累计数，现金流量表不使用 comparative）；
+/// prior_year=上年同期数（资产负债表为上年年末时点数，利润表/现金流量表为上年 1 月~上年同月累计，
+/// 上年早于启用月时 has_prior_year=false 且全 0）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReportRow {
     pub key: String,
     pub label: String,
     pub current: f64,
     pub comparative: f64,
+    pub prior_year: f64,
 }
 
 /// 资产负债表。month 小于期初启用月（或未录期初）时 enabled=false 且行/合计全空。
@@ -962,6 +965,8 @@ pub struct BalanceSheet {
     pub asset_total: f64,
     pub liability_equity_total: f64,
     pub balanced: bool,
+    /// 上年同期列是否有效（上年 12 月不早于启用月）
+    pub has_prior_year: bool,
 }
 
 /// 科目余额表（试算平衡）单行：期初/本期发生/期末的借贷双侧金额。
@@ -1015,6 +1020,8 @@ pub struct IncomeStatement {
     pub rows: Vec<ReportRow>,
     pub net_profit_month: f64,
     pub net_profit_year: f64,
+    /// 上年同期列是否有效（上年同月不早于启用月）
+    pub has_prior_year: bool,
 }
 
 /// 现金流量表（直接法）：六行汇总（经营/投资/筹资 × 流入/流出）+ 其他行 + 现金净增加额。
@@ -1024,6 +1031,8 @@ pub struct CashFlowStatement {
     pub rows: Vec<ReportRow>,
     pub net_increase: f64,
     pub unclassified: Vec<UnclassifiedCashItem>,
+    /// 上年同期列是否有效（上年同月不早于启用月）
+    pub has_prior_year: bool,
 }
 
 /// 对方科目现金流量分类为 none 的现金收支明细（负数 = 流出），提示用户补充科目分类。

@@ -887,6 +887,7 @@ export interface ReportRow {
   label: string;
   current: number;
   comparative: number;
+  prior_year: number;
 }
 
 export interface BalanceSheet {
@@ -897,6 +898,7 @@ export interface BalanceSheet {
   asset_total: number;
   liability_equity_total: number;
   balanced: boolean;
+  has_prior_year: boolean;
 }
 
 export interface IncomeStatement {
@@ -904,6 +906,7 @@ export interface IncomeStatement {
   rows: ReportRow[];
   net_profit_month: number;
   net_profit_year: number;
+  has_prior_year: boolean;
 }
 
 export interface UnclassifiedCashItem {
@@ -917,6 +920,7 @@ export interface CashFlowStatement {
   rows: ReportRow[];
   net_increase: number;
   unclassified: UnclassifiedCashItem[];
+  has_prior_year: boolean;
 }
 
 export interface SocialInsuranceProfile {

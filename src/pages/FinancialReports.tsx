@@ -173,7 +173,13 @@ const FinancialReports: React.FC = () => {
 
   const renderAmount = (value: number) => <SensitiveText type="amount" value={fmtMoney(value)} />;
 
-  const reportColumns = (currentTitle: string, comparativeTitle: string, summaryKeys?: Set<string>) => [
+  const reportColumns = (
+    currentTitle: string,
+    comparativeTitle: string,
+    priorTitle: string,
+    hasPriorYear: boolean,
+    summaryKeys?: Set<string>,
+  ) => [
     { title: '项目', dataIndex: 'label', key: 'label' },
     {
       title: currentTitle,
@@ -193,6 +199,21 @@ const FinancialReports: React.FC = () => {
       render: (value: number, row: ReportRow) =>
         summaryKeys?.has(row.key) ? <strong>{renderAmount(value)}</strong> : renderAmount(value),
     },
+    {
+      title: priorTitle,
+      dataIndex: 'prior_year',
+      key: 'prior_year',
+      align: 'right' as const,
+      width: 180,
+      render: (value: number, row: ReportRow) =>
+        !hasPriorYear ? (
+          <span style={{ color: '#999' }}>—</span>
+        ) : summaryKeys?.has(row.key) ? (
+          <strong>{renderAmount(value)}</strong>
+        ) : (
+          renderAmount(value)
+        ),
+    },
   ];
 
   // 表尾合计行（Table.Summary）：资产负债表两条总计 + 现金流量表净增加额
@@ -205,6 +226,9 @@ const FinancialReports: React.FC = () => {
         <strong>{renderAmount(value)}</strong>
       </Table.Summary.Cell>
       <Table.Summary.Cell index={2} align="right">
+        <span style={{ color: '#999' }}>—</span>
+      </Table.Summary.Cell>
+      <Table.Summary.Cell index={3} align="right">
         <span style={{ color: '#999' }}>—</span>
       </Table.Summary.Cell>
     </Table.Summary.Row>
@@ -292,7 +316,7 @@ const FinancialReports: React.FC = () => {
                   <Card title="资产">
                     <Table<ReportRow>
                       rowKey="key"
-                      columns={reportColumns('期末余额', '年初余额')}
+                      columns={reportColumns('期末余额', '年初余额', '上年年末', balanceSheet?.has_prior_year ?? false)}
                       dataSource={balanceSheet?.asset_rows ?? []}
                       pagination={false}
                       summary={() =>
@@ -305,7 +329,7 @@ const FinancialReports: React.FC = () => {
                   <Card title="负债和所有者权益" style={{ marginTop: 16 }}>
                     <Table<ReportRow>
                       rowKey="key"
-                      columns={reportColumns('期末余额', '年初余额')}
+                      columns={reportColumns('期末余额', '年初余额', '上年年末', balanceSheet?.has_prior_year ?? false)}
                       dataSource={balanceSheet?.liability_equity_rows ?? []}
                       pagination={false}
                       summary={() =>
@@ -347,7 +371,7 @@ const FinancialReports: React.FC = () => {
                   <Card>
                     <Table<ReportRow>
                       rowKey="key"
-                      columns={reportColumns('本月金额', '本年累计', INCOME_SUMMARY_KEYS)}
+                      columns={reportColumns('本月金额', '本年累计', '上年同期', incomeStatement?.has_prior_year ?? false, INCOME_SUMMARY_KEYS)}
                       dataSource={incomeRows}
                       pagination={false}
                     />
@@ -401,7 +425,7 @@ const FinancialReports: React.FC = () => {
                   <Card>
                     <Table<ReportRow>
                       rowKey="key"
-                      columns={reportColumns('本期金额', '对比金额')}
+                      columns={reportColumns('本期金额', '对比金额', '上年同期', cashFlowStatement?.has_prior_year ?? false)}
                       dataSource={cashFlowStatement?.rows ?? []}
                       pagination={false}
                       summary={() =>

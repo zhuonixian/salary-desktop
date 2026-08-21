@@ -1718,18 +1718,19 @@ pub fn export_month_close_report(
 
 // ==================== Financial Statements Export（第五阶段 Task 11） ====================
 
-/// 三大报表共用区段写入器：区段标题行、表头（项目/本期金额/对比金额）、数据行、合计行。
+/// 三大报表共用区段写入器：区段标题行、表头（项目/本期金额/对比金额/上年同期）、数据行、合计行。
 /// 返回写入完成后下一个可用行号。
 #[allow(clippy::too_many_arguments)]
 fn write_statement_section(
     worksheet: &mut rust_xlsxwriter::Worksheet,
     start_row: u32,
     section: &str,
-    headers: [&str; 3],
+    headers: [&str; 4],
     rows: &[ReportRow],
     total_label: &str,
     total_current: f64,
     total_comparative: f64,
+    total_prior: f64,
 ) -> AppResult<u32> {
     let header_fmt = report_header_format();
     let money_fmt = report_money_format();
@@ -1742,11 +1743,13 @@ fn write_statement_section(
         worksheet.write_string(row, 0, &r.label)?;
         worksheet.write_number_with_format(row, 1, r.current, &money_fmt)?;
         worksheet.write_number_with_format(row, 2, r.comparative, &money_fmt)?;
+        worksheet.write_number_with_format(row, 3, r.prior_year, &money_fmt)?;
         row += 1;
     }
     worksheet.write_string(row, 0, total_label)?;
     worksheet.write_number_with_format(row, 1, total_current, &money_fmt)?;
     worksheet.write_number_with_format(row, 2, total_comparative, &money_fmt)?;
+    worksheet.write_number_with_format(row, 3, total_prior, &money_fmt)?;
     Ok(row + 1)
 }
 
@@ -1757,7 +1760,7 @@ pub fn export_balance_sheet(report: &BalanceSheet, path: &str) -> AppResult<bool
     let worksheet = workbook.add_worksheet();
     worksheet.set_name("资产负债表")?;
     worksheet.write_string(0, 0, format!("资产负债表 {}", report.month))?;
-    let headers = ["项目", "期末余额", "年初余额"];
+    let headers = ["项目", "期末余额", "年初余额", "上年年末"];
     let next = write_statement_section(
         worksheet,
         1,
@@ -1767,6 +1770,7 @@ pub fn export_balance_sheet(report: &BalanceSheet, path: &str) -> AppResult<bool
         "资产总计",
         report.asset_total,
         report.asset_rows.iter().map(|r| r.comparative).sum(),
+        report.asset_rows.iter().map(|r| r.prior_year).sum(),
     )?;
     write_statement_section(
         worksheet,
@@ -1780,6 +1784,11 @@ pub fn export_balance_sheet(report: &BalanceSheet, path: &str) -> AppResult<bool
             .liability_equity_rows
             .iter()
             .map(|r| r.comparative)
+            .sum(),
+        report
+            .liability_equity_rows
+            .iter()
+            .map(|r| r.prior_year)
             .sum(),
     )?;
     if !report.balanced {
@@ -1803,7 +1812,10 @@ pub fn export_income_statement(report: &IncomeStatement, path: &str) -> AppResul
     worksheet.write_string(0, 0, format!("利润表 {}", report.month))?;
     let header_fmt = report_header_format();
     let money_fmt = report_money_format();
-    for (col, header) in ["项目", "本月金额", "本年累计"].iter().enumerate() {
+    for (col, header) in ["项目", "本月金额", "本年累计", "上年同期"]
+        .iter()
+        .enumerate()
+    {
         worksheet.write_with_format(1, col as u16, *header, &header_fmt)?;
     }
     let mut row = 2u32;
@@ -1811,9 +1823,10 @@ pub fn export_income_statement(report: &IncomeStatement, path: &str) -> AppResul
         worksheet.write_string(row, 0, &r.label)?;
         worksheet.write_number_with_format(row, 1, r.current, &money_fmt)?;
         worksheet.write_number_with_format(row, 2, r.comparative, &money_fmt)?;
+        worksheet.write_number_with_format(row, 3, r.prior_year, &money_fmt)?;
         row += 1;
     }
-    set_report_columns(worksheet, 3)?;
+    set_report_columns(worksheet, 4)?;
     workbook.save(path)?;
     Ok(true)
 }
@@ -1829,13 +1842,14 @@ pub fn export_cash_flow_statement(report: &CashFlowStatement, path: &str) -> App
         worksheet,
         1,
         "现金流量",
-        ["项目", "本期金额", "本年累计"],
+        ["项目", "本期金额", "本年累计", "上年同期"],
         &report.rows,
         "现金净增加额",
         report.net_increase,
         report.rows.iter().map(|r| r.comparative).sum(),
+        report.rows.iter().map(|r| r.prior_year).sum(),
     )?;
-    set_report_columns(worksheet, 3)?;
+    set_report_columns(worksheet, 4)?;
 
     if !report.unclassified.is_empty() {
         let detail = workbook.add_worksheet();
@@ -2079,12 +2093,14 @@ mod tests {
                     label: "货币资金".into(),
                     current: 67000.0,
                     comparative: 100000.0,
+                    prior_year: 0.0,
                 },
                 ReportRow {
                     key: "1601".into(),
                     label: "固定资产".into(),
                     current: 30000.0,
                     comparative: 0.0,
+                    prior_year: 0.0,
                 },
             ],
             liability_equity_rows: vec![ReportRow {
@@ -2092,10 +2108,12 @@ mod tests {
                 label: "实收资本".into(),
                 current: 97000.0,
                 comparative: 100000.0,
+                prior_year: 0.0,
             }],
             asset_total: 97000.0,
             liability_equity_total: 97000.0,
             balanced: true,
+            has_prior_year: false,
         };
 
         export_balance_sheet(&report, &path.to_string_lossy()).unwrap();
@@ -2117,16 +2135,19 @@ mod tests {
                     label: "主营业务收入".into(),
                     current: 20000.0,
                     comparative: 50000.0,
+                    prior_year: 0.0,
                 },
                 ReportRow {
                     key: "net_profit".into(),
                     label: "净利润".into(),
                     current: 8000.0,
                     comparative: 21000.0,
+                    prior_year: 0.0,
                 },
             ],
             net_profit_month: 8000.0,
             net_profit_year: 21000.0,
+            has_prior_year: false,
         };
 
         export_income_statement(&report, &path.to_string_lossy()).unwrap();
@@ -2145,12 +2166,14 @@ mod tests {
                     label: "经营活动现金流入".into(),
                     current: 2000.0,
                     comparative: 0.0,
+                    prior_year: 0.0,
                 },
                 ReportRow {
                     key: "operating_outflow".into(),
                     label: "经营活动现金流出".into(),
                     current: 5000.0,
                     comparative: 0.0,
+                    prior_year: 0.0,
                 },
             ],
             net_increase: -3000.0,
@@ -2159,6 +2182,7 @@ mod tests {
                 summary: Some("未分类支出".into()),
                 amount: -100.0,
             }],
+            has_prior_year: false,
         };
 
         export_cash_flow_statement(&report, &path.to_string_lossy()).unwrap();

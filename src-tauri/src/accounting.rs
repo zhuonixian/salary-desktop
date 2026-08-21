@@ -1507,6 +1507,26 @@ const CASH_ACCOUNTS: &[&str] = &["1001", "1002", "1012"];
 /// 未分配利润 = 3104 期末 + 启用月至当月累计净利润；comparative = 年初（启用月期初口径，不滚入凭证）；
 /// balanced 兜底校验 |资产合计 - 负债权益合计| < 0.005。
 pub fn build_balance_sheet(conn: &Connection, month: &str) -> AppResult<BalanceSheet> {
+    // 上年同期：上年 12 月（年末时点数）；上年早于启用月或年份解析失败时 prior 全 0
+    let prior_dec = prior_year_month(month, "12").unwrap_or_default();
+    let prior_enabled = !prior_dec.is_empty() && month_enabled(conn, &prior_dec);
+    let prior_balances = if prior_enabled {
+        compute_balances(conn, &prior_dec)?
+    } else {
+        Vec::new()
+    };
+    let prior_ending = |code: &str| -> f64 {
+        prior_balances
+            .iter()
+            .find(|b| b.code == code)
+            .map(|b| b.ending())
+            .unwrap_or(0.0)
+    };
+    let prior_year_profit = if prior_enabled {
+        net_profit(conn, &prior_dec)?.1
+    } else {
+        0.0
+    };
     let mut sheet = BalanceSheet {
         month: month.to_string(),
         enabled: month_enabled(conn, month),
@@ -1515,6 +1535,7 @@ pub fn build_balance_sheet(conn: &Connection, month: &str) -> AppResult<BalanceS
         asset_total: 0.0,
         liability_equity_total: 0.0,
         balanced: false,
+        has_prior_year: prior_enabled,
     };
     if !sheet.enabled {
         return Ok(sheet);
@@ -1527,18 +1548,21 @@ pub fn build_balance_sheet(conn: &Connection, month: &str) -> AppResult<BalanceS
         label: "货币资金".into(),
         current: 0.0,
         comparative: 0.0,
+        prior_year: 0.0,
     };
     for b in balances.iter().filter(|b| b.category == "asset") {
         let ending = b.ending();
         if CASH_ACCOUNTS.contains(&b.code.as_str()) {
             monetary_row.current += ending;
             monetary_row.comparative += b.opening_raw;
+            monetary_row.prior_year += prior_ending(&b.code);
         } else {
             sheet.asset_rows.push(ReportRow {
                 key: b.code.clone(),
                 label: b.name.clone(),
                 current: ending,
                 comparative: b.opening_raw,
+                prior_year: prior_ending(&b.code),
             });
         }
     }
@@ -1555,11 +1579,17 @@ pub fn build_balance_sheet(conn: &Connection, month: &str) -> AppResult<BalanceS
         .filter(|b| b.category == "cost")
         .map(|b| b.opening_raw)
         .sum();
+    let cost_prior_total: f64 = prior_balances
+        .iter()
+        .filter(|b| b.category == "cost")
+        .map(|b| b.ending())
+        .sum();
     sheet.asset_rows.push(ReportRow {
         key: "cost_accounts".into(),
         label: "成本类科目".into(),
         current: cost_total,
         comparative: cost_opening_total,
+        prior_year: cost_prior_total,
     });
     sheet.asset_total = sheet.asset_rows.iter().map(|r| r.current).sum();
     // 负债与权益端：3104 替换为"未分配利润" = 3104 期末 + 启用月至当月累计净利润
@@ -1567,10 +1597,14 @@ pub fn build_balance_sheet(conn: &Connection, month: &str) -> AppResult<BalanceS
         .iter()
         .filter(|b| b.category == "liability" || b.category == "equity")
     {
-        let (ending, comp) = if b.code == "3104" {
-            (b.ending() + year_profit, b.opening_raw)
+        let (ending, comp, prior) = if b.code == "3104" {
+            (
+                b.ending() + year_profit,
+                b.opening_raw,
+                prior_ending("3104") + prior_year_profit,
+            )
         } else {
-            (b.ending(), b.opening_raw)
+            (b.ending(), b.opening_raw, prior_ending(&b.code))
         };
         sheet.liability_equity_rows.push(ReportRow {
             key: if b.code == "3104" {
@@ -1585,11 +1619,18 @@ pub fn build_balance_sheet(conn: &Connection, month: &str) -> AppResult<BalanceS
             },
             current: ending,
             comparative: comp,
+            prior_year: prior,
         });
     }
     sheet.liability_equity_total = sheet.liability_equity_rows.iter().map(|r| r.current).sum();
     sheet.balanced = (sheet.asset_total - sheet.liability_equity_total).abs() < 0.005;
     Ok(sheet)
+}
+
+/// 上年同月：month = "YYYY-MM" → "YYYY-1-MM"；月份格式非法返回 None。
+fn prior_year_month(month: &str, mm: &str) -> Option<String> {
+    let y: i64 = month.get(0..4)?.parse().ok()?;
+    Some(format!("{}-{}", y - 1, mm))
 }
 
 /// 利润表：profit_loss 科目当月与年初至当月累计发生额（贷-借）映射到标准行；
@@ -1599,6 +1640,18 @@ pub fn build_balance_sheet(conn: &Connection, month: &str) -> AppResult<BalanceS
 pub fn build_income_statement(conn: &Connection, month: &str) -> AppResult<IncomeStatement> {
     let amounts = profit_loss_amounts(conn, month)?;
     let enabled = amounts.is_some();
+    // 上年同期（上年同月的年初至上月同月累计分量）
+    let prior_amounts = match prior_year_month(month, month.get(5..).unwrap_or("01")) {
+        Some(pm) => profit_loss_amounts(conn, &pm)?,
+        None => None,
+    };
+    let has_prior_year = prior_amounts.is_some();
+    let prior_of = |code: &str| -> f64 {
+        prior_amounts
+            .as_ref()
+            .map(|m| m.get(code).map(|(_, y)| *y).unwrap_or(0.0))
+            .unwrap_or(0.0)
+    };
     let mut rows = Vec::new();
     for (code, label, _) in INCOME_STATEMENT_ROWS {
         let (m, y) = match &amounts {
@@ -1610,6 +1663,7 @@ pub fn build_income_statement(conn: &Connection, month: &str) -> AppResult<Incom
             label: (*label).to_string(),
             current: m,
             comparative: y,
+            prior_year: prior_of(code),
         });
     }
     let get = |code: &str| -> (f64, f64) {
@@ -1633,6 +1687,13 @@ pub fn build_income_statement(conn: &Connection, month: &str) -> AppResult<Incom
         - get("6601").1
         - get("6602").1
         - get("6603").1;
+    let op_p = prior_of("6001") + prior_of("6051") + prior_of("6111")
+        - prior_of("6401")
+        - prior_of("6402")
+        - prior_of("6403")
+        - prior_of("6601")
+        - prior_of("6602")
+        - prior_of("6603");
     let (non_in_m, non_in_y) = get("6301");
     let (non_out_m, non_out_y) = get("6711");
     let (tax_m, tax_y) = get("6801");
@@ -1641,34 +1702,41 @@ pub fn build_income_statement(conn: &Connection, month: &str) -> AppResult<Incom
         Some(map) => map.get("other_pl").copied().unwrap_or((0.0, 0.0)),
         None => (0.0, 0.0),
     };
+    let other_p = prior_of("other_pl");
     let total_m = op_m + non_in_m - non_out_m;
     let total_y = op_y + non_in_y - non_out_y;
+    let total_p = op_p + prior_of("6301") - prior_of("6711");
     // 净利润 = 利润总额 + 其他未列示损益 − 所得税费用（营业利润/利润总额不包含它）
     let net_m = total_m + other_m - tax_m;
     let net_y = total_y + other_y - tax_y;
+    let net_p = total_p + other_p - prior_of("6801");
     rows.push(ReportRow {
         key: "other_pl".into(),
         label: "其他未列示损益".into(),
         current: other_m,
         comparative: other_y,
+        prior_year: other_p,
     });
     rows.push(ReportRow {
         key: "operating_profit".into(),
         label: "营业利润".into(),
         current: op_m,
         comparative: op_y,
+        prior_year: op_p,
     });
     rows.push(ReportRow {
         key: "total_profit".into(),
         label: "利润总额".into(),
         current: total_m,
         comparative: total_y,
+        prior_year: total_p,
     });
     rows.push(ReportRow {
         key: "net_profit".into(),
         label: "净利润".into(),
         current: net_m,
         comparative: net_y,
+        prior_year: net_p,
     });
     Ok(IncomeStatement {
         month: month.to_string(),
@@ -1676,6 +1744,7 @@ pub fn build_income_statement(conn: &Connection, month: &str) -> AppResult<Incom
         rows,
         net_profit_month: net_m,
         net_profit_year: net_y,
+        has_prior_year,
     })
 }
 
@@ -1691,10 +1760,96 @@ pub fn build_cash_flow_statement(conn: &Connection, month: &str) -> AppResult<Ca
             status: Some("active".into()),
         },
     )?;
+    let cfc_map = cash_flow_categories(conn)?;
+    let (cash, unclassified) = sum_cash_flow(&vouchers, &cfc_map);
+    // 上年同期：上年 1 月~上年 12 月区间凭证（排除 period_close）；同期不重复提示未分类明细
+    let prior_month = prior_year_month(month, "01");
+    let prior_sums = match &prior_month {
+        Some(pm) if month_enabled(conn, pm) => {
+            let year: i64 = month[..4].parse().unwrap();
+            let to = format!("{}-12", year - 1);
+            let prior_vouchers = get_vouchers_range(conn, pm, &to)?;
+            sum_cash_flow(&prior_vouchers, &cfc_map).0
+        }
+        _ => CashFlowSums::default(),
+    };
+    let has_prior_year = prior_month
+        .as_deref()
+        .map(|pm| month_enabled(conn, pm))
+        .unwrap_or(false);
+    let rows = vec![
+        ReportRow {
+            key: "operating_inflow".into(),
+            label: "经营活动现金流入".into(),
+            current: cash.operating_in,
+            comparative: 0.0,
+            prior_year: prior_sums.operating_in,
+        },
+        ReportRow {
+            key: "operating_outflow".into(),
+            label: "经营活动现金流出".into(),
+            current: cash.operating_out,
+            comparative: 0.0,
+            prior_year: prior_sums.operating_out,
+        },
+        ReportRow {
+            key: "investing_inflow".into(),
+            label: "投资活动现金流入".into(),
+            current: cash.investing_in,
+            comparative: 0.0,
+            prior_year: prior_sums.investing_in,
+        },
+        ReportRow {
+            key: "investing_outflow".into(),
+            label: "投资活动现金流出".into(),
+            current: cash.investing_out,
+            comparative: 0.0,
+            prior_year: prior_sums.investing_out,
+        },
+        ReportRow {
+            key: "financing_inflow".into(),
+            label: "筹资活动现金流入".into(),
+            current: cash.financing_in,
+            comparative: 0.0,
+            prior_year: prior_sums.financing_in,
+        },
+        ReportRow {
+            key: "financing_outflow".into(),
+            label: "筹资活动现金流出".into(),
+            current: cash.financing_out,
+            comparative: 0.0,
+            prior_year: prior_sums.financing_out,
+        },
+        ReportRow {
+            key: "other".into(),
+            label: "其他（未分类）".into(),
+            current: cash.other,
+            comparative: 0.0,
+            prior_year: prior_sums.other,
+        },
+    ];
+    let net_increase = cash.operating_in + cash.investing_in + cash.financing_in + cash.other
+        - cash.operating_out
+        - cash.investing_out
+        - cash.financing_out;
+    Ok(CashFlowStatement {
+        month: month.to_string(),
+        rows,
+        net_increase,
+        unclassified,
+        has_prior_year,
+    })
+}
+
+/// 现金流分摊汇总：凭证的现金净流入按对方行金额占比分摊到对方科目的现金流量分类。
+/// 返回六行汇总与未分类明细（对方科目 category=none 的部分）。
+fn sum_cash_flow(
+    vouchers: &[Voucher],
+    cfc_map: &HashMap<String, String>,
+) -> (CashFlowSums, Vec<UnclassifiedCashItem>) {
     let mut cash = CashFlowSums::default();
     let mut unclassified: Vec<UnclassifiedCashItem> = Vec::new();
-    let cfc_map = cash_flow_categories(conn)?;
-    for v in &vouchers {
+    for v in vouchers {
         // 年末结转凭证不参与现金流量表（口径统一排除 period_close）
         if v.source_type == "period_close" {
             continue;
@@ -1770,60 +1925,25 @@ pub fn build_cash_flow_statement(conn: &Connection, month: &str) -> AppResult<Ca
             }
         }
     }
-    let rows = vec![
-        ReportRow {
-            key: "operating_inflow".into(),
-            label: "经营活动现金流入".into(),
-            current: cash.operating_in,
-            comparative: 0.0,
-        },
-        ReportRow {
-            key: "operating_outflow".into(),
-            label: "经营活动现金流出".into(),
-            current: cash.operating_out,
-            comparative: 0.0,
-        },
-        ReportRow {
-            key: "investing_inflow".into(),
-            label: "投资活动现金流入".into(),
-            current: cash.investing_in,
-            comparative: 0.0,
-        },
-        ReportRow {
-            key: "investing_outflow".into(),
-            label: "投资活动现金流出".into(),
-            current: cash.investing_out,
-            comparative: 0.0,
-        },
-        ReportRow {
-            key: "financing_inflow".into(),
-            label: "筹资活动现金流入".into(),
-            current: cash.financing_in,
-            comparative: 0.0,
-        },
-        ReportRow {
-            key: "financing_outflow".into(),
-            label: "筹资活动现金流出".into(),
-            current: cash.financing_out,
-            comparative: 0.0,
-        },
-        ReportRow {
-            key: "other".into(),
-            label: "其他（未分类）".into(),
-            current: cash.other,
-            comparative: 0.0,
-        },
-    ];
-    let net_increase = cash.operating_in + cash.investing_in + cash.financing_in + cash.other
-        - cash.operating_out
-        - cash.investing_out
-        - cash.financing_out;
-    Ok(CashFlowStatement {
-        month: month.to_string(),
-        rows,
-        net_increase,
-        unclassified,
-    })
+    (cash, unclassified)
+}
+
+/// 区间 [from_month, to_month] 的 active 凭证（排除 period_close），按凭证号排序，含分录。
+fn get_vouchers_range(
+    conn: &Connection,
+    from_month: &str,
+    to_month: &str,
+) -> AppResult<Vec<Voucher>> {
+    let mut stmt = conn.prepare(
+        "SELECT id FROM vouchers
+         WHERE belong_month >= ?1 AND belong_month <= ?2 AND status = 'active'
+           AND source_type != 'period_close'
+         ORDER BY voucher_no",
+    )?;
+    let ids: Vec<i64> = stmt
+        .query_map(params![from_month, to_month], |r| r.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    ids.iter().map(|id| get_voucher(conn, *id)).collect()
 }
 
 /// 现金流量表六行汇总中间结构。
@@ -1855,6 +1975,104 @@ mod tests {
     use super::*;
     use crate::db;
     use rusqlite::Connection;
+
+    /// Task 12：三大报表上年同期对比列（资产负债表=上年年末时点；利润表=上年 1 月~上年同月累计）
+    #[test]
+    fn test_reports_prior_year_columns() {
+        let conn = setup();
+        // 启用月 2024-01（期初全 0，保证平衡校验通过）
+        conn.execute(
+            "INSERT INTO opening_balances (month, account_code, debit_amount, credit_amount)
+             VALUES ('2024-01', '1001', 0.0, 0.0)",
+            [],
+        )
+        .unwrap();
+        // 2024-12 凭证：收入 6001 贷 1200
+        conn.execute(
+            "INSERT INTO vouchers (voucher_no, voucher_date, belong_month, source_type, source_id, total_amount, status)
+             VALUES ('记-202412-001', '2024-12-05', '2024-12', 'bank_manual', 1, 1200.0, 'active')",
+            [],
+        )
+        .unwrap();
+        let v24: i64 = conn
+            .query_row(
+                "SELECT id FROM vouchers WHERE voucher_no='记-202412-001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT INTO voucher_lines (voucher_id, account_code, debit_amount, credit_amount) VALUES (?1, '6001', 0.0, 1200.0)",
+            [v24],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO voucher_lines (voucher_id, account_code, debit_amount, credit_amount) VALUES (?1, '1001', 1200.0, 0.0)",
+            [v24],
+        )
+        .unwrap();
+        // 2025-12 凭证：收入 6001 贷 800
+        conn.execute(
+            "INSERT INTO vouchers (voucher_no, voucher_date, belong_month, source_type, source_id, total_amount, status)
+             VALUES ('记-202512-001', '2025-12-05', '2025-12', 'bank_manual', 2, 800.0, 'active')",
+            [],
+        )
+        .unwrap();
+        let v25: i64 = conn
+            .query_row(
+                "SELECT id FROM vouchers WHERE voucher_no='记-202512-001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT INTO voucher_lines (voucher_id, account_code, debit_amount, credit_amount) VALUES (?1, '6001', 0.0, 800.0)",
+            [v25],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO voucher_lines (voucher_id, account_code, debit_amount, credit_amount) VALUES (?1, '1001', 800.0, 0.0)",
+            [v25],
+        )
+        .unwrap();
+
+        let income = build_income_statement(&conn, "2025-12").unwrap();
+        assert!(income.has_prior_year);
+        let rev = income.rows.iter().find(|r| r.key == "6001").unwrap();
+        assert_eq!(rev.prior_year, 1200.0); // 上年同期累计
+                                            // 净利润 prior 分量同步重算
+        let net = income.rows.iter().find(|r| r.key == "net_profit").unwrap();
+        assert_eq!(net.prior_year, 1200.0);
+
+        let bs = build_balance_sheet(&conn, "2025-12").unwrap();
+        assert!(bs.has_prior_year);
+        let cash_row = bs.asset_rows.iter().find(|r| r.key == "monetary").unwrap();
+        assert_eq!(cash_row.prior_year, 1200.0); // 上年年末时点
+
+        // 2026-12：上年=2025，prior 累计复用 profit_loss_amounts（启用月 2024-01 起）= 1200+800
+        let income26 = build_income_statement(&conn, "2026-12").unwrap();
+        assert!(income26.has_prior_year);
+        let rev26 = income26.rows.iter().find(|r| r.key == "6001").unwrap();
+        assert_eq!(rev26.prior_year, 2000.0);
+
+        // 早于启用月的年份：2024-12 的上年=2023 < 启用月 2024-01 → 无同期列
+        let income24 = build_income_statement(&conn, "2024-12").unwrap();
+        assert!(!income24.has_prior_year);
+        let rev24 = income24.rows.iter().find(|r| r.key == "6001").unwrap();
+        assert_eq!(rev24.prior_year, 0.0);
+
+        // 现金流量表同期：2025-12 的上年区间 2024 全年，6001 分类 operating → 经营流入 1200
+        let cf = build_cash_flow_statement(&conn, "2025-12").unwrap();
+        assert!(cf.has_prior_year);
+        let op_in = cf
+            .rows
+            .iter()
+            .find(|r| r.key == "operating_inflow")
+            .unwrap();
+        assert_eq!(op_in.prior_year, 1200.0);
+        // 当月口径不受影响
+        assert_eq!(op_in.current, 800.0);
+    }
 
     fn setup() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
