@@ -525,7 +525,9 @@ pub fn void_period_close_vouchers(conn: &Connection, month: &str) -> AppResult<u
 
 pub fn generate_salary_accrual_vouchers(conn: &Connection, month: &str) -> AppResult<usize> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, department, gross_salary, attendance_deduction, other_deduction
+        "SELECT id, name, department, gross_salary, attendance_deduction, other_deduction,
+                social_security_personal, housing_fund_personal, tax_amount,
+                social_security_employer, housing_fund_employer
          FROM salary_monthly_results
          WHERE salary_month = ?1 AND locked = 1 AND status != 'void'",
     )?;
@@ -538,14 +540,33 @@ pub fn generate_salary_accrual_vouchers(conn: &Connection, month: &str) -> AppRe
                 r.get::<_, f64>(3)?,            // gross
                 r.get::<_, f64>(4)?,            // attendance
                 r.get::<_, f64>(5)?,            // other
+                r.get::<_, f64>(6)?,            // personal social security
+                r.get::<_, f64>(7)?,            // personal housing fund
+                r.get::<_, f64>(8)?,            // tax
+                r.get::<_, f64>(9)?,            // employer social security
+                r.get::<_, f64>(10)?,           // employer housing fund
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     drop(stmt);
     let mut n = 0;
-    for (id, name, department, gross, attendance, other) in rows {
+    for (
+        id,
+        name,
+        department,
+        gross,
+        attendance,
+        other,
+        ss_personal,
+        hf_personal,
+        tax,
+        ss_employer,
+        hf_employer,
+    ) in rows
+    {
         let amount = (gross - attendance - other).max(0.0);
-        if amount <= 0.0 {
+        let employer = ss_employer + hf_employer;
+        if amount <= 0.0 && employer <= 0.0 {
             continue;
         }
         // 已有 active 凭证则跳过（幂等）
@@ -559,6 +580,48 @@ pub fn generate_salary_accrual_vouchers(conn: &Connection, month: &str) -> AppRe
             mapping_account(conn, "department", department.as_deref().unwrap_or(""))?;
         let emp = name.unwrap_or_else(|| "未知员工".into());
         let voucher_date = format!("{month}-28"); // 计提日固定 28 日，避开 31 天差异
+                                                  // 全额成本口径：借 dept = 应发净额 + 单位社保公积金；贷 2211 同额
+        let cost_amount = amount + employer;
+        // 代扣腿：借 2211 = 个人社保公积金 + 个税；贷 2241 / 贷 2221
+        let withholding_ss = ss_personal + hf_personal;
+        let mut lines = vec![
+            VoucherLineDraft {
+                account_code: dept_account.clone(),
+                debit_amount: cost_amount,
+                credit_amount: 0.0,
+                summary: Some(format!("{month} 工资费用（{emp}）")),
+            },
+            VoucherLineDraft {
+                account_code: "2211".into(),
+                debit_amount: 0.0,
+                credit_amount: cost_amount,
+                summary: Some(format!("{month} 应付职工薪酬（{emp}）")),
+            },
+        ];
+        if withholding_ss + tax > 0.005 {
+            lines.push(VoucherLineDraft {
+                account_code: "2211".into(),
+                debit_amount: withholding_ss + tax,
+                credit_amount: 0.0,
+                summary: Some(format!("{month} 代扣款项（{emp}）")),
+            });
+            if withholding_ss > 0.005 {
+                lines.push(VoucherLineDraft {
+                    account_code: "2241".into(),
+                    debit_amount: 0.0,
+                    credit_amount: withholding_ss,
+                    summary: Some(format!("{month} 代扣社保公积金（{emp}）")),
+                });
+            }
+            if tax > 0.005 {
+                lines.push(VoucherLineDraft {
+                    account_code: "2221".into(),
+                    debit_amount: 0.0,
+                    credit_amount: tax,
+                    summary: Some(format!("{month} 代扣个税（{emp}）")),
+                });
+            }
+        }
         insert_voucher(
             conn,
             &VoucherDraft {
@@ -567,20 +630,7 @@ pub fn generate_salary_accrual_vouchers(conn: &Connection, month: &str) -> AppRe
                 source_type: "salary_accrual".into(),
                 source_id: id,
                 remark: Some(format!("{month} 工资计提（{emp}）")),
-                lines: vec![
-                    VoucherLineDraft {
-                        account_code: dept_account.clone(),
-                        debit_amount: amount,
-                        credit_amount: 0.0,
-                        summary: Some(format!("{month} 工资费用（{emp}）")),
-                    },
-                    VoucherLineDraft {
-                        account_code: "2211".into(),
-                        debit_amount: 0.0,
-                        credit_amount: amount,
-                        summary: Some(format!("{month} 应付职工薪酬（{emp}）")),
-                    },
-                ],
+                lines,
             },
         )?;
         n += 1;
@@ -2097,15 +2147,16 @@ mod tests {
     fn test_salary_accrual_voucher() {
         let conn = setup();
         // 插入 1 条 2026-08 工资结果：应发 10000，缺勤 500，其他扣款 100，
-        // 社保 1000，公积金 800，个税 200，实发 = 10000-500-100-1000-800-200 = 7400
+        // 个人社保 1000，个人公积金 800，个税 200，单位社保 2500，单位公积金 1200
         // （插入语句参考 db.rs setup_financial_db 现有工资测试）
         conn.execute(
             "INSERT INTO salary_monthly_results
                 (salary_month, employee_no, name, department, gross_salary, net_salary,
                  social_security_personal, housing_fund_personal, attendance_deduction,
-                 tax_amount, other_deduction, status, locked, created_at, updated_at)
+                 tax_amount, other_deduction, status, locked, created_at, updated_at,
+                 social_security_employer, housing_fund_employer)
              VALUES ('2026-08', 'E001', '张三', '销售部', 10000, 7400, 1000, 800, 500, 200, 100,
-                     'reviewed', 0, '2026-08-31', '2026-08-31')",
+                     'reviewed', 0, '2026-08-31', '2026-08-31', 2500, 1200)",
             [],
         )
         .unwrap();
@@ -2121,13 +2172,41 @@ mod tests {
         .unwrap();
         assert_eq!(vouchers.len(), 1);
         let v = &vouchers[0];
-        // 计提金额 = 应发 - 缺勤 - 其他 = 9400
-        assert_eq!(v.total_amount, 9400.0);
-        // 借 6602 9400，贷 2211 9400
-        let debit_line = v.lines.iter().find(|l| l.debit_amount > 0.0).unwrap();
-        assert_eq!(debit_line.account_code, "6602");
-        let credit_line = v.lines.iter().find(|l| l.credit_amount > 0.0).unwrap();
-        assert_eq!(credit_line.account_code, "2211");
+        // 凭证分录：
+        // 借 6602 = gross - attendance - other + employer_ss + employer_hf = 9400 + 3700 = 13100
+        // 贷 2211 同额 13100
+        // 借 2211 = personal_ss + personal_hf + tax = 1000 + 800 + 200 = 2000
+        // 贷 2241 = personal_ss + personal_hf = 1800
+        // 贷 2221 = tax = 200
+        assert_eq!(v.lines.len(), 5);
+        assert_eq!(v.total_amount, 15100.0); // 借方合计 = 13100 + 2000
+        let find = |code: &str, debit: bool| {
+            v.lines
+                .iter()
+                .find(|l| {
+                    l.account_code == code
+                        && if debit {
+                            l.debit_amount > 0.0
+                        } else {
+                            l.credit_amount > 0.0
+                        }
+                })
+                .unwrap_or_else(|| panic!("missing {} line", code))
+        };
+        let dept = find("6602", true);
+        assert_eq!(dept.debit_amount, 13100.0);
+        let payable_credit = find("2211", false);
+        assert_eq!(payable_credit.credit_amount, 13100.0);
+        let payable_debit = find("2211", true);
+        assert_eq!(payable_debit.debit_amount, 2000.0);
+        let withheld = find("2241", false);
+        assert_eq!(withheld.credit_amount, 1800.0);
+        let tax = find("2221", false);
+        assert_eq!(tax.credit_amount, 200.0);
+        // 借贷合计平衡
+        let debit_sum: f64 = v.lines.iter().map(|l| l.debit_amount).sum();
+        let credit_sum: f64 = v.lines.iter().map(|l| l.credit_amount).sum();
+        assert!((debit_sum - credit_sum).abs() < 0.005);
         // 解锁后凭证作废
         db::unlock_salary_results(&conn, "2026-08").unwrap();
         let active = get_vouchers(
@@ -2140,6 +2219,45 @@ mod tests {
         )
         .unwrap();
         assert_eq!(active.len(), 0);
+    }
+
+    #[test]
+    fn test_salary_accrual_zero_withholding() {
+        let conn = setup();
+        // 个人社保/公积金/个税全 0，单位部分也为 0：只有借 dept / 贷 2211 两行
+        conn.execute(
+            "INSERT INTO salary_monthly_results
+                (salary_month, employee_no, name, department, gross_salary, net_salary,
+                 social_security_personal, housing_fund_personal, attendance_deduction,
+                 tax_amount, other_deduction, status, locked, created_at, updated_at,
+                 social_security_employer, housing_fund_employer)
+             VALUES ('2026-09', 'E002', '李四', '销售部', 8000, 7900, 0, 0, 100, 0, 0,
+                     'reviewed', 0, '2026-09-30', '2026-09-30', 0, 0)",
+            [],
+        )
+        .unwrap();
+        db::lock_salary_results(&conn, "2026-09").unwrap();
+        let vouchers = get_vouchers(
+            &conn,
+            &VoucherQuery {
+                month: Some("2026-09".into()),
+                source_type: Some("salary_accrual".into()),
+                status: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(vouchers.len(), 1);
+        let v = &vouchers[0];
+        assert_eq!(v.lines.len(), 2);
+        // 计提金额 = 8000 - 100 = 7900
+        assert_eq!(v.total_amount, 7900.0);
+        assert_eq!(v.lines[0].account_code, "6602");
+        assert_eq!(v.lines[0].debit_amount, 7900.0);
+        assert_eq!(v.lines[1].account_code, "2211");
+        assert_eq!(v.lines[1].credit_amount, 7900.0);
+        // 无 2241/2221 代扣行
+        assert!(v.lines.iter().all(|l| l.account_code != "2241"));
+        assert!(v.lines.iter().all(|l| l.account_code != "2221"));
     }
 
     #[test]
