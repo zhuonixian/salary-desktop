@@ -4,7 +4,7 @@ import {
 } from 'antd';
 import {
   CalculatorOutlined, LockOutlined, CheckCircleOutlined, ReloadOutlined, UnlockOutlined,
-  PieChartOutlined, DownloadOutlined,
+  PieChartOutlined, DownloadOutlined, PrinterOutlined,
 } from '@ant-design/icons';
 import { save } from '@tauri-apps/plugin-dialog';
 import dayjs from 'dayjs';
@@ -17,6 +17,10 @@ import {
 } from '@/api';
 import type { AnnualTaxSummaryRow, SalaryResult, SalaryResultUpdate, SalaryStatus } from '@/types';
 import { SensitiveText } from '@/components/SensitiveText';
+import { useSecurity } from '@/contexts/SecurityContext';
+
+// 工资条明文金额格式化（发放核对用途，不走 SensitiveText）
+const fmtMoney = (v: number): string => `¥ ${Number(v ?? 0).toFixed(2)}`;
 
 const statusColorMap: Record<SalaryStatus, string> = {
   '草稿': 'default',
@@ -39,6 +43,9 @@ const SalaryCalculate: React.FC = () => {
   const [annualRows, setAnnualRows] = useState<AnnualTaxSummaryRow[]>([]);
   const [annualLoading, setAnnualLoading] = useState(false);
   const [annualExporting, setAnnualExporting] = useState(false);
+  const [payslipOpen, setPayslipOpen] = useState(false);
+
+  const { isSensitiveRevealed } = useSecurity();
 
   const fetchAnnualSummary = useCallback(async (year: number) => {
     setAnnualLoading(true);
@@ -404,6 +411,13 @@ const SalaryCalculate: React.FC = () => {
           )}
           {isControlUnlocked && <Tag color="orange" style={{ marginRight: 0 }}>已受控解锁</Tag>}
           <Button
+            icon={<PrinterOutlined />}
+            onClick={() => setPayslipOpen(true)}
+            disabled={results.length === 0}
+          >
+            工资条
+          </Button>
+          <Button
             icon={<PieChartOutlined />}
             onClick={() => setAnnualModalOpen(true)}
           >
@@ -551,6 +565,60 @@ const SalaryCalculate: React.FC = () => {
           pagination={{ pageSize: 10, showTotal: (t) => `共 ${t} 条` }}
           scroll={{ x: 1000 }}
         />
+      </Modal>
+      <Modal
+        open={payslipOpen}
+        onCancel={() => setPayslipOpen(false)}
+        title={`${monthStr} 工资条预览`}
+        width={720}
+        footer={[
+          <Button key="print" type="primary" disabled={!isSensitiveRevealed} onClick={() => window.print()}>
+            打印 / 另存 PDF
+          </Button>,
+        ]}
+      >
+        {!isSensitiveRevealed && (
+          <Alert
+            type="warning"
+            showIcon
+            message="工资条含明文金额，请先解锁敏感数据（点击任意金额的眼睛图标解锁）"
+            style={{ marginBottom: 16 }}
+          />
+        )}
+        <div className="payslip-print-area">
+          {results.map((r) => (
+            <div key={r.id} className="payslip-card">
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 600, marginBottom: 8 }}>
+                <span>{r.employee_name}（{r.employee_no}）</span>
+                <span>{monthStr}</span>
+              </div>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                <tbody>
+                  {([
+                    ['基本工资', r.base_salary], ['岗位工资', r.position_salary], ['绩效工资', r.performance_salary],
+                    ['加班费', r.overtime_pay], ['餐补', r.meal_allowance], ['交通补贴', r.transport_allowance],
+                    ['应发合计', r.gross_salary], ['社保(个人)', -r.social_insurance],
+                    ['公积金(个人)', -r.housing_fund], ['考勤扣款', -r.attendance_deduction],
+                    ['个税', -r.income_tax], ['其他扣款', -r.other_deduction],
+                  ] as [string, number][]).map(([label, value]) => (
+                    <tr key={label}>
+                      <td style={{ border: '1px solid #d9d9d9', padding: '2px 8px', width: '50%' }}>{label}</td>
+                      <td style={{ border: '1px solid #d9d9d9', padding: '2px 8px', textAlign: 'right' }}>
+                        {fmtMoney(value)}
+                      </td>
+                    </tr>
+                  ))}
+                  <tr>
+                    <td style={{ border: '1px solid #333', padding: '4px 8px', fontWeight: 700 }}>实发工资</td>
+                    <td style={{ border: '1px solid #333', padding: '4px 8px', textAlign: 'right', fontWeight: 700 }}>
+                      {fmtMoney(r.net_salary)}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          ))}
+        </div>
       </Modal>
     </div>
   );
