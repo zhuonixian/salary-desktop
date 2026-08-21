@@ -211,6 +211,8 @@ pub fn run() {
         commands::get_income_statement,
         commands::get_cash_flow_statement,
         commands::export_financial_report,
+        commands::get_trial_balance,
+        commands::export_trial_balance,
         // ===== Security（Task 6） =====
         security_commands::is_security_initialized,
         security_commands::setup_security,

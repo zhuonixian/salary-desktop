@@ -51,6 +51,7 @@ const operationTypeLabels: Record<string, string> = {
   save_opening_balances: '保存期初余额',
   create_bank_manual_voucher: '银行流水生成凭证',
   export_financial_report: '导出财务报表',
+  export_trial_balance: '导出科目余额表',
 };
 
 const getOperationLabel = (value?: string) =>

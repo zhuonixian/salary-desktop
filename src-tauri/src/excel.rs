@@ -1859,6 +1859,64 @@ pub fn export_cash_flow_statement(report: &CashFlowStatement, path: &str) -> App
     Ok(true)
 }
 
+/// 科目余额表（试算平衡）：借/贷四栏余额 + 合计行。
+pub fn export_trial_balance_excel(report: &TrialBalanceReport, path: &str) -> AppResult<()> {
+    let mut workbook = rust_xlsxwriter::Workbook::new();
+    let sheet = workbook.add_worksheet();
+    sheet.set_name("科目余额表")?;
+    let title = rust_xlsxwriter::Format::new().set_bold().set_font_size(14);
+    let header = rust_xlsxwriter::Format::new().set_bold().set_border(rust_xlsxwriter::FormatBorder::Thin);
+    let cell = rust_xlsxwriter::Format::new().set_border(rust_xlsxwriter::FormatBorder::Thin);
+    let money = rust_xlsxwriter::Format::new()
+        .set_border(rust_xlsxwriter::FormatBorder::Thin)
+        .set_num_format("0.00");
+    sheet.merge_range(
+        0,
+        0,
+        0,
+        8,
+        &format!("科目余额表（{} ~ {}）", report.from_month, report.to_month),
+        &title,
+    )?;
+    let headers = [
+        "科目编码",
+        "科目名称",
+        "期初余额(借)",
+        "期初余额(贷)",
+        "本期发生(借)",
+        "本期发生(贷)",
+        "期末余额(借)",
+        "期末余额(贷)",
+        "类别",
+    ];
+    for (i, h) in headers.iter().enumerate() {
+        sheet.write_with_format(1, i as u16, *h, &header)?;
+    }
+    let mut r: u32 = 2;
+    for row in &report.rows {
+        sheet.write_with_format(r, 0, &row.code, &cell)?;
+        sheet.write_with_format(r, 1, &row.name, &cell)?;
+        sheet.write_number_with_format(r, 2, row.opening_debit, &money)?;
+        sheet.write_number_with_format(r, 3, row.opening_credit, &money)?;
+        sheet.write_number_with_format(r, 4, row.period_debit, &money)?;
+        sheet.write_number_with_format(r, 5, row.period_credit, &money)?;
+        sheet.write_number_with_format(r, 6, row.ending_debit, &money)?;
+        sheet.write_number_with_format(r, 7, row.ending_credit, &money)?;
+        sheet.write_with_format(r, 8, &row.category, &cell)?;
+        r += 1;
+    }
+    sheet.write_with_format(r, 1, "合计", &header)?;
+    let total_debit: f64 = report.rows.iter().map(|x| x.ending_debit).sum();
+    let total_credit: f64 = report.rows.iter().map(|x| x.ending_credit).sum();
+    sheet.write_number_with_format(r, 6, total_debit, &money)?;
+    sheet.write_number_with_format(r, 7, total_credit, &money)?;
+    for col in 0..9u16 {
+        sheet.set_column_width(col, 14)?;
+    }
+    workbook.save(path)?;
+    Ok(())
+}
+
 fn report_header_format() -> Format {
     use rust_xlsxwriter::FormatBorder;
     Format::new()
@@ -2049,6 +2107,32 @@ mod tests {
 
         export_cash_flow_statement(&report, &path.to_string_lossy()).unwrap();
         assert_file_nonempty(&path);
+    }
+
+    #[test]
+    fn test_export_trial_balance_smoke() {
+        let report = TrialBalanceReport {
+            from_month: "2026-01".into(),
+            to_month: "2026-06".into(),
+            enabled: true,
+            balanced: true,
+            rows: vec![TrialBalanceRow {
+                code: "1001".into(),
+                name: "库存现金".into(),
+                category: "asset".into(),
+                direction: "debit".into(),
+                opening_debit: 1000.0,
+                opening_credit: 0.0,
+                period_debit: 0.0,
+                period_credit: 100.0,
+                ending_debit: 900.0,
+                ending_credit: 0.0,
+            }],
+        };
+        let path = std::env::temp_dir().join("trial_balance_smoke.xlsx");
+        export_trial_balance_excel(&report, path.to_str().unwrap()).unwrap();
+        assert!(path.exists());
+        let _ = std::fs::remove_file(path);
     }
 
     fn assert_file_nonempty(path: &Path) {

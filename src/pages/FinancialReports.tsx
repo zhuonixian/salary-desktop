@@ -17,9 +17,11 @@ import dayjs from 'dayjs';
 import type { Dayjs } from 'dayjs';
 import {
   exportFinancialReport,
+  exportTrialBalance,
   getBalanceSheet,
   getCashFlowStatement,
   getIncomeStatement,
+  getTrialBalance,
 } from '@/api';
 import { SensitiveText } from '@/components/SensitiveText';
 import { SensitiveStatistic } from '@/components/SensitiveStatistic';
@@ -29,6 +31,8 @@ import type {
   FinancialReportType,
   IncomeStatement,
   ReportRow,
+  TrialBalanceReport,
+  TrialBalanceRow,
 } from '@/types';
 
 const fmtMoney = (value?: number | null) =>
@@ -39,6 +43,7 @@ const REPORT_META: Record<FinancialReportType, { title: string }> = {
   balance_sheet: { title: '资产负债表' },
   income_statement: { title: '利润表' },
   cash_flow_statement: { title: '现金流量表' },
+  trial_balance: { title: '科目余额表' },
 };
 
 // 利润表渲染行序调整（审查裁决）：后端把"其他未列示损益"（other_pl）放在
@@ -62,6 +67,11 @@ const FinancialReports: React.FC = () => {
   const [balanceSheet, setBalanceSheet] = useState<BalanceSheet | null>(null);
   const [incomeStatement, setIncomeStatement] = useState<IncomeStatement | null>(null);
   const [cashFlowStatement, setCashFlowStatement] = useState<CashFlowStatement | null>(null);
+  const [tb, setTb] = useState<TrialBalanceReport | null>(null);
+  const [tbFrom, setTbFrom] = useState<Dayjs>(dayjs().startOf('year'));
+  const [tbTo, setTbTo] = useState<Dayjs>(dayjs());
+  const [tbLoading, setTbLoading] = useState(false);
+  const [tbExporting, setTbExporting] = useState(false);
   const [loading, setLoading] = useState(false);
   const [exporting, setExporting] = useState<FinancialReportType | null>(null);
 
@@ -88,6 +98,45 @@ const FinancialReports: React.FC = () => {
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  const tbFromStr = tbFrom.format('YYYY-MM');
+  const tbToStr = tbTo.format('YYYY-MM');
+
+  // 科目余额表：Tab 激活或区间变化时拉取
+  const fetchTb = useCallback(async () => {
+    if (activeTab !== 'trial_balance') return;
+    setTbLoading(true);
+    try {
+      const report = await getTrialBalance(tbFromStr, tbToStr);
+      setTb(report);
+    } catch (e: unknown) {
+      message.error('获取科目余额表失败: ' + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setTbLoading(false);
+    }
+  }, [activeTab, tbFromStr, tbToStr]);
+
+  useEffect(() => {
+    fetchTb();
+  }, [fetchTb]);
+
+  const onExportTb = async () => {
+    const path = await save({
+      title: '导出科目余额表',
+      defaultPath: `科目余额表_${tbFrom.format('YYYYMM')}_${tbTo.format('YYYYMM')}.xlsx`,
+      filters: [{ name: 'Excel', extensions: ['xlsx'] }],
+    });
+    if (!path) return;
+    setTbExporting(true);
+    try {
+      await exportTrialBalance(tbFromStr, tbToStr, String(path));
+      message.success('科目余额表已导出');
+    } catch (e: unknown) {
+      message.error('导出科目余额表失败: ' + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setTbExporting(false);
+    }
+  };
 
   const handleExport = async (reportType: FinancialReportType) => {
     const meta = REPORT_META[reportType];
@@ -362,6 +411,122 @@ const FinancialReports: React.FC = () => {
                       }
                     />
                   </Card>
+                </div>
+              ),
+            },
+            {
+              key: 'trial_balance',
+              label: '科目余额表',
+              children: (
+                <div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 12 }}>
+                    <span>
+                      区间：
+                      <DatePicker
+                        picker="month"
+                        value={tbFrom}
+                        allowClear={false}
+                        onChange={(value) => value && setTbFrom(value)}
+                        style={{ width: 130 }}
+                      />
+                      {' ~ '}
+                      <DatePicker
+                        picker="month"
+                        value={tbTo}
+                        allowClear={false}
+                        onChange={(value) => value && setTbTo(value)}
+                        style={{ width: 130 }}
+                      />
+                    </span>
+                    <Button
+                      icon={<DownloadOutlined />}
+                      loading={tbExporting}
+                      onClick={onExportTb}
+                    >
+                      导出 Excel
+                    </Button>
+                  </div>
+                  {tb && !tb.enabled && (
+                    <Alert
+                      type="info"
+                      showIcon
+                      message="该区间早于启用月（或未录期初余额），报表为空"
+                      className="mb-16"
+                    />
+                  )}
+                  {tb?.enabled && !tb.balanced && (
+                    <Alert
+                      type="error"
+                      showIcon
+                      message="试算不平衡：借贷合计存在差异，请检查凭证"
+                      className="mb-16"
+                    />
+                  )}
+                  <Table<TrialBalanceRow>
+                    rowKey="code"
+                    size="small"
+                    loading={tbLoading}
+                    dataSource={tb?.rows ?? []}
+                    pagination={false}
+                    columns={[
+                      { title: '编码', dataIndex: 'code', width: 90 },
+                      { title: '科目名称', dataIndex: 'name' },
+                      {
+                        title: '期初(借)',
+                        dataIndex: 'opening_debit',
+                        align: 'right' as const,
+                        render: (v: number) => renderAmount(v),
+                      },
+                      {
+                        title: '期初(贷)',
+                        dataIndex: 'opening_credit',
+                        align: 'right' as const,
+                        render: (v: number) => renderAmount(v),
+                      },
+                      {
+                        title: '发生(借)',
+                        dataIndex: 'period_debit',
+                        align: 'right' as const,
+                        render: (v: number) => renderAmount(v),
+                      },
+                      {
+                        title: '发生(贷)',
+                        dataIndex: 'period_credit',
+                        align: 'right' as const,
+                        render: (v: number) => renderAmount(v),
+                      },
+                      {
+                        title: '期末(借)',
+                        dataIndex: 'ending_debit',
+                        align: 'right' as const,
+                        render: (v: number) => renderAmount(v),
+                      },
+                      {
+                        title: '期末(贷)',
+                        dataIndex: 'ending_credit',
+                        align: 'right' as const,
+                        render: (v: number) => renderAmount(v),
+                      },
+                    ]}
+                    summary={() => {
+                      const sum = (f: (r: TrialBalanceRow) => number) =>
+                        (tb?.rows ?? []).reduce((a, r) => a + f(r), 0);
+                      return (
+                        <Table.Summary.Row>
+                          <Table.Summary.Cell index={0}>
+                            <strong>合计</strong>
+                          </Table.Summary.Cell>
+                          <Table.Summary.Cell index={1} colSpan={5} />
+                          <Table.Summary.Cell index={2} align="right">
+                            <strong>{fmtMoney(sum((r) => r.ending_debit))}</strong>
+                          </Table.Summary.Cell>
+                          <Table.Summary.Cell index={3} align="right">
+                            <strong>{fmtMoney(sum((r) => r.ending_credit))}</strong>
+                          </Table.Summary.Cell>
+                        </Table.Summary.Row>
+                      );
+                    }}
+                  />
                 </div>
               ),
             },

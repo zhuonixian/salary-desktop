@@ -1752,6 +1752,36 @@ pub fn export_financial_report(
     Ok(final_path_str)
 }
 
+#[tauri::command]
+pub fn get_trial_balance(
+    from_month: String,
+    to_month: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<TrialBalanceReport, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    accounting::build_trial_balance(&conn, &from_month, &to_month)
+}
+
+#[tauri::command]
+pub fn export_trial_balance(
+    from_month: String,
+    to_month: String,
+    path: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<String, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let report = accounting::build_trial_balance(&conn, &from_month, &to_month)?;
+    excel::export_trial_balance_excel(&report, &path)?;
+    db::log_operation(
+        &conn,
+        "export_trial_balance",
+        &format!("导出科目余额表 {from_month}~{to_month}"),
+        "system",
+        None,
+    )?;
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -69,6 +69,7 @@ import type {
   BalanceSheet,
   IncomeStatement,
   CashFlowStatement,
+  TrialBalanceReport,
   FinancialReportType,
 } from '@/types';
 
@@ -388,6 +389,16 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
         unclassified: [],
       };
     case 'export_financial_report':
+      return '';
+    case 'get_trial_balance':
+      return {
+        from_month: String(args?.fromMonth ?? ''),
+        to_month: String(args?.toMonth ?? ''),
+        enabled: true,
+        rows: [],
+        balanced: true,
+      };
+    case 'export_trial_balance':
       return '';
     case 'create_bank_manual_voucher':
       throw new Error('预览模式不支持生成凭证，请在桌面应用中操作');
@@ -1201,4 +1212,16 @@ export async function exportFinancialReport(
   path: string,
 ): Promise<string> {
   return invoke<string>('export_financial_report', { month, reportType, path });
+}
+
+export async function getTrialBalance(fromMonth: string, toMonth: string): Promise<TrialBalanceReport> {
+  return invoke<TrialBalanceReport>('get_trial_balance', { fromMonth, toMonth });
+}
+
+export async function exportTrialBalance(
+  fromMonth: string,
+  toMonth: string,
+  path: string,
+): Promise<string> {
+  return invoke<string>('export_trial_balance', { fromMonth, toMonth, path });
 }

@@ -841,7 +841,32 @@ export interface VoucherQuery {
 
 // ==================== 财务报表 ====================
 
-export type FinancialReportType = 'balance_sheet' | 'income_statement' | 'cash_flow_statement';
+export type FinancialReportType =
+  | 'balance_sheet'
+  | 'income_statement'
+  | 'cash_flow_statement'
+  | 'trial_balance';
+
+export interface TrialBalanceRow {
+  code: string;
+  name: string;
+  category: string;
+  direction: string;
+  opening_debit: number;
+  opening_credit: number;
+  period_debit: number;
+  period_credit: number;
+  ending_debit: number;
+  ending_credit: number;
+}
+
+export interface TrialBalanceReport {
+  from_month: string;
+  to_month: string;
+  enabled: boolean;
+  rows: TrialBalanceRow[];
+  balanced: boolean;
+}
 
 export interface ReportRow {
   key: string;
