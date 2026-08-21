@@ -1057,6 +1057,141 @@ fn compute_balances(conn: &Connection, month: &str) -> AppResult<Vec<AccountBala
     Ok(balances)
 }
 
+/// 科目余额表（试算平衡）：区间 [from_month, to_month] 每科目期初/本期发生/期末（借贷双侧）。
+/// 与三大报表不同：包含全部凭证（含 period_close），反映真实账面。
+pub fn build_trial_balance(
+    conn: &Connection,
+    from_month: &str,
+    to_month: &str,
+) -> AppResult<TrialBalanceReport> {
+    let mut report = TrialBalanceReport {
+        from_month: from_month.to_string(),
+        to_month: to_month.to_string(),
+        enabled: false,
+        rows: Vec::new(),
+        balanced: false,
+    };
+    let Some(open_month) = opening_month(conn) else {
+        return Ok(report);
+    };
+    if from_month < open_month.as_str() {
+        return Ok(report);
+    }
+    report.enabled = true;
+
+    let mut stmt =
+        conn.prepare("SELECT code, name, category, direction FROM gl_accounts ORDER BY code")?;
+    let mut rows: Vec<TrialBalanceRow> = stmt
+        .query_map([], |r| {
+            Ok(TrialBalanceRow {
+                code: r.get(0)?,
+                name: r.get(1)?,
+                category: r.get(2)?,
+                direction: r.get(3)?,
+                opening_debit: 0.0,
+                opening_credit: 0.0,
+                period_debit: 0.0,
+                period_credit: 0.0,
+                ending_debit: 0.0,
+                ending_credit: 0.0,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+
+    // 期初（带符号，借方为正）：启用月期初 + [启用月, from_month) 凭证净额（含 period_close）
+    let mut opening_signed: HashMap<String, f64> = HashMap::new();
+    let mut stmt =
+        conn.prepare("SELECT account_code, debit_amount, credit_amount FROM opening_balances")?;
+    let obs = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, f64>(1)?,
+                r.get::<_, f64>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+    for row in &rows {
+        if let Some((_, debit, credit)) = obs.iter().find(|(c, _, _)| *c == row.code) {
+            *opening_signed.entry(row.code.clone()).or_insert(0.0) += debit - credit;
+        }
+    }
+    let mut stmt = conn.prepare(
+        "SELECT vl.account_code, SUM(vl.debit_amount - vl.credit_amount)
+         FROM voucher_lines vl JOIN vouchers v ON v.id = vl.voucher_id
+         WHERE v.belong_month >= ?1 AND v.belong_month < ?2 AND v.status = 'active'
+         GROUP BY vl.account_code",
+    )?;
+    let nets = stmt
+        .query_map(params![open_month, from_month], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+    for row in &rows {
+        if let Some((_, net)) = nets.iter().find(|(c, _)| *c == row.code) {
+            *opening_signed.entry(row.code.clone()).or_insert(0.0) += net;
+        }
+    }
+
+    // 区间发生额（含 period_close）
+    let mut stmt = conn.prepare(
+        "SELECT vl.account_code, SUM(vl.debit_amount), SUM(vl.credit_amount)
+         FROM voucher_lines vl JOIN vouchers v ON v.id = vl.voucher_id
+         WHERE v.belong_month >= ?1 AND v.belong_month <= ?2 AND v.status = 'active'
+         GROUP BY vl.account_code",
+    )?;
+    let periods = stmt
+        .query_map(params![from_month, to_month], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, f64>(1)?,
+                r.get::<_, f64>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+
+    let mut total_debit = 0.0;
+    let mut total_credit = 0.0;
+    for row in rows.iter_mut() {
+        let opening = *opening_signed.get(&row.code).unwrap_or(&0.0);
+        if let Some((_, debit, credit)) = periods.iter().find(|(c, _, _)| *c == row.code) {
+            row.period_debit = *debit;
+            row.period_credit = *credit;
+        }
+        // 期末（带符号）= 期初 + (借-贷)（借贷记账法下净额方向即科目余额方向，无需 direction 系数）
+        let ending = opening + row.period_debit - row.period_credit;
+        // 分侧：正数记借方、负数记贷方（绝对值）
+        if opening >= 0.0 {
+            row.opening_debit = opening;
+        } else {
+            row.opening_credit = -opening;
+        }
+        if ending >= 0.0 {
+            row.ending_debit = ending;
+        } else {
+            row.ending_credit = -ending;
+        }
+        total_debit += row.ending_debit;
+        total_credit += row.ending_credit;
+    }
+    // 仅保留有数据（期初或发生非零）的科目
+    report.rows = rows
+        .into_iter()
+        .filter(|r| {
+            r.opening_debit.abs() > 0.005
+                || r.opening_credit.abs() > 0.005
+                || r.period_debit.abs() > 0.005
+                || r.period_credit.abs() > 0.005
+        })
+        .collect();
+    report.balanced = (total_debit - total_credit).abs() < 0.005;
+    Ok(report)
+}
+
 /// 利润表标准行顺序（code, 中文名, 科目方向）。金额按发生额展示：
 /// 收入类（贷方向）取 贷-借，费用类（借方向）取 借-贷（正数展示）。
 const INCOME_STATEMENT_ROWS: &[(&str, &str, &str)] = &[
@@ -3499,5 +3634,69 @@ mod tests {
         approx(row_value(&cf.rows, "operating_inflow").current, 0.0);
         approx(cf.net_increase, -1000.0);
         assert!(cf.unclassified.is_empty());
+    }
+
+    #[test]
+    fn test_trial_balance_basic() {
+        let conn = setup();
+        // 期初：1001 借 1000、2211 贷 1000
+        conn.execute("INSERT INTO opening_balances (month, account_code, debit_amount, credit_amount) VALUES ('2025-01', '1001', 1000.0, 0.0)", []).unwrap();
+        conn.execute("INSERT INTO opening_balances (month, account_code, debit_amount, credit_amount) VALUES ('2025-01', '2211', 0.0, 1000.0)", []).unwrap();
+        // 2025-01 发生：借 6602 / 贷 1001 各 100
+        conn.execute("INSERT INTO vouchers (voucher_no, voucher_date, belong_month, source_type, source_id, total_amount, status) VALUES ('记-202501-001', '2025-01-10', '2025-01', 'bank_manual', 1, 100.0, 'active')", []).unwrap();
+        let vid: i64 = conn
+            .query_row(
+                "SELECT id FROM vouchers WHERE voucher_no='记-202501-001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        conn.execute("INSERT INTO voucher_lines (voucher_id, account_code, debit_amount, credit_amount) VALUES (?1, '6602', 100.0, 0.0)", [vid]).unwrap();
+        conn.execute("INSERT INTO voucher_lines (voucher_id, account_code, debit_amount, credit_amount) VALUES (?1, '1001', 0.0, 100.0)", [vid]).unwrap();
+
+        let report = build_trial_balance(&conn, "2025-01", "2025-01").unwrap();
+        assert!(report.enabled);
+        let cash = report.rows.iter().find(|r| r.code == "1001").unwrap();
+        assert_eq!(cash.opening_debit, 1000.0);
+        assert_eq!(cash.period_credit, 100.0);
+        assert_eq!(cash.ending_debit, 900.0);
+        assert_eq!(cash.ending_credit, 0.0);
+        assert!(report.balanced);
+    }
+
+    #[test]
+    fn test_trial_balance_cross_month_rolls_opening() {
+        let conn = setup();
+        // 期初平衡：1001 借 500、2001 贷 500（brief 原文只录借方 500 不平，balanced 断言不可能成立，按平衡期初修正）
+        conn.execute("INSERT INTO opening_balances (month, account_code, debit_amount, credit_amount) VALUES ('2025-01', '1001', 500.0, 0.0)", []).unwrap();
+        conn.execute("INSERT INTO opening_balances (month, account_code, debit_amount, credit_amount) VALUES ('2025-01', '2001', 0.0, 500.0)", []).unwrap();
+        // 2025-01 发生：借 2241 / 贷 1001 各 100 -> 2025-02 查询时 1001 期初应为 400、2241 期初在借侧 100
+        conn.execute("INSERT INTO vouchers (voucher_no, voucher_date, belong_month, source_type, source_id, total_amount, status) VALUES ('记-202501-001', '2025-01-10', '2025-01', 'bank_manual', 1, 100.0, 'active')", []).unwrap();
+        let vid: i64 = conn
+            .query_row(
+                "SELECT id FROM vouchers WHERE voucher_no='记-202501-001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        conn.execute("INSERT INTO voucher_lines (voucher_id, account_code, debit_amount, credit_amount) VALUES (?1, '1001', 0.0, 100.0)", [vid]).unwrap();
+        conn.execute("INSERT INTO voucher_lines (voucher_id, account_code, debit_amount, credit_amount) VALUES (?1, '2241', 100.0, 0.0)", [vid]).unwrap();
+
+        let report = build_trial_balance(&conn, "2025-02", "2025-02").unwrap();
+        let cash = report.rows.iter().find(|r| r.code == "1001").unwrap();
+        assert_eq!(cash.opening_debit, 400.0);
+        // 2241 无期初、区间前净额借方 -> 滚入期初在借侧 100
+        let other = report.rows.iter().find(|r| r.code == "2241").unwrap();
+        assert_eq!(other.opening_debit, 100.0);
+        assert_eq!(other.opening_credit, 0.0);
+        assert!(report.balanced);
+    }
+
+    #[test]
+    fn test_trial_balance_not_enabled_without_opening() {
+        let conn = setup();
+        let report = build_trial_balance(&conn, "2025-01", "2025-01").unwrap();
+        assert!(!report.enabled);
+        assert!(report.rows.is_empty());
     }
 }

@@ -962,6 +962,32 @@ pub struct BalanceSheet {
     pub balanced: bool,
 }
 
+/// 科目余额表（试算平衡）单行：期初/本期发生/期末的借贷双侧金额。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrialBalanceRow {
+    pub code: String,
+    pub name: String,
+    pub category: String,
+    pub direction: String,
+    pub opening_debit: f64,
+    pub opening_credit: f64,
+    pub period_debit: f64,
+    pub period_credit: f64,
+    pub ending_debit: f64,
+    pub ending_credit: f64,
+}
+
+/// 科目余额表（试算平衡）：区间 [from_month, to_month] 内有数据科目的
+/// 期初/本期发生/期末借贷双侧汇总，balanced=期末借贷合计相等。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrialBalanceReport {
+    pub from_month: String,
+    pub to_month: String,
+    pub enabled: bool,
+    pub rows: Vec<TrialBalanceRow>,
+    pub balanced: bool,
+}
+
 /// 利润表。rows 为固定标准行（空行显示 0）：current=当月发生额，comparative=年初至当月累计。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IncomeStatement {
