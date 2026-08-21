@@ -1915,6 +1915,17 @@ pub fn get_month_close_workbench(conn: &Connection, month: &str) -> AppResult<Mo
         },
         action_route: Some("/salary".to_string()),
     });
+    // 12 月月结时自动生成年末损益结转凭证（commands::close_month 挂接）
+    if month.ends_with("-12") {
+        checks.push(MonthCloseCheckItem {
+            key: "period_close".to_string(),
+            title: "年末结转".to_string(),
+            status: "ok".to_string(),
+            count: 0,
+            description: "12 月正式月结时将自动生成年末损益结转凭证".to_string(),
+            action_route: None,
+        });
+    }
     let month_close = get_month_close_record(conn, month)?;
     Ok(MonthCloseWorkbench {
         summary,
@@ -5384,6 +5395,15 @@ pub mod tests {
             .find(|c| c.key == "salary_unlocked_accrual")
             .unwrap();
         assert_eq!(item_july.status, "blocking");
+    }
+
+    #[test]
+    fn test_december_workbench_has_period_close_check() {
+        let conn = setup_financial_db();
+        let wb = get_month_close_workbench(&conn, "2026-12").unwrap();
+        assert!(wb.checks.iter().any(|c| c.key == "period_close"));
+        let wb_nov = get_month_close_workbench(&conn, "2026-11").unwrap();
+        assert!(!wb_nov.checks.iter().any(|c| c.key == "period_close"));
     }
 
     fn make_august_closable(conn: &Connection) {

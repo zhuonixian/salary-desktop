@@ -52,6 +52,7 @@ const operationTypeLabels: Record<string, string> = {
   create_bank_manual_voucher: '银行流水生成凭证',
   export_financial_report: '导出财务报表',
   export_trial_balance: '导出科目余额表',
+  period_close_vouchers: '年末结转凭证',
 };
 
 const getOperationLabel = (value?: string) =>

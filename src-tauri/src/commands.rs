@@ -634,6 +634,19 @@ pub fn close_month(
     let mut conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     let tx = conn.transaction()?;
     let result = db::close_month(&tx, &data.month, "system", data.remark.as_deref())?;
+    // 12 月正式月结后自动生成年末损益结转凭证（幂等）
+    if data.month.ends_with("-12") {
+        let n = accounting::generate_period_close_vouchers(&tx, &data.month)?;
+        if n > 0 {
+            db::log_operation(
+                &tx,
+                "period_close_vouchers",
+                &format!("{} 年末结转凭证 {} 张", data.month, n),
+                "system",
+                None,
+            )?;
+        }
+    }
     db::log_operation(
         &tx,
         "close_month",
@@ -652,6 +665,10 @@ pub fn reopen_month(
 ) -> Result<MonthCloseRecord, AppError> {
     let mut conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     let tx = conn.transaction()?;
+    // 反月结前先批量作废该月年末结转凭证，保持数据一致
+    if data.month.ends_with("-12") {
+        accounting::void_period_close_vouchers(&tx, &data.month)?;
+    }
     let result = db::reopen_month(&tx, &data.month, &data.reason)?;
     db::log_operation(
         &tx,
