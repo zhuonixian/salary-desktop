@@ -405,6 +405,22 @@ pub fn create_tables(conn: &Connection) -> AppResult<()> {
         );
         CREATE UNIQUE INDEX IF NOT EXISTS idx_account_mappings_scope_key ON account_mappings(scope, key);
 
+        CREATE TABLE IF NOT EXISTS social_insurance_profiles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            employee_no TEXT NOT NULL,
+            profile_year INTEGER NOT NULL,
+            ss_base REAL DEFAULT 0,
+            hf_base REAL DEFAULT 0,
+            ss_employer_rate REAL DEFAULT 0,
+            ss_personal_rate REAL DEFAULT 0,
+            hf_employer_rate REAL DEFAULT 0,
+            hf_personal_rate REAL DEFAULT 0,
+            remark TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            UNIQUE(employee_no, profile_year)
+        );
+
         CREATE TABLE IF NOT EXISTS security_state (
           id INTEGER PRIMARY KEY CHECK (id = 1),
           password_hash TEXT NOT NULL,
@@ -555,6 +571,19 @@ fn migrate_existing_schema(conn: &Connection) -> AppResult<()> {
     ensure_column(conn, "budgets", "remark", "TEXT")?;
     ensure_column(conn, "budgets", "created_at", "TEXT")?;
     ensure_column(conn, "budgets", "updated_at", "TEXT")?;
+    // 第六阶段：工资结果增加社保/公积金单位部分
+    ensure_column(
+        conn,
+        "salary_monthly_results",
+        "social_security_employer",
+        "REAL DEFAULT 0",
+    )?;
+    ensure_column(
+        conn,
+        "salary_monthly_results",
+        "housing_fund_employer",
+        "REAL DEFAULT 0",
+    )?;
     // 兼容旧库：invoices 增加 image_encrypted
     ensure_column(
         conn,
@@ -2806,6 +2835,250 @@ pub fn void_payment_batch(
     crate::accounting::void_payment_voucher(&tx, input.id)?;
     tx.commit()?;
     get_payment_batch(conn, input.id)
+}
+
+// ==================== Social Insurance Profiles ====================
+
+/// 基数按上下限 clamp（min/max <= 0 视为不限制）
+fn clamp_base(value: f64, min: f64, max: f64) -> f64 {
+    let mut v = value;
+    if min > 0.0 && v < min {
+        v = min;
+    }
+    if max > 0.0 && v > max {
+        v = max;
+    }
+    v
+}
+
+/// 读取社保/公积金缴费基数上下限（ss_min, ss_max, hf_min, hf_max，0 = 不限制）
+pub fn get_social_base_limits(conn: &Connection) -> AppResult<(f64, f64, f64, f64)> {
+    let parse = |key: &str| -> f64 {
+        get_setting(conn, key)
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.0)
+    };
+    Ok((
+        parse("ss_base_min"),
+        parse("ss_base_max"),
+        parse("hf_base_min"),
+        parse("hf_base_max"),
+    ))
+}
+
+/// 保存社保/公积金缴费基数上下限设置
+pub fn set_social_base_limits(
+    conn: &Connection,
+    ss_min: f64,
+    ss_max: f64,
+    hf_min: f64,
+    hf_max: f64,
+) -> AppResult<()> {
+    set_setting(conn, "ss_base_min", &ss_min.to_string())?;
+    set_setting(conn, "ss_base_max", &ss_max.to_string())?;
+    set_setting(conn, "hf_base_min", &hf_min.to_string())?;
+    set_setting(conn, "hf_base_max", &hf_max.to_string())?;
+    Ok(())
+}
+
+/// 查询某年度全部社保公积金台账（按工号排序）
+pub fn get_social_profiles(conn: &Connection, year: i64) -> AppResult<Vec<SocialInsuranceProfile>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, employee_no, profile_year, ss_base, hf_base, ss_employer_rate,
+                ss_personal_rate, hf_employer_rate, hf_personal_rate, remark, created_at, updated_at
+         FROM social_insurance_profiles WHERE profile_year = ?1 ORDER BY employee_no",
+    )?;
+    let rows = stmt
+        .query_map(params![year], |r| {
+            Ok(SocialInsuranceProfile {
+                id: r.get(0)?,
+                employee_no: r.get(1)?,
+                profile_year: r.get(2)?,
+                ss_base: r.get(3)?,
+                hf_base: r.get(4)?,
+                ss_employer_rate: r.get(5)?,
+                ss_personal_rate: r.get(6)?,
+                hf_employer_rate: r.get(7)?,
+                hf_personal_rate: r.get(8)?,
+                remark: r.get(9)?,
+                created_at: r.get(10)?,
+                updated_at: r.get(11)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// 新增或更新社保公积金台账（id 命中且员工/年度一致时更新，否则新增；同员工同年度重复新增报错）
+pub fn upsert_social_profile(
+    conn: &Connection,
+    input: &SocialInsuranceProfileInput,
+) -> AppResult<SocialInsuranceProfile> {
+    if input.employee_no.trim().is_empty() {
+        return Err(AppError::InvalidParam("员工工号必填".into()));
+    }
+    for rate in [
+        input.ss_employer_rate,
+        input.ss_personal_rate,
+        input.hf_employer_rate,
+        input.hf_personal_rate,
+    ] {
+        if let Some(r) = rate {
+            if !(0.0..=1.0).contains(&r) {
+                return Err(AppError::InvalidParam("费率必须在 0~1 之间".into()));
+            }
+        }
+    }
+    let exists: Option<i64> = if let Some(id) = input.id {
+        conn.query_row(
+            "SELECT id FROM social_insurance_profiles WHERE id = ?1 AND employee_no = ?2 AND profile_year = ?3",
+            params![id, input.employee_no, input.profile_year],
+            |r| r.get(0),
+        )
+        .ok()
+    } else {
+        None
+    };
+    let now = Utc::now().to_rfc3339();
+    let ss_base = input.ss_base.unwrap_or(0.0);
+    let hf_base = input.hf_base.unwrap_or(0.0);
+    let (ss_e, ss_p, hf_e, hf_p) = (
+        input.ss_employer_rate.unwrap_or(0.0),
+        input.ss_personal_rate.unwrap_or(0.0),
+        input.hf_employer_rate.unwrap_or(0.0),
+        input.hf_personal_rate.unwrap_or(0.0),
+    );
+    let id = match exists {
+        Some(id) => {
+            conn.execute(
+                "UPDATE social_insurance_profiles SET ss_base=?1, hf_base=?2, ss_employer_rate=?3,
+                 ss_personal_rate=?4, hf_employer_rate=?5, hf_personal_rate=?6, remark=?7, updated_at=?8
+                 WHERE id=?9",
+                params![ss_base, hf_base, ss_e, ss_p, hf_e, hf_p, input.remark, now, id],
+            )?;
+            id
+        }
+        None => {
+            // 同员工同年度已存在（不带 id 的重复保存）报错
+            let dup: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM social_insurance_profiles WHERE employee_no=?1 AND profile_year=?2",
+                params![input.employee_no, input.profile_year],
+                |r| r.get(0),
+            )?;
+            if dup > 0 {
+                return Err(AppError::InvalidParam(format!(
+                    "{} 的 {} 年度台账已存在",
+                    input.employee_no, input.profile_year
+                )));
+            }
+            conn.execute(
+                "INSERT INTO social_insurance_profiles
+                 (employee_no, profile_year, ss_base, hf_base, ss_employer_rate, ss_personal_rate,
+                  hf_employer_rate, hf_personal_rate, remark, created_at, updated_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?10)",
+                params![
+                    input.employee_no,
+                    input.profile_year,
+                    ss_base,
+                    hf_base,
+                    ss_e,
+                    ss_p,
+                    hf_e,
+                    hf_p,
+                    input.remark,
+                    now
+                ],
+            )?;
+            conn.last_insert_rowid()
+        }
+    };
+    Ok(SocialInsuranceProfile {
+        id,
+        employee_no: input.employee_no.clone(),
+        profile_year: input.profile_year,
+        ss_base,
+        hf_base,
+        ss_employer_rate: ss_e,
+        ss_personal_rate: ss_p,
+        hf_employer_rate: hf_e,
+        hf_personal_rate: hf_p,
+        remark: input.remark.clone(),
+        created_at: Some(now.clone()),
+        updated_at: Some(now),
+    })
+}
+
+/// 删除台账记录，返回是否存在
+pub fn delete_social_profile(conn: &Connection, id: i64) -> AppResult<bool> {
+    Ok(conn.execute(
+        "DELETE FROM social_insurance_profiles WHERE id = ?1",
+        params![id],
+    )? > 0)
+}
+
+/// 年度调基：复制 from_year 全部台账到 to_year，基数 ×factor 后按上下限 clamp。
+/// to_year 已有任何台账时拒绝（避免覆盖）。
+pub fn copy_social_profiles(
+    conn: &Connection,
+    from_year: i64,
+    to_year: i64,
+    factor: f64,
+    apply_clamp: bool,
+) -> AppResult<usize> {
+    if from_year == to_year {
+        return Err(AppError::InvalidParam("调基源年度与目标年度相同".into()));
+    }
+    let existing: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM social_insurance_profiles WHERE profile_year = ?1",
+        params![to_year],
+        |r| r.get(0),
+    )?;
+    if existing > 0 {
+        return Err(AppError::InvalidParam(format!(
+            "{to_year} 年度已存在台账，如需重新调基请先清空该年度"
+        )));
+    }
+    let source = get_social_profiles(conn, from_year)?;
+    if source.is_empty() {
+        return Err(AppError::InvalidParam(format!(
+            "{from_year} 年度无台账可复制"
+        )));
+    }
+    let (ss_min, ss_max, hf_min, hf_max) = get_social_base_limits(conn)?;
+    let now = Utc::now().to_rfc3339();
+    let mut n = 0;
+    for p in &source {
+        let (ss, hf) = if apply_clamp {
+            (
+                clamp_base(p.ss_base * factor, ss_min, ss_max),
+                clamp_base(p.hf_base * factor, hf_min, hf_max),
+            )
+        } else {
+            (p.ss_base * factor, p.hf_base * factor)
+        };
+        conn.execute(
+            "INSERT INTO social_insurance_profiles
+             (employee_no, profile_year, ss_base, hf_base, ss_employer_rate, ss_personal_rate,
+              hf_employer_rate, hf_personal_rate, remark, created_at, updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?10)",
+            params![
+                p.employee_no,
+                to_year,
+                ss,
+                hf,
+                p.ss_employer_rate,
+                p.ss_personal_rate,
+                p.hf_employer_rate,
+                p.hf_personal_rate,
+                p.remark,
+                now
+            ],
+        )?;
+        n += 1;
+    }
+    Ok(n)
 }
 
 // ==================== Bank Transactions ====================
@@ -6465,5 +6738,53 @@ pub mod tests {
         assert_eq!(status, "normal", "发票不应被作废");
         assert_eq!(updated_count, 1, "计提凭证不应被 void");
         assert_eq!(active_accrual_voucher_id(&conn, 1), voucher_before);
+    }
+}
+
+#[cfg(test)]
+mod social_tests {
+    use super::*;
+
+    #[test]
+    fn test_social_profile_crud_and_copy() {
+        let conn = crate::db::tests::setup_financial_db();
+        let input = SocialInsuranceProfileInput {
+            id: None,
+            employee_no: "E001".into(),
+            profile_year: 2026,
+            ss_base: Some(8000.0),
+            hf_base: Some(8000.0),
+            ss_employer_rate: Some(0.24),
+            ss_personal_rate: Some(0.105),
+            hf_employer_rate: Some(0.12),
+            hf_personal_rate: Some(0.12),
+            remark: None,
+        };
+        let saved = upsert_social_profile(&conn, &input).unwrap();
+        assert!(saved.id > 0);
+        // 同员工同年度唯一
+        assert!(upsert_social_profile(&conn, &input).is_err());
+        // 上下限
+        set_social_base_limits(&conn, 4590.0, 22950.0, 0.0, 0.0).unwrap();
+        assert_eq!(
+            get_social_base_limits(&conn).unwrap(),
+            (4590.0, 22950.0, 0.0, 0.0)
+        );
+        // 调基复制：2027 基数上浮 5% 并 clamp
+        let n = copy_social_profiles(&conn, 2026, 2027, 1.05, true).unwrap();
+        assert_eq!(n, 1);
+        let rows = get_social_profiles(&conn, 2027).unwrap();
+        assert_eq!(rows[0].ss_base, 8400.0);
+        // 目标年度已存在时拒绝
+        assert!(copy_social_profiles(&conn, 2026, 2027, 1.05, true).is_err());
+        assert!(delete_social_profile(&conn, saved.id).unwrap());
+    }
+
+    #[test]
+    fn test_clamp_base() {
+        assert_eq!(clamp_base(3000.0, 4590.0, 22950.0), 4590.0);
+        assert_eq!(clamp_base(30000.0, 4590.0, 22950.0), 22950.0);
+        assert_eq!(clamp_base(10000.0, 4590.0, 22950.0), 10000.0);
+        assert_eq!(clamp_base(10000.0, 0.0, 0.0), 10000.0); // 0 = 不限制
     }
 }

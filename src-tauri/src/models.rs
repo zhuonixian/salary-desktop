@@ -1015,3 +1015,35 @@ pub struct UnclassifiedCashItem {
     pub summary: Option<String>,
     pub amount: f64,
 }
+
+/// 社保公积金年度台账（员工 × 年度，社保/公积金各 4 项费率）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SocialInsuranceProfile {
+    pub id: i64,
+    pub employee_no: String,
+    pub profile_year: i64,
+    pub ss_base: f64,
+    pub hf_base: f64,
+    pub ss_employer_rate: f64,
+    pub ss_personal_rate: f64,
+    pub hf_employer_rate: f64,
+    pub hf_personal_rate: f64,
+    pub remark: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+/// 社保公积金台账录入/更新入参（id=Some 时更新已有记录）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SocialInsuranceProfileInput {
+    pub id: Option<i64>,
+    pub employee_no: String,
+    pub profile_year: i64,
+    pub ss_base: Option<f64>,
+    pub hf_base: Option<f64>,
+    pub ss_employer_rate: Option<f64>,
+    pub ss_personal_rate: Option<f64>,
+    pub hf_employer_rate: Option<f64>,
+    pub hf_personal_rate: Option<f64>,
+    pub remark: Option<String>,
+}
