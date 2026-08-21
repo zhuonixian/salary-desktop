@@ -4,15 +4,18 @@ import {
 } from 'antd';
 import {
   CalculatorOutlined, LockOutlined, CheckCircleOutlined, ReloadOutlined, UnlockOutlined,
+  PieChartOutlined, DownloadOutlined,
 } from '@ant-design/icons';
+import { save } from '@tauri-apps/plugin-dialog';
 import dayjs from 'dayjs';
 import type { Dayjs } from 'dayjs';
 import {
   getSalaryResults, calculateSalary, recalculateSingle,
   updateSalaryResult, lockSalary, unlockSalaryResults, reviewSalary,
   getEmployees, getAttendanceRecords, getSalaryRule, getTaxRules,
+  getAnnualTaxSummary, exportAnnualTaxSummary,
 } from '@/api';
-import type { SalaryResult, SalaryResultUpdate, SalaryStatus } from '@/types';
+import type { AnnualTaxSummaryRow, SalaryResult, SalaryResultUpdate, SalaryStatus } from '@/types';
 import { SensitiveText } from '@/components/SensitiveText';
 
 const statusColorMap: Record<SalaryStatus, string> = {
@@ -31,6 +34,84 @@ const SalaryCalculate: React.FC = () => {
   const [adjustForm] = Form.useForm();
   const [unlockModal, setUnlockModal] = useState({ visible: false, password: '', reason: '', loading: false });
   const [unlockedMonths, setUnlockedMonths] = useState<Set<string>>(new Set());
+  const [annualModalOpen, setAnnualModalOpen] = useState(false);
+  const [annualYear, setAnnualYear] = useState<Dayjs>(dayjs());
+  const [annualRows, setAnnualRows] = useState<AnnualTaxSummaryRow[]>([]);
+  const [annualLoading, setAnnualLoading] = useState(false);
+  const [annualExporting, setAnnualExporting] = useState(false);
+
+  const fetchAnnualSummary = useCallback(async (year: number) => {
+    setAnnualLoading(true);
+    try {
+      const data = await getAnnualTaxSummary(year);
+      setAnnualRows(data);
+    } catch (e: unknown) {
+      message.error('获取个税年度汇总失败: ' + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setAnnualLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (annualModalOpen) fetchAnnualSummary(annualYear.year());
+  }, [annualModalOpen, annualYear, fetchAnnualSummary]);
+
+  const handleAnnualExport = async () => {
+    const year = annualYear.year();
+    const path = await save({
+      title: '导出个税年度汇总',
+      defaultPath: `个税年度汇总_${year}.xlsx`,
+      filters: [{ name: 'Excel', extensions: ['xlsx'] }],
+    });
+    if (!path) return;
+    setAnnualExporting(true);
+    try {
+      await exportAnnualTaxSummary(year, String(path));
+      message.success('个税年度汇总已导出');
+    } catch (e: unknown) {
+      message.error('导出个税年度汇总失败: ' + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setAnnualExporting(false);
+    }
+  };
+
+  const annualColumns = [
+    { title: '工号', dataIndex: 'employee_no', key: 'employee_no', width: 90 },
+    { title: '姓名', dataIndex: 'name', key: 'name', width: 80 },
+    { title: '月数', dataIndex: 'month_count', key: 'month_count', width: 60, align: 'right' as const },
+    {
+      title: '累计收入', dataIndex: 'total_gross', key: 'total_gross', width: 110, align: 'right' as const,
+      render: (v: number) => <SensitiveText type="amount" value={v} />,
+    },
+    {
+      title: '累计社保个人', dataIndex: 'total_ss_personal', key: 'total_ss_personal', width: 120, align: 'right' as const,
+      render: (v: number) => <SensitiveText type="amount" value={v} />,
+    },
+    {
+      title: '累计公积金个人', dataIndex: 'total_hf_personal', key: 'total_hf_personal', width: 130, align: 'right' as const,
+      render: (v: number) => <SensitiveText type="amount" value={v} />,
+    },
+    {
+      title: '累计专项附加', dataIndex: 'total_special_deduction', key: 'total_special_deduction', width: 120, align: 'right' as const,
+      render: (v: number) => <SensitiveText type="amount" value={v} />,
+    },
+    {
+      title: '累计已预扣', dataIndex: 'total_tax_withheld', key: 'total_tax_withheld', width: 110, align: 'right' as const,
+      render: (v: number) => <SensitiveText type="amount" value={v} />,
+    },
+    {
+      title: '年度应预扣', dataIndex: 'annual_tax_due', key: 'annual_tax_due', width: 110, align: 'right' as const,
+      render: (v: number) => <SensitiveText type="amount" value={v} />,
+    },
+    {
+      title: '差额', dataIndex: 'difference', key: 'difference', width: 100, align: 'right' as const,
+      render: (v: number) => (
+        <span style={{ color: v < 0 ? '#52c41a' : v > 0 ? '#cf1322' : undefined }}>
+          <SensitiveText type="amount" value={v} />
+        </span>
+      ),
+    },
+  ];
 
   const fetchData = useCallback(async (m: string) => {
     setLoading(true);
@@ -322,6 +403,12 @@ const SalaryCalculate: React.FC = () => {
             </Button>
           )}
           {isControlUnlocked && <Tag color="orange" style={{ marginRight: 0 }}>已受控解锁</Tag>}
+          <Button
+            icon={<PieChartOutlined />}
+            onClick={() => setAnnualModalOpen(true)}
+          >
+            个税年度汇总
+          </Button>
           {isReviewed && !isLocked && (
             <Popconfirm title="锁定后将无法修改，确认锁定?" onConfirm={handleLock} okText="确认锁定" cancelText="取消">
               <Button danger icon={<LockOutlined />}>
@@ -426,6 +513,44 @@ const SalaryCalculate: React.FC = () => {
             />
           </Form.Item>
         </Form>
+      </Modal>
+      <Modal
+        title={`个税年度汇总（${annualYear.year()}年度）`}
+        open={annualModalOpen}
+        onCancel={() => setAnnualModalOpen(false)}
+        width={1000}
+        footer={[
+          <Button
+            key="export"
+            type="primary"
+            icon={<DownloadOutlined />}
+            loading={annualExporting}
+            disabled={annualRows.length === 0}
+            onClick={handleAnnualExport}
+          >
+            导出 Excel
+          </Button>,
+        ]}
+      >
+        <div style={{ marginBottom: 12, display: 'flex', justifyContent: 'space-between' }}>
+          <DatePicker
+            picker="year"
+            value={annualYear}
+            onChange={(d) => d && setAnnualYear(d)}
+            allowClear={false}
+            style={{ width: 120 }}
+          />
+          <span style={{ color: '#999', fontSize: 12 }}>差额 = 年度应预扣 - 累计已预扣，负数表示多缴</span>
+        </div>
+        <Table
+          rowKey="employee_no"
+          columns={annualColumns}
+          dataSource={annualRows}
+          loading={annualLoading}
+          size="small"
+          pagination={{ pageSize: 10, showTotal: (t) => `共 ${t} 条` }}
+          scroll={{ x: 1000 }}
+        />
       </Modal>
     </div>
   );

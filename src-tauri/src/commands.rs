@@ -1799,6 +1799,36 @@ pub fn export_trial_balance(
     Ok(path)
 }
 
+// ===== 个税年度汇总（第六阶段 Task 10） =====
+
+#[tauri::command]
+pub fn get_annual_tax_summary(
+    year: i64,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<AnnualTaxSummaryRow>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    db::get_annual_tax_summary(&conn, year)
+}
+
+#[tauri::command]
+pub fn export_annual_tax_summary(
+    year: i64,
+    path: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<String, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let rows = db::get_annual_tax_summary(&conn, year)?;
+    excel::export_annual_tax_summary_excel(&rows, year, &path)?;
+    db::log_operation(
+        &conn,
+        "export_annual_tax_summary",
+        &format!("导出{year}年度个税汇总表到{path}"),
+        "system",
+        None,
+    )?;
+    Ok(path)
+}
+
 // ===== 社保公积金台账（第六阶段 Task 6） =====
 
 #[tauri::command]

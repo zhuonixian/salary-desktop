@@ -1282,6 +1282,8 @@ pub fn update_tax_rule(conn: &Connection, id: i64, data: &TaxRuleInput) -> AppRe
     Ok(updated > 0)
 }
 
+/// 月度税率表计算（备用）：当前工资计算走累计预扣法，此函数保留供月度口径核对。
+#[allow(dead_code)]
 pub fn calculate_tax(conn: &Connection, taxable_income: f64) -> AppResult<f64> {
     if taxable_income <= 0.0 {
         return Ok(0.0);
@@ -1300,6 +1302,67 @@ pub fn calculate_tax(conn: &Connection, taxable_income: f64) -> AppResult<f64> {
 }
 
 // ==================== Salary Results CRUD ====================
+
+/// 个税年度汇总（第六阶段 Task 10）：按员工聚合指定年度非作废工资记录，
+/// 用累计预扣率表计算年度应预扣额，差额 = 应预扣 - 已预扣（负数为多缴）。
+pub fn get_annual_tax_summary(conn: &Connection, year: i64) -> AppResult<Vec<AnnualTaxSummaryRow>> {
+    let prefix = format!("{year}-%");
+    let mut stmt = conn.prepare(
+        "SELECT r.employee_no, MAX(r.name), COUNT(*),
+                COALESCE(SUM(r.gross_salary),0),
+                COALESCE(SUM(r.social_security_personal),0),
+                COALESCE(SUM(r.housing_fund_personal),0),
+                COALESCE(SUM(r.tax_amount),0),
+                COALESCE(MAX(COALESCE(e.special_deduction,0)),0)
+         FROM salary_monthly_results r LEFT JOIN employees e ON e.employee_no = r.employee_no
+         WHERE r.salary_month LIKE ?1 AND r.status != 'void'
+         GROUP BY r.employee_no ORDER BY r.employee_no",
+    )?;
+    let rows = stmt
+        .query_map(params![prefix], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, f64>(3)?,
+                r.get::<_, f64>(4)?,
+                r.get::<_, f64>(5)?,
+                r.get::<_, f64>(6)?,
+                r.get::<_, f64>(7)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+    let rules = get_cumulative_tax_rules(conn)?;
+    let rate_of = |taxable: f64| -> f64 {
+        for rule in &rules {
+            let max = rule.max_amount.unwrap_or(f64::MAX);
+            if taxable > rule.min_amount && taxable <= max {
+                return (taxable * rule.tax_rate - rule.quick_deduction).max(0.0);
+            }
+        }
+        0.0
+    };
+    let mut result = Vec::new();
+    for (no, name, count, gross, ss, hf, withheld, special) in rows {
+        let months = count as f64;
+        let taxable = gross - ss - hf - 5000.0 * months - special * months;
+        let due = if taxable > 0.0 { rate_of(taxable) } else { 0.0 };
+        result.push(AnnualTaxSummaryRow {
+            employee_no: no,
+            name,
+            month_count: count as i32,
+            total_gross: (gross * 100.0).round() / 100.0,
+            total_ss_personal: (ss * 100.0).round() / 100.0,
+            total_hf_personal: (hf * 100.0).round() / 100.0,
+            total_special_deduction: (special * months * 100.0).round() / 100.0,
+            total_tax_withheld: (withheld * 100.0).round() / 100.0,
+            annual_tax_due: (due * 100.0).round() / 100.0,
+            difference: ((due - withheld) * 100.0).round() / 100.0,
+        });
+    }
+    Ok(result)
+}
 
 pub fn save_salary_result(conn: &Connection, result: &SalaryResult) -> AppResult<()> {
     ensure_month_open(conn, &result.salary_month)?;
@@ -6844,5 +6907,57 @@ mod social_tests {
         assert_eq!(clamp_base(30000.0, 4590.0, 22950.0), 22950.0);
         assert_eq!(clamp_base(10000.0, 4590.0, 22950.0), 10000.0);
         assert_eq!(clamp_base(10000.0, 0.0, 0.0), 10000.0); // 0 = 不限制
+    }
+
+    #[test]
+    fn test_get_annual_tax_summary() {
+        // E001：3 个月 gross 15000、社保 1500、公积金 1200/月，专项附加 1000/月，已预扣 300/月
+        // 累计应税 = 45000 - 4500 - 3600 - 5000*3 - 1000*3 = 18900 → 3% 档 567 应预扣
+        // 已预扣 900 > 567 → 差额 -333（多缴）
+        // E002：同口径但已预扣 100/月 → 差额 567 - 300 = 267（少缴）
+        let conn = crate::db::tests::setup_financial_db();
+        conn.execute_batch(
+            "
+            UPDATE employees SET special_deduction = 1000 WHERE employee_no IN ('E001','E002');
+
+            DELETE FROM salary_monthly_results;
+
+            INSERT INTO salary_monthly_results
+                (salary_month, employee_no, name, department, gross_salary, net_salary,
+                 social_security_personal, housing_fund_personal, attendance_deduction,
+                 tax_amount, other_deduction, status, locked, created_at, updated_at)
+            VALUES
+                ('2026-01', 'E001', '张三', '销售部', 15000, 12000, 1500, 1200, 0, 300, 0, 'reviewed', 0, '2026-01-31', '2026-01-31'),
+                ('2026-02', 'E001', '张三', '销售部', 15000, 12000, 1500, 1200, 0, 300, 0, 'reviewed', 0, '2026-02-28', '2026-02-28'),
+                ('2026-03', 'E001', '张三', '销售部', 15000, 12000, 1500, 1200, 0, 300, 0, 'reviewed', 0, '2026-03-31', '2026-03-31'),
+                ('2026-01', 'E002', '李四', '技术部', 15000, 12200, 1500, 1200, 0, 100, 0, 'reviewed', 0, '2026-01-31', '2026-01-31'),
+                ('2026-02', 'E002', '李四', '技术部', 15000, 12200, 1500, 1200, 0, 100, 0, 'reviewed', 0, '2026-02-28', '2026-02-28'),
+                ('2026-03', 'E002', '李四', '技术部', 15000, 12200, 1500, 1200, 0, 100, 0, 'reviewed', 0, '2026-03-31', '2026-03-31'),
+                ('2025-12', 'E001', '张三', '销售部', 15000, 12000, 1500, 1200, 0, 300, 0, 'reviewed', 0, '2025-12-31', '2025-12-31'),
+                ('2026-04', 'E001', '张三', '销售部', 15000, 12000, 1500, 1200, 0, 300, 0, 'void', 0, '2026-04-30', '2026-04-30');
+            ",
+        )
+        .unwrap();
+
+        let rows = get_annual_tax_summary(&conn, 2026).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].employee_no, "E001");
+        assert_eq!(rows[0].month_count, 3);
+        assert_eq!(rows[0].total_gross, 45000.0);
+        assert_eq!(rows[0].total_ss_personal, 4500.0);
+        assert_eq!(rows[0].total_hf_personal, 3600.0);
+        assert_eq!(rows[0].total_special_deduction, 3000.0);
+        assert_eq!(rows[0].total_tax_withheld, 900.0);
+        assert_eq!(rows[0].annual_tax_due, 567.0);
+        assert_eq!(rows[0].difference, -333.0); // 多缴为负
+
+        assert_eq!(rows[1].employee_no, "E002");
+        assert_eq!(rows[1].month_count, 3);
+        assert_eq!(rows[1].annual_tax_due, 567.0);
+        assert_eq!(rows[1].total_tax_withheld, 300.0);
+        assert_eq!(rows[1].difference, 267.0); // 少缴为正
+
+        // 其他年份无数据
+        assert!(get_annual_tax_summary(&conn, 2027).unwrap().is_empty());
     }
 }

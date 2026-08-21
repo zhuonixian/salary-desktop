@@ -1859,6 +1859,60 @@ pub fn export_cash_flow_statement(report: &CashFlowStatement, path: &str) -> App
     Ok(true)
 }
 
+/// 个税年度汇总表（第六阶段 Task 10）：按员工聚合年度累计收入/扣除/预扣与差额。
+pub fn export_annual_tax_summary_excel(
+    rows: &[AnnualTaxSummaryRow],
+    year: i64,
+    path: &str,
+) -> AppResult<()> {
+    let mut workbook = rust_xlsxwriter::Workbook::new();
+    let sheet = workbook.add_worksheet();
+    sheet.set_name("个税年度汇总")?;
+    let title = rust_xlsxwriter::Format::new().set_bold().set_font_size(14);
+    let header = rust_xlsxwriter::Format::new()
+        .set_bold()
+        .set_border(rust_xlsxwriter::FormatBorder::Thin);
+    let cell = rust_xlsxwriter::Format::new().set_border(rust_xlsxwriter::FormatBorder::Thin);
+    let money = rust_xlsxwriter::Format::new()
+        .set_border(rust_xlsxwriter::FormatBorder::Thin)
+        .set_num_format("0.00");
+    sheet.merge_range(0, 0, 0, 9, &format!("个税年度汇总表（{year}年度）"), &title)?;
+    let headers = [
+        "工号",
+        "姓名",
+        "月数",
+        "累计收入",
+        "累计社保个人",
+        "累计公积金个人",
+        "累计专项附加",
+        "累计已预扣",
+        "年度应预扣",
+        "差额",
+    ];
+    for (i, h) in headers.iter().enumerate() {
+        sheet.write_with_format(1, i as u16, *h, &header)?;
+    }
+    let mut r: u32 = 2;
+    for row in rows {
+        sheet.write_with_format(r, 0, &row.employee_no, &cell)?;
+        sheet.write_with_format(r, 1, row.name.as_deref().unwrap_or(""), &cell)?;
+        sheet.write_number_with_format(r, 2, row.month_count, &cell)?;
+        sheet.write_number_with_format(r, 3, row.total_gross, &money)?;
+        sheet.write_number_with_format(r, 4, row.total_ss_personal, &money)?;
+        sheet.write_number_with_format(r, 5, row.total_hf_personal, &money)?;
+        sheet.write_number_with_format(r, 6, row.total_special_deduction, &money)?;
+        sheet.write_number_with_format(r, 7, row.total_tax_withheld, &money)?;
+        sheet.write_number_with_format(r, 8, row.annual_tax_due, &money)?;
+        sheet.write_number_with_format(r, 9, row.difference, &money)?;
+        r += 1;
+    }
+    for col in 0..10u16 {
+        sheet.set_column_width(col, if col < 2 { 12 } else { 14 })?;
+    }
+    workbook.save(path)?;
+    Ok(())
+}
+
 /// 科目余额表（试算平衡）：借/贷四栏余额 + 合计行。
 pub fn export_trial_balance_excel(report: &TrialBalanceReport, path: &str) -> AppResult<()> {
     let mut workbook = rust_xlsxwriter::Workbook::new();

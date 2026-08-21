@@ -868,6 +868,20 @@ export interface TrialBalanceReport {
   balanced: boolean;
 }
 
+// 个税年度汇总行（第六阶段 Task 10）：difference 负数为多缴
+export interface AnnualTaxSummaryRow {
+  employee_no: string;
+  name?: string | null;
+  month_count: number;
+  total_gross: number;
+  total_ss_personal: number;
+  total_hf_personal: number;
+  total_special_deduction: number;
+  total_tax_withheld: number;
+  annual_tax_due: number;
+  difference: number;
+}
+
 export interface ReportRow {
   key: string;
   label: string;

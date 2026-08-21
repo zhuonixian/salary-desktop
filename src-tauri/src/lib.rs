@@ -213,6 +213,9 @@ pub fn run() {
         commands::export_financial_report,
         commands::get_trial_balance,
         commands::export_trial_balance,
+        // ===== 个税年度汇总（第六阶段 Task 10） =====
+        commands::get_annual_tax_summary,
+        commands::export_annual_tax_summary,
         // ===== 社保公积金台账（第六阶段 Task 6） =====
         commands::get_social_profiles,
         commands::save_social_profile,

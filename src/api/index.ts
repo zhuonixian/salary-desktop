@@ -70,6 +70,7 @@ import type {
   IncomeStatement,
   CashFlowStatement,
   TrialBalanceReport,
+  AnnualTaxSummaryRow,
   FinancialReportType,
   SocialInsuranceProfile,
   SocialInsuranceProfileInput,
@@ -401,6 +402,10 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
         balanced: true,
       };
     case 'export_trial_balance':
+      return '';
+    case 'get_annual_tax_summary':
+      return [];
+    case 'export_annual_tax_summary':
       return '';
     case 'create_bank_manual_voucher':
       throw new Error('预览模式不支持生成凭证，请在桌面应用中操作');
@@ -1234,6 +1239,16 @@ export async function exportTrialBalance(
   path: string,
 ): Promise<string> {
   return invoke<string>('export_trial_balance', { fromMonth, toMonth, path });
+}
+
+// ==================== 个税年度汇总（第六阶段 Task 10） ====================
+
+export async function getAnnualTaxSummary(year: number): Promise<AnnualTaxSummaryRow[]> {
+  return invoke<AnnualTaxSummaryRow[]>('get_annual_tax_summary', { year });
+}
+
+export async function exportAnnualTaxSummary(year: number, path: string): Promise<string> {
+  return invoke<string>('export_annual_tax_summary', { year, path });
 }
 
 export async function getSocialProfiles(year: number): Promise<SocialInsuranceProfile[]> {

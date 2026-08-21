@@ -990,6 +990,22 @@ pub struct TrialBalanceReport {
     pub balanced: bool,
 }
 
+/// 个税年度汇总行（第六阶段 Task 10）：按员工聚合全年累计收入/扣除/已预扣，
+/// annual_tax_due 按累计预扣率表计算，difference = annual_tax_due - total_tax_withheld（负数=多缴）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnnualTaxSummaryRow {
+    pub employee_no: String,
+    pub name: Option<String>,
+    pub month_count: i32,
+    pub total_gross: f64,
+    pub total_ss_personal: f64,
+    pub total_hf_personal: f64,
+    pub total_special_deduction: f64,
+    pub total_tax_withheld: f64,
+    pub annual_tax_due: f64,
+    pub difference: f64,
+}
+
 /// 利润表。rows 为固定标准行（空行显示 0）：current=当月发生额，comparative=年初至当月累计。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IncomeStatement {
