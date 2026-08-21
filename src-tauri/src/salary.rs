@@ -129,6 +129,50 @@ fn build_rules_map(conn: &Connection) -> AppResult<std::collections::HashMap<Str
     Ok(map)
 }
 
+/// 累计预扣法：累计应纳税所得额×预扣率-速算扣除-累计已预扣（max 0）。
+/// 历史月份（含旧月度算法结果）自然作为"已预扣"基数，启用当月平滑。
+/// 注意：历史月的专项附加未落库，按当月值×月数近似（员工专项附加年度内不变）。
+pub fn calculate_cumulative_tax(
+    conn: &Connection,
+    employee_no: &str,
+    month: &str,
+    gross: f64,
+    ss_personal: f64,
+    hf_personal: f64,
+    special_deduction: f64,
+    threshold: f64,
+) -> AppResult<f64> {
+    let year_prefix = format!("{}-%", &month[..4]);
+    let (prev_gross, prev_ss, prev_tax, prev_count): (f64, f64, f64, i64) = conn
+        .query_row(
+            "SELECT COALESCE(SUM(gross_salary),0), COALESCE(SUM(social_security_personal + housing_fund_personal),0),
+                    COALESCE(SUM(tax_amount),0), COUNT(*)
+             FROM salary_monthly_results
+             WHERE employee_no = ?1 AND salary_month LIKE ?2 AND salary_month < ?3 AND status != 'void'",
+            params![employee_no, year_prefix, month],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap_or((0.0, 0.0, 0.0, 0));
+    let months = (prev_count + 1) as f64;
+    let cumulative_taxable = (prev_gross + gross)
+        - (prev_ss + ss_personal + hf_personal)
+        - threshold * months
+        - special_deduction * months;
+    if cumulative_taxable <= 0.0 {
+        return Ok(0.0);
+    }
+    let rules = get_cumulative_tax_rules(conn)?;
+    let mut annual_tax = 0.0;
+    for rule in &rules {
+        let max = rule.max_amount.unwrap_or(f64::MAX);
+        if cumulative_taxable > rule.min_amount && cumulative_taxable <= max {
+            annual_tax = (cumulative_taxable * rule.tax_rate - rule.quick_deduction).max(0.0);
+            break;
+        }
+    }
+    Ok((annual_tax - prev_tax).max(0.0))
+}
+
 fn calculate_single_employee(
     month: &str,
     emp: &Employee,
@@ -241,13 +285,17 @@ fn calculate_single_employee(
     let tax_threshold = rules.get("tax_threshold").copied().unwrap_or(5000.0);
     let special_deduction = emp.special_deduction;
 
-    let taxable_income = gross_salary
-        - social_security_personal
-        - housing_fund_personal
-        - tax_threshold
-        - special_deduction;
-
-    let tax_amount = calculate_tax(conn, taxable_income)?;
+    // 个税改累计预扣法：历史已存记录自动作为"已预扣"基数
+    let tax_amount = calculate_cumulative_tax(
+        conn,
+        &emp.employee_no,
+        month,
+        gross_salary,
+        social_security_personal,
+        housing_fund_personal,
+        special_deduction,
+        tax_threshold,
+    )?;
 
     // Other deduction (from existing record if any)
     let other_deduction = 0.0;
@@ -319,6 +367,39 @@ fn calculate_attendance_deduction(
 mod tests {
     use super::*;
     use rusqlite::Connection;
+
+    #[test]
+    fn test_cumulative_tax_january_equals_monthly() {
+        let conn = Connection::open_in_memory().unwrap();
+        create_tables(&conn).unwrap();
+        insert_default_data(&conn).unwrap();
+        // 1 月无历史：累计=当月。收入 105000、无扣除 → 应税 100000 → 100000*0.10-2520=7480（与旧月度算法首月一致）
+        let tax =
+            calculate_cumulative_tax(&conn, "E001", "2026-01", 105000.0, 0.0, 0.0, 0.0, 5000.0)
+                .unwrap();
+        assert_eq!(tax, 7480.0);
+    }
+
+    #[test]
+    fn test_cumulative_tax_progresses_over_months() {
+        let conn = Connection::open_in_memory().unwrap();
+        create_tables(&conn).unwrap();
+        insert_default_data(&conn).unwrap();
+        // 1-6 月已存：每月应税 10000、已预扣每月 10000*0.03=300 → 累计已缴 1800
+        for m in 1..=6 {
+            conn.execute(
+                "INSERT INTO salary_monthly_results (salary_month, employee_no, gross_salary, social_security_personal, housing_fund_personal, tax_amount, status, locked)
+                 VALUES (?1, 'E002', 15000.0, 0.0, 0.0, 300.0, 'approved', 1)",
+                [format!("2026-{m:02}")],
+            )
+            .unwrap();
+        }
+        // 7 月同收入：累计应税 70000 → 70000*0.10-2520=4480；已缴 1800 → 当月 2680
+        let tax =
+            calculate_cumulative_tax(&conn, "E002", "2026-07", 15000.0, 0.0, 0.0, 0.0, 5000.0)
+                .unwrap();
+        assert_eq!(tax, 2680.0);
+    }
 
     fn setup() -> Connection {
         let conn = Connection::open_in_memory().unwrap();

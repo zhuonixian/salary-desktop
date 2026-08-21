@@ -568,6 +568,12 @@ fn migrate_existing_schema(conn: &Connection) -> AppResult<()> {
     )?;
     ensure_column(conn, "reimbursement_claims", "payment_batch_id", "INTEGER")?;
     ensure_column(conn, "bank_transactions", "ignore_reason", "TEXT")?;
+    ensure_column(
+        conn,
+        "tax_rules",
+        "scope",
+        "TEXT NOT NULL DEFAULT 'monthly'",
+    )?;
     ensure_column(conn, "budgets", "remark", "TEXT")?;
     ensure_column(conn, "budgets", "created_at", "TEXT")?;
     ensure_column(conn, "budgets", "updated_at", "TEXT")?;
@@ -655,6 +661,30 @@ pub fn insert_default_data(conn: &Connection) -> AppResult<()> {
         for (min, max, rate, deduction) in &default_tax {
             conn.execute(
                 "INSERT INTO tax_rules (min_amount, max_amount, tax_rate, quick_deduction) VALUES (?1, ?2, ?3, ?4)",
+                params![min, max, rate, deduction],
+            )?;
+        }
+    }
+
+    // 累计预扣率表（scope='cumulative'），用于个税累计预扣法
+    let cumulative_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM tax_rules WHERE scope = 'cumulative'",
+        [],
+        |row| row.get(0),
+    )?;
+    if cumulative_count == 0 {
+        let cumulative_tax = vec![
+            (0.0, 36000.0, 0.03, 0.0),
+            (36000.0, 144000.0, 0.10, 2520.0),
+            (144000.0, 300000.0, 0.20, 16920.0),
+            (300000.0, 420000.0, 0.25, 31920.0),
+            (420000.0, 660000.0, 0.30, 52920.0),
+            (660000.0, 960000.0, 0.35, 85920.0),
+            (960000.0, 999999999.0, 0.45, 181920.0),
+        ];
+        for (min, max, rate, deduction) in &cumulative_tax {
+            conn.execute(
+                "INSERT INTO tax_rules (min_amount, max_amount, tax_rate, quick_deduction, scope) VALUES (?1, ?2, ?3, ?4, 'cumulative')",
                 params![min, max, rate, deduction],
             )?;
         }
@@ -1202,6 +1232,26 @@ pub fn get_tax_rules(conn: &Connection) -> AppResult<Vec<TaxRule>> {
     })?;
 
     rules.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
+/// 累计预扣率表（scope='cumulative'），供个税累计预扣法使用
+pub fn get_cumulative_tax_rules(conn: &Connection) -> AppResult<Vec<TaxRule>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, min_amount, max_amount, tax_rate, quick_deduction FROM tax_rules
+         WHERE scope = 'cumulative' ORDER BY min_amount",
+    )?;
+    let rules = stmt
+        .query_map([], |row| {
+            Ok(TaxRule {
+                id: row.get(0)?,
+                min_amount: row.get(1)?,
+                max_amount: row.get(2)?,
+                tax_rate: row.get(3)?,
+                quick_deduction: row.get(4)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rules)
 }
 
 pub fn update_tax_rule(conn: &Connection, id: i64, data: &TaxRuleInput) -> AppResult<bool> {
