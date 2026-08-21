@@ -608,7 +608,7 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, column_type: &str
     Ok(())
 }
 
-fn insert_default_data(conn: &Connection) -> AppResult<()> {
+pub fn insert_default_data(conn: &Connection) -> AppResult<()> {
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM salary_rules", [], |row| row.get(0))?;
 
     if count == 0 {
@@ -1280,28 +1280,30 @@ pub fn save_salary_result(conn: &Connection, result: &SalaryResult) -> AppResult
                 ));
             }
             conn.execute(
-                "UPDATE salary_monthly_results SET name=?1, department=?2, base_salary=?3, position_salary=?4, performance_salary=?5, overtime_salary=?6, meal_allowance=?7, transport_allowance=?8, other_allowance=?9, gross_salary=?10, social_security_personal=?11, housing_fund_personal=?12, attendance_deduction=?13, tax_amount=?14, other_deduction=?15, net_salary=?16, status=?17, remark=?18, updated_at=?19 WHERE id=?20",
+                "UPDATE salary_monthly_results SET name=?1, department=?2, base_salary=?3, position_salary=?4, performance_salary=?5, overtime_salary=?6, meal_allowance=?7, transport_allowance=?8, other_allowance=?9, gross_salary=?10, social_security_personal=?11, housing_fund_personal=?12, attendance_deduction=?13, tax_amount=?14, other_deduction=?15, net_salary=?16, status=?17, remark=?18, updated_at=?19, social_security_employer=?20, housing_fund_employer=?21 WHERE id=?22",
                 params![
                     result.name, result.department, result.base_salary, result.position_salary,
                     result.performance_salary, result.overtime_salary, result.meal_allowance,
                     result.transport_allowance, result.other_allowance, result.gross_salary,
                     result.social_security_personal, result.housing_fund_personal,
                     result.attendance_deduction, result.tax_amount, result.other_deduction,
-                    result.net_salary, result.status, result.remark, now, existing_id
+                    result.net_salary, result.status, result.remark, now,
+                    result.social_security_employer, result.housing_fund_employer, existing_id
                 ],
             )?;
         }
         Err(_) => {
             conn.execute(
-                "INSERT INTO salary_monthly_results (salary_month, employee_no, name, department, base_salary, position_salary, performance_salary, overtime_salary, meal_allowance, transport_allowance, other_allowance, gross_salary, social_security_personal, housing_fund_personal, attendance_deduction, tax_amount, other_deduction, net_salary, status, locked, remark, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, 0, ?20, ?21, ?22)",
+                "INSERT INTO salary_monthly_results (salary_month, employee_no, name, department, base_salary, position_salary, performance_salary, overtime_salary, meal_allowance, transport_allowance, other_allowance, gross_salary, social_security_personal, housing_fund_personal, attendance_deduction, tax_amount, other_deduction, net_salary, status, locked, remark, created_at, updated_at, social_security_employer, housing_fund_employer)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, 0, ?20, ?21, ?22, ?23, ?24)",
                 params![
                     result.salary_month, result.employee_no, result.name, result.department,
                     result.base_salary, result.position_salary, result.performance_salary,
                     result.overtime_salary, result.meal_allowance, result.transport_allowance,
                     result.other_allowance, result.gross_salary, result.social_security_personal,
                     result.housing_fund_personal, result.attendance_deduction, result.tax_amount,
-                    result.other_deduction, result.net_salary, result.status, result.remark, now, now
+                    result.other_deduction, result.net_salary, result.status, result.remark, now, now,
+                    result.social_security_employer, result.housing_fund_employer
                 ],
             )?;
         }
@@ -1312,7 +1314,7 @@ pub fn save_salary_result(conn: &Connection, result: &SalaryResult) -> AppResult
 
 pub fn get_salary_results(conn: &Connection, month: &str) -> AppResult<Vec<SalaryResult>> {
     let mut stmt = conn.prepare(
-        "SELECT id, salary_month, employee_no, name, department, base_salary, position_salary, performance_salary, overtime_salary, meal_allowance, transport_allowance, other_allowance, gross_salary, social_security_personal, housing_fund_personal, attendance_deduction, tax_amount, other_deduction, net_salary, status, locked, remark, created_at, updated_at FROM salary_monthly_results WHERE salary_month = ?1 ORDER BY id"
+        "SELECT id, salary_month, employee_no, name, department, base_salary, position_salary, performance_salary, overtime_salary, meal_allowance, transport_allowance, other_allowance, gross_salary, social_security_personal, housing_fund_personal, attendance_deduction, tax_amount, other_deduction, net_salary, social_security_employer, housing_fund_employer, status, locked, remark, created_at, updated_at FROM salary_monthly_results WHERE salary_month = ?1 ORDER BY id"
     )?;
 
     let results = stmt.query_map(params![month], |row| {
@@ -1336,11 +1338,13 @@ pub fn get_salary_results(conn: &Connection, month: &str) -> AppResult<Vec<Salar
             tax_amount: row.get(16)?,
             other_deduction: row.get(17)?,
             net_salary: row.get(18)?,
-            status: row.get(19)?,
-            locked: row.get(20)?,
-            remark: row.get(21)?,
-            created_at: row.get(22)?,
-            updated_at: row.get(23)?,
+            social_security_employer: row.get(19)?,
+            housing_fund_employer: row.get(20)?,
+            status: row.get(21)?,
+            locked: row.get(22)?,
+            remark: row.get(23)?,
+            created_at: row.get(24)?,
+            updated_at: row.get(25)?,
         })
     })?;
 
@@ -1364,7 +1368,7 @@ pub fn get_salary_result_by_employee(
     employee_no: &str,
 ) -> AppResult<SalaryResult> {
     conn.query_row(
-        "SELECT id, salary_month, employee_no, name, department, base_salary, position_salary, performance_salary, overtime_salary, meal_allowance, transport_allowance, other_allowance, gross_salary, social_security_personal, housing_fund_personal, attendance_deduction, tax_amount, other_deduction, net_salary, status, locked, remark, created_at, updated_at FROM salary_monthly_results WHERE salary_month = ?1 AND employee_no = ?2",
+        "SELECT id, salary_month, employee_no, name, department, base_salary, position_salary, performance_salary, overtime_salary, meal_allowance, transport_allowance, other_allowance, gross_salary, social_security_personal, housing_fund_personal, attendance_deduction, tax_amount, other_deduction, net_salary, social_security_employer, housing_fund_employer, status, locked, remark, created_at, updated_at FROM salary_monthly_results WHERE salary_month = ?1 AND employee_no = ?2",
         params![month, employee_no],
         |row| {
             Ok(SalaryResult {
@@ -1387,11 +1391,13 @@ pub fn get_salary_result_by_employee(
                 tax_amount: row.get(16)?,
                 other_deduction: row.get(17)?,
                 net_salary: row.get(18)?,
-                status: row.get(19)?,
-                locked: row.get(20)?,
-                remark: row.get(21)?,
-                created_at: row.get(22)?,
-                updated_at: row.get(23)?,
+                social_security_employer: row.get(19)?,
+            housing_fund_employer: row.get(20)?,
+            status: row.get(21)?,
+            locked: row.get(22)?,
+            remark: row.get(23)?,
+            created_at: row.get(24)?,
+            updated_at: row.get(25)?,
             })
         },
     ).map_err(|e| AppError::NotFound(format!("工资结果未找到: {e}")))
@@ -2840,7 +2846,7 @@ pub fn void_payment_batch(
 // ==================== Social Insurance Profiles ====================
 
 /// 基数按上下限 clamp（min/max <= 0 视为不限制）
-fn clamp_base(value: f64, min: f64, max: f64) -> f64 {
+pub fn clamp_base(value: f64, min: f64, max: f64) -> f64 {
     let mut v = value;
     if min > 0.0 && v < min {
         v = min;
@@ -5962,6 +5968,8 @@ pub mod tests {
             tax_amount: 0.0,
             other_deduction: 0.0,
             net_salary: 5000.0,
+            social_security_employer: 0.0,
+            housing_fund_employer: 0.0,
             status: "reviewed".into(),
             locked: 0,
             remark: None,

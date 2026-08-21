@@ -1820,7 +1820,10 @@ pub fn save_social_profile(
     db::log_operation(
         &conn,
         "save_social_profile",
-        &format!("保存社保台账 {}-{}", result.employee_no, result.profile_year),
+        &format!(
+            "保存社保台账 {}-{}",
+            result.employee_no, result.profile_year
+        ),
         "system",
         None,
     )?;
@@ -1834,7 +1837,13 @@ pub fn delete_social_profile(
 ) -> Result<bool, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     let ok = db::delete_social_profile(&conn, id)?;
-    db::log_operation(&conn, "delete_social_profile", &format!("删除社保台账 #{id}"), "system", None)?;
+    db::log_operation(
+        &conn,
+        "delete_social_profile",
+        &format!("删除社保台账 #{id}"),
+        "system",
+        None,
+    )?;
     Ok(ok)
 }
 
@@ -1880,7 +1889,13 @@ pub fn set_social_base_limits(
 ) -> Result<(), AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     db::set_social_base_limits(&conn, ss_min, ss_max, hf_min, hf_max)?;
-    db::log_operation(&conn, "set_social_base_limits", "保存社保基数上下限", "system", None)?;
+    db::log_operation(
+        &conn,
+        "set_social_base_limits",
+        "保存社保基数上下限",
+        "system",
+        None,
+    )?;
     Ok(())
 }
 

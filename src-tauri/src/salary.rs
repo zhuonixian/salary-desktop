@@ -1,4 +1,4 @@
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 
 use crate::db::*;
 use crate::errors::{AppError, AppResult};
@@ -168,19 +168,71 @@ fn calculate_single_employee(
     let social_security_rate = rules.get("social_security_rate").copied().unwrap_or(0.105);
     let housing_fund_rate = rules.get("housing_fund_rate").copied().unwrap_or(0.12);
 
-    let social_security_base = if emp.social_security_base > 0.0 {
-        emp.social_security_base
-    } else {
-        base_salary
-    };
-    let housing_fund_base = if emp.housing_fund_base > 0.0 {
-        emp.housing_fund_base
-    } else {
-        base_salary
+    // 社保公积金：优先取年度台账（基数按上下限 clamp），无台账回退员工基数/全局费率
+    let profile_year: i64 = month.get(0..4).and_then(|y| y.parse().ok()).unwrap_or(0);
+    let profile: Option<SocialInsuranceProfile> = conn
+        .query_row(
+            "SELECT id, employee_no, profile_year, ss_base, hf_base, ss_employer_rate,
+                    ss_personal_rate, hf_employer_rate, hf_personal_rate, remark, created_at, updated_at
+             FROM social_insurance_profiles WHERE employee_no = ?1 AND profile_year = ?2",
+            params![emp.employee_no, profile_year],
+            |r| {
+                Ok(SocialInsuranceProfile {
+                    id: r.get(0)?,
+                    employee_no: r.get(1)?,
+                    profile_year: r.get(2)?,
+                    ss_base: r.get(3)?,
+                    hf_base: r.get(4)?,
+                    ss_employer_rate: r.get(5)?,
+                    ss_personal_rate: r.get(6)?,
+                    hf_employer_rate: r.get(7)?,
+                    hf_personal_rate: r.get(8)?,
+                    remark: r.get(9)?,
+                    created_at: r.get(10)?,
+                    updated_at: r.get(11)?,
+                })
+            },
+        )
+        .ok();
+    let (ss_min, ss_max, hf_min, hf_max) = get_social_base_limits(conn)?;
+    let (
+        social_security_base,
+        housing_fund_base,
+        ss_personal_rate,
+        hf_personal_rate,
+        ss_employer_rate,
+        hf_employer_rate,
+    ) = match &profile {
+        Some(p) => (
+            clamp_base(p.ss_base, ss_min, ss_max),
+            clamp_base(p.hf_base, hf_min, hf_max),
+            p.ss_personal_rate,
+            p.hf_personal_rate,
+            p.ss_employer_rate,
+            p.hf_employer_rate,
+        ),
+        None => (
+            if emp.social_security_base > 0.0 {
+                emp.social_security_base
+            } else {
+                base_salary
+            },
+            if emp.housing_fund_base > 0.0 {
+                emp.housing_fund_base
+            } else {
+                base_salary
+            },
+            social_security_rate,
+            housing_fund_rate,
+            0.0,
+            0.0,
+        ),
     };
 
-    let social_security_personal = social_security_base * social_security_rate;
-    let housing_fund_personal = housing_fund_base * housing_fund_rate;
+    let social_security_personal = social_security_base * ss_personal_rate;
+    let housing_fund_personal = housing_fund_base * hf_personal_rate;
+    let social_security_employer = social_security_base * ss_employer_rate;
+    let housing_fund_employer = housing_fund_base * hf_employer_rate;
 
     // Attendance deduction
     let attendance_deduction = calculate_attendance_deduction(att, daily_salary, rules);
@@ -224,6 +276,8 @@ fn calculate_single_employee(
         gross_salary: (gross_salary * 100.0).round() / 100.0,
         social_security_personal: (social_security_personal * 100.0).round() / 100.0,
         housing_fund_personal: (housing_fund_personal * 100.0).round() / 100.0,
+        social_security_employer: (social_security_employer * 100.0).round() / 100.0,
+        housing_fund_employer: (housing_fund_employer * 100.0).round() / 100.0,
         attendance_deduction: (attendance_deduction * 100.0).round() / 100.0,
         tax_amount: (tax_amount * 100.0).round() / 100.0,
         other_deduction,
@@ -259,4 +313,66 @@ fn calculate_attendance_deduction(
     let absent_deduction = att.absent_days * daily_salary * absent_rate;
 
     late_deduction + early_deduction + personal_deduction + sick_deduction + absent_deduction
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn setup() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        create_tables(&conn).unwrap();
+        insert_default_data(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO employees (employee_no, name, status, base_salary, position_salary, performance_salary, social_security_base, housing_fund_base, special_deduction)
+             VALUES ('E001', '张三', 'active', 10000.0, 0.0, 0.0, 0.0, 0.0, 0.0)",
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn test_salary_uses_profile_and_clamp() {
+        let conn = setup();
+        // 2026 台账：ss_base 8000（超上限 7000 → clamp），单位率 0.24/0.12
+        conn.execute(
+            "INSERT INTO social_insurance_profiles (employee_no, profile_year, ss_base, hf_base, ss_employer_rate, ss_personal_rate, hf_employer_rate, hf_personal_rate)
+             VALUES ('E001', 2026, 8000.0, 8000.0, 0.24, 0.105, 0.12, 0.12)",
+            [],
+        )
+        .unwrap();
+        set_social_base_limits(&conn, 4590.0, 7000.0, 0.0, 0.0).unwrap();
+
+        let results = calculate_monthly_salary("2026-01", &conn).unwrap();
+        assert_eq!(results.len(), 1);
+        let r = &results[0];
+        assert_eq!(r.social_security_personal, 735.0); // 7000 * 0.105
+        assert_eq!(r.social_security_employer, 1680.0); // 7000 * 0.24
+        assert_eq!(r.housing_fund_employer, 960.0); // 8000 * 0.12（hf 无上限）
+        assert_eq!(r.housing_fund_personal, 960.0); // 8000 * 0.12
+
+        // 单位部分随结果落库，可重新读出
+        let saved = get_salary_result_by_employee(&conn, "2026-01", "E001").unwrap();
+        assert_eq!(saved.social_security_employer, 1680.0);
+        assert_eq!(saved.housing_fund_employer, 960.0);
+    }
+
+    #[test]
+    fn test_salary_falls_back_without_profile() {
+        let conn = setup();
+        // 无 2027 台账：基数回退 base_salary，费率回退全局默认，单位部分为 0
+        let results = calculate_monthly_salary("2027-01", &conn).unwrap();
+        assert_eq!(results.len(), 1);
+        let r = &results[0];
+        assert_eq!(r.social_security_personal, 1050.0); // 10000 * 0.105
+        assert_eq!(r.housing_fund_personal, 1200.0); // 10000 * 0.12
+        assert_eq!(r.social_security_employer, 0.0);
+        assert_eq!(r.housing_fund_employer, 0.0);
+
+        let saved = get_salary_result_by_employee(&conn, "2027-01", "E001").unwrap();
+        assert_eq!(saved.social_security_employer, 0.0);
+        assert_eq!(saved.housing_fund_employer, 0.0);
+    }
 }

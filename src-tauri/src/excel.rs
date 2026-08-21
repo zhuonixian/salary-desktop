@@ -1865,7 +1865,9 @@ pub fn export_trial_balance_excel(report: &TrialBalanceReport, path: &str) -> Ap
     let sheet = workbook.add_worksheet();
     sheet.set_name("科目余额表")?;
     let title = rust_xlsxwriter::Format::new().set_bold().set_font_size(14);
-    let header = rust_xlsxwriter::Format::new().set_bold().set_border(rust_xlsxwriter::FormatBorder::Thin);
+    let header = rust_xlsxwriter::Format::new()
+        .set_bold()
+        .set_border(rust_xlsxwriter::FormatBorder::Thin);
     let cell = rust_xlsxwriter::Format::new().set_border(rust_xlsxwriter::FormatBorder::Thin);
     let money = rust_xlsxwriter::Format::new()
         .set_border(rust_xlsxwriter::FormatBorder::Thin)

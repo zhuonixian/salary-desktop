@@ -140,6 +140,8 @@ pub struct SalaryResult {
     pub gross_salary: f64,
     pub social_security_personal: f64,
     pub housing_fund_personal: f64,
+    pub social_security_employer: f64,
+    pub housing_fund_employer: f64,
     pub attendance_deduction: f64,
     pub tax_amount: f64,
     pub other_deduction: f64,
