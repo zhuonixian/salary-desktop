@@ -213,6 +213,13 @@ pub fn run() {
         commands::export_financial_report,
         commands::get_trial_balance,
         commands::export_trial_balance,
+        // ===== 社保公积金台账（第六阶段 Task 6） =====
+        commands::get_social_profiles,
+        commands::save_social_profile,
+        commands::delete_social_profile,
+        commands::copy_social_profiles,
+        commands::get_social_base_limits,
+        commands::set_social_base_limits,
         // ===== Security（Task 6） =====
         security_commands::is_security_initialized,
         security_commands::setup_security,

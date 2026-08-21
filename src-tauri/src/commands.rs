@@ -1799,6 +1799,91 @@ pub fn export_trial_balance(
     Ok(path)
 }
 
+// ===== 社保公积金台账（第六阶段 Task 6） =====
+
+#[tauri::command]
+pub fn get_social_profiles(
+    year: i64,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<SocialInsuranceProfile>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    db::get_social_profiles(&conn, year)
+}
+
+#[tauri::command]
+pub fn save_social_profile(
+    data: SocialInsuranceProfileInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<SocialInsuranceProfile, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let result = db::upsert_social_profile(&conn, &data)?;
+    db::log_operation(
+        &conn,
+        "save_social_profile",
+        &format!("保存社保台账 {}-{}", result.employee_no, result.profile_year),
+        "system",
+        None,
+    )?;
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn delete_social_profile(
+    id: i64,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let ok = db::delete_social_profile(&conn, id)?;
+    db::log_operation(&conn, "delete_social_profile", &format!("删除社保台账 #{id}"), "system", None)?;
+    Ok(ok)
+}
+
+#[tauri::command]
+pub fn copy_social_profiles(
+    from_year: i64,
+    to_year: i64,
+    factor: f64,
+    apply_clamp: bool,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<usize, AppError> {
+    let mut conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    // db 层逐行 INSERT 无事务，命令层用事务包裹保证调基原子性
+    let tx = conn.transaction()?;
+    let n = db::copy_social_profiles(&tx, from_year, to_year, factor, apply_clamp)?;
+    db::log_operation(
+        &tx,
+        "copy_social_profiles",
+        &format!("{from_year} 调基复制到 {to_year} 共 {n} 条"),
+        "system",
+        None,
+    )?;
+    tx.commit()?;
+    Ok(n)
+}
+
+#[tauri::command]
+pub fn get_social_base_limits(
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<f64>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let (a, b, c, d) = db::get_social_base_limits(&conn)?;
+    Ok(vec![a, b, c, d])
+}
+
+#[tauri::command]
+pub fn set_social_base_limits(
+    ss_min: f64,
+    ss_max: f64,
+    hf_min: f64,
+    hf_max: f64,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<(), AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    db::set_social_base_limits(&conn, ss_min, ss_max, hf_min, hf_max)?;
+    db::log_operation(&conn, "set_social_base_limits", "保存社保基数上下限", "system", None)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

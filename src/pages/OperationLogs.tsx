@@ -53,6 +53,10 @@ const operationTypeLabels: Record<string, string> = {
   export_financial_report: '导出财务报表',
   export_trial_balance: '导出科目余额表',
   period_close_vouchers: '年末结转凭证',
+  save_social_profile: '保存社保台账',
+  delete_social_profile: '删除社保台账',
+  copy_social_profiles: '年度调基',
+  set_social_base_limits: '保存基数上下限',
 };
 
 const getOperationLabel = (value?: string) =>

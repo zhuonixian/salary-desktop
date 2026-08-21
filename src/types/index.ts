@@ -904,3 +904,31 @@ export interface CashFlowStatement {
   net_increase: number;
   unclassified: UnclassifiedCashItem[];
 }
+
+export interface SocialInsuranceProfile {
+  id: number;
+  employee_no: string;
+  profile_year: number;
+  ss_base: number;
+  hf_base: number;
+  ss_employer_rate: number;
+  ss_personal_rate: number;
+  hf_employer_rate: number;
+  hf_personal_rate: number;
+  remark: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface SocialInsuranceProfileInput {
+  id?: number;
+  employee_no: string;
+  profile_year: number;
+  ss_base?: number;
+  hf_base?: number;
+  ss_employer_rate?: number;
+  ss_personal_rate?: number;
+  hf_employer_rate?: number;
+  hf_personal_rate?: number;
+  remark?: string;
+}

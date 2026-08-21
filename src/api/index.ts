@@ -71,6 +71,8 @@ import type {
   CashFlowStatement,
   TrialBalanceReport,
   FinancialReportType,
+  SocialInsuranceProfile,
+  SocialInsuranceProfileInput,
 } from '@/types';
 
 type BackendDashboardSummary = {
@@ -403,6 +405,14 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
     case 'create_bank_manual_voucher':
       throw new Error('预览模式不支持生成凭证，请在桌面应用中操作');
     case 'unlock_salary_results':
+      throw new Error('预览模式不支持该操作，请在桌面应用中操作');
+    case 'get_social_profiles':
+      return [];
+    case 'get_social_base_limits':
+      return [0, 0, 0, 0];
+    case 'save_social_profile':
+    case 'copy_social_profiles':
+    case 'set_social_base_limits':
       throw new Error('预览模式不支持该操作，请在桌面应用中操作');
     default:
       if (command.startsWith('get_') || command.startsWith('query_')) return [];
@@ -1224,4 +1234,38 @@ export async function exportTrialBalance(
   path: string,
 ): Promise<string> {
   return invoke<string>('export_trial_balance', { fromMonth, toMonth, path });
+}
+
+export async function getSocialProfiles(year: number): Promise<SocialInsuranceProfile[]> {
+  return invoke<SocialInsuranceProfile[]>('get_social_profiles', { year });
+}
+
+export async function saveSocialProfile(data: SocialInsuranceProfileInput): Promise<SocialInsuranceProfile> {
+  return invoke<SocialInsuranceProfile>('save_social_profile', { data });
+}
+
+export async function deleteSocialProfile(id: number): Promise<boolean> {
+  return invoke<boolean>('delete_social_profile', { id });
+}
+
+export async function copySocialProfiles(
+  fromYear: number,
+  toYear: number,
+  factor: number,
+  applyClamp: boolean,
+): Promise<number> {
+  return invoke<number>('copy_social_profiles', { fromYear, toYear, factor, applyClamp });
+}
+
+export async function getSocialBaseLimits(): Promise<number[]> {
+  return invoke<number[]>('get_social_base_limits');
+}
+
+export async function setSocialBaseLimits(
+  ssMin: number,
+  ssMax: number,
+  hfMin: number,
+  hfMax: number,
+): Promise<void> {
+  await invoke<void>('set_social_base_limits', { ssMin, ssMax, hfMin, hfMax });
 }

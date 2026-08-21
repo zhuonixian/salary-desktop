@@ -30,6 +30,7 @@ import {
   ProfileOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
+  SafetyCertificateOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import type { Dayjs } from 'dayjs';
@@ -50,6 +51,7 @@ import FinancialAnalysis from '@/pages/FinancialAnalysis';
 import DataSafety from '@/pages/DataSafety';
 import Payments from '@/pages/Payments';
 import BankTransactions from '@/pages/BankTransactions';
+import SocialInsurance from '@/pages/SocialInsurance';
 import ChartOfAccounts from '@/pages/ChartOfAccounts';
 import Vouchers from '@/pages/Vouchers';
 import FinancialReports from '@/pages/FinancialReports';
@@ -90,6 +92,7 @@ const menuItems: MenuProps['items'] = [
       { key: '/salary', label: '工资计算', icon: <CalculatorOutlined /> },
       { key: '/payments', label: '付款批次', icon: <WalletOutlined /> },
       { key: '/bank-transactions', label: '银行流水', icon: <BankOutlined /> },
+      { key: '/social-insurance', label: '社保台账', icon: <SafetyCertificateOutlined /> },
     ],
   },
   {
@@ -228,6 +231,7 @@ const AppLayout: React.FC = () => {
             <Route path="/salary" element={<SalaryCalculate />} />
             <Route path="/payments" element={<Payments />} />
             <Route path="/bank-transactions" element={<BankTransactions />} />
+            <Route path="/social-insurance" element={<SocialInsurance />} />
             <Route path="/accounts" element={<ChartOfAccounts />} />
             <Route path="/vouchers" element={<Vouchers />} />
             <Route path="/reports" element={<FinancialReports />} />
