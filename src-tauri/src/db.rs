@@ -357,7 +357,7 @@ pub fn create_tables(conn: &Connection) -> AppResult<()> {
             belong_month TEXT NOT NULL,
             source_type TEXT NOT NULL CHECK (source_type IN (
                 'salary_accrual','salary_payment','reimbursement_accrual',
-                'reimbursement_payment','invoice_expense','bank_manual')),
+                'reimbursement_payment','invoice_expense','bank_manual','period_close')),
             source_id INTEGER NOT NULL,
             total_amount REAL NOT NULL DEFAULT 0,
             status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','void')),

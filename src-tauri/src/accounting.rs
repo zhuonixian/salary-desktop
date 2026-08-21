@@ -390,6 +390,139 @@ pub fn void_vouchers_for_source(
     )?)
 }
 
+/// 年末结转：12 月月结时调用。凭证① 各损益科目余额 → 3103；凭证② 3103 余额 → 3104。
+/// source_type='period_close'，凭证① source_id=YYYYMM*10+1、凭证② YYYYMM*10+2（避开部分唯一索引）。
+/// 非损益凭证、全年损益净额为零或非 12 月返回 0；该月已有 active period_close 凭证时幂等返回 0。
+/// 报表口径统一排除 period_close（见 compute_balances / profit_loss_amounts / build_cash_flow_statement）。
+pub fn generate_period_close_vouchers(conn: &Connection, month: &str) -> AppResult<usize> {
+    if !month.ends_with("-12") {
+        return Ok(0);
+    }
+    // 幂等：该月已有 active period_close 凭证则跳过（避免撞部分唯一索引报错）
+    let exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM vouchers
+         WHERE source_type='period_close' AND belong_month=?1 AND status='active'",
+        params![month],
+        |r| r.get(0),
+    )?;
+    if exists > 0 {
+        return Ok(0);
+    }
+    // 全年（启用月~12 月）各损益科目净额（排除已有 period_close）
+    let open_month = opening_month(conn).unwrap_or_else(|| format!("{}-01", &month[..4]));
+    let mut stmt = conn.prepare(
+        "SELECT vl.account_code, SUM(vl.debit_amount - vl.credit_amount)
+         FROM voucher_lines vl JOIN vouchers v ON v.id = vl.voucher_id
+         WHERE v.belong_month >= ?1 AND v.belong_month <= ?2 AND v.status = 'active'
+           AND v.source_type != 'period_close'
+           AND vl.account_code IN (SELECT code FROM gl_accounts WHERE category = 'profit_loss')
+         GROUP BY vl.account_code",
+    )?;
+    let nets = stmt
+        .query_map(params![open_month, month], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+    let month_id: i64 = month.replace('-', "").parse().unwrap_or(0);
+    let mut created = 0;
+    let net_total: f64 = nets.iter().map(|(_, v)| v).sum();
+    if !nets.is_empty() {
+        // 凭证①：净额 = 借-贷。收入类为贷方余额（净额<0）→ 借记结平；
+        // 费用类为借方余额（净额>0）→ 贷记结平；差额记 3103（贷为利润、借为亏损）
+        let mut lines: Vec<VoucherLineDraft> = Vec::new();
+        for (code, net) in &nets {
+            if *net < 0.0 {
+                lines.push(VoucherLineDraft {
+                    account_code: code.clone(),
+                    debit_amount: -*net,
+                    credit_amount: 0.0,
+                    summary: Some(format!("{month} 年末结转损益（{code}）")),
+                });
+            } else if *net > 0.0 {
+                lines.push(VoucherLineDraft {
+                    account_code: code.clone(),
+                    debit_amount: 0.0,
+                    credit_amount: *net,
+                    summary: Some(format!("{month} 年末结转损益（{code}）")),
+                });
+            }
+        }
+        if net_total <= 0.0 {
+            lines.push(VoucherLineDraft {
+                account_code: "3103".into(),
+                debit_amount: 0.0,
+                credit_amount: -net_total,
+                summary: Some(format!("{month} 结转本年利润")),
+            });
+        } else {
+            lines.push(VoucherLineDraft {
+                account_code: "3103".into(),
+                debit_amount: net_total,
+                credit_amount: 0.0,
+                summary: Some(format!("{month} 结转本年亏损")),
+            });
+        }
+        insert_voucher(
+            conn,
+            &VoucherDraft {
+                belong_month: month.to_string(),
+                voucher_date: format!("{month}-31"),
+                source_type: "period_close".into(),
+                source_id: month_id * 10 + 1,
+                remark: Some(format!("{month} 年末损益结转")),
+                lines,
+            },
+        )?;
+        created += 1;
+    }
+    if net_total.abs() >= 0.005 {
+        // 凭证②：3103 余额 → 3104（净利润时净额<0、3103 为贷方余额 → 借 3103 / 贷 3104；亏损反向）
+        let (debit_code, credit_code) = if net_total <= 0.0 {
+            ("3103", "3104")
+        } else {
+            ("3104", "3103")
+        };
+        let amount = net_total.abs();
+        insert_voucher(
+            conn,
+            &VoucherDraft {
+                belong_month: month.to_string(),
+                voucher_date: format!("{month}-31"),
+                source_type: "period_close".into(),
+                source_id: month_id * 10 + 2,
+                remark: Some(format!("{month} 本年利润结转未分配利润")),
+                lines: vec![
+                    VoucherLineDraft {
+                        account_code: debit_code.into(),
+                        debit_amount: amount,
+                        credit_amount: 0.0,
+                        summary: Some(format!("{month} 结转未分配利润")),
+                    },
+                    VoucherLineDraft {
+                        account_code: credit_code.into(),
+                        debit_amount: 0.0,
+                        credit_amount: amount,
+                        summary: Some(format!("{month} 结转未分配利润")),
+                    },
+                ],
+            },
+        )?;
+        created += 1;
+    }
+    Ok(created)
+}
+
+/// 反月结联动：作废该月全部 period_close 凭证（按 belong_month + source_type 批量，覆盖两张）。
+pub fn void_period_close_vouchers(conn: &Connection, month: &str) -> AppResult<usize> {
+    let n = conn.execute(
+        "UPDATE vouchers SET status='void', updated_at=?2
+         WHERE source_type='period_close' AND belong_month=?1 AND status='active'",
+        params![month, Utc::now().to_rfc3339()],
+    )?;
+    Ok(n)
+}
+
 pub fn generate_salary_accrual_vouchers(conn: &Connection, month: &str) -> AppResult<usize> {
     let mut stmt = conn.prepare(
         "SELECT id, name, department, gross_salary, attendance_deduction, other_deduction
@@ -1015,6 +1148,7 @@ fn compute_balances(conn: &Connection, month: &str) -> AppResult<Vec<AccountBala
                 "SELECT vl.account_code, SUM(vl.debit_amount), SUM(vl.credit_amount)
                  FROM voucher_lines vl JOIN vouchers v ON v.id = vl.voucher_id
                  WHERE v.belong_month >= ?1 AND v.belong_month < ?2 AND v.status = 'active'
+                   AND v.source_type != 'period_close'
                  GROUP BY vl.account_code",
             )?;
             let rows = stmt.query_map(params![open_month, month], |r| {
@@ -1038,6 +1172,7 @@ fn compute_balances(conn: &Connection, month: &str) -> AppResult<Vec<AccountBala
         "SELECT vl.account_code, SUM(vl.debit_amount), SUM(vl.credit_amount)
          FROM voucher_lines vl JOIN vouchers v ON v.id = vl.voucher_id
          WHERE v.belong_month = ?1 AND v.status = 'active'
+           AND v.source_type != 'period_close'
          GROUP BY vl.account_code",
     )?;
     let rows = stmt.query_map(params![month], |r| {
@@ -1236,6 +1371,7 @@ fn profit_loss_amounts(
         "SELECT vl.account_code, SUM(vl.credit_amount - vl.debit_amount)
          FROM voucher_lines vl JOIN vouchers v ON v.id = vl.voucher_id
          WHERE v.belong_month = ?1 AND v.status = 'active'
+           AND v.source_type != 'period_close'
            AND vl.account_code IN (SELECT code FROM gl_accounts WHERE category = 'profit_loss')
          GROUP BY vl.account_code",
     )?;
@@ -1253,6 +1389,7 @@ fn profit_loss_amounts(
         "SELECT vl.account_code, SUM(vl.credit_amount - vl.debit_amount)
          FROM voucher_lines vl JOIN vouchers v ON v.id = vl.voucher_id
          WHERE v.belong_month >= ?1 AND v.belong_month <= ?2 AND v.status = 'active'
+           AND v.source_type != 'period_close'
            AND vl.account_code IN (SELECT code FROM gl_accounts WHERE category = 'profit_loss')
          GROUP BY vl.account_code",
     )?;
@@ -1508,6 +1645,10 @@ pub fn build_cash_flow_statement(conn: &Connection, month: &str) -> AppResult<Ca
     let mut unclassified: Vec<UnclassifiedCashItem> = Vec::new();
     let cfc_map = cash_flow_categories(conn)?;
     for v in &vouchers {
+        // 年末结转凭证不参与现金流量表（口径统一排除 period_close）
+        if v.source_type == "period_close" {
+            continue;
+        }
         // 现金行净流入（借方为正、贷方为负）；无现金行的凭证不参与
         let cash_net: f64 = v
             .lines
@@ -3698,5 +3839,66 @@ mod tests {
         let report = build_trial_balance(&conn, "2025-01", "2025-01").unwrap();
         assert!(!report.enabled);
         assert!(report.rows.is_empty());
+    }
+
+    // ==================== 年末结转凭证（Task 3） ====================
+
+    #[test]
+    fn test_period_close_vouchers() {
+        let conn = setup();
+        // 启用月 2025-01 + 收入 6001 贷 1000 / 费用 6602 借 400 的凭证
+        conn.execute("INSERT INTO opening_balances (month, account_code, debit_amount, credit_amount) VALUES ('2025-01', '1001', 0.0, 0.0)", []).unwrap();
+        conn.execute("INSERT INTO vouchers (voucher_no, voucher_date, belong_month, source_type, source_id, total_amount, status) VALUES ('记-202512-001', '2025-12-05', '2025-12', 'bank_manual', 1, 1000.0, 'active')", []).unwrap();
+        let vid: i64 = conn
+            .query_row(
+                "SELECT id FROM vouchers WHERE voucher_no='记-202512-001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        conn.execute("INSERT INTO voucher_lines (voucher_id, account_code, debit_amount, credit_amount) VALUES (?1, '6001', 0.0, 1000.0)", [vid]).unwrap();
+        conn.execute("INSERT INTO voucher_lines (voucher_id, account_code, debit_amount, credit_amount) VALUES (?1, '1001', 1000.0, 0.0)", [vid]).unwrap();
+        conn.execute("INSERT INTO vouchers (voucher_no, voucher_date, belong_month, source_type, source_id, total_amount, status) VALUES ('记-202512-002', '2025-12-06', '2025-12', 'bank_manual', 2, 400.0, 'active')", []).unwrap();
+        let vid2: i64 = conn
+            .query_row(
+                "SELECT id FROM vouchers WHERE voucher_no='记-202512-002'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        conn.execute("INSERT INTO voucher_lines (voucher_id, account_code, debit_amount, credit_amount) VALUES (?1, '6602', 400.0, 0.0)", [vid2]).unwrap();
+        conn.execute("INSERT INTO voucher_lines (voucher_id, account_code, debit_amount, credit_amount) VALUES (?1, '1001', 0.0, 400.0)", [vid2]).unwrap();
+
+        let n = generate_period_close_vouchers(&conn, "2025-12").unwrap();
+        assert_eq!(n, 2); // 结转损益 + 结转本年利润
+                          // 结转后 3103 余额为 0、3104 余额 600（余额表含全部凭证口径）
+        let tb = build_trial_balance(&conn, "2025-12", "2025-12").unwrap();
+        let p3103 = tb.rows.iter().find(|r| r.code == "3103").unwrap();
+        assert_eq!(p3103.ending_debit, 0.0);
+        assert_eq!(p3103.ending_credit, 0.0);
+        let p3104 = tb.rows.iter().find(|r| r.code == "3104").unwrap();
+        assert_eq!(p3104.ending_credit, 600.0);
+        // 报表口径排除 period_close：利润表累计收入仍 1000、费用 400
+        let income = build_income_statement(&conn, "2025-12").unwrap();
+        let rev = income.rows.iter().find(|r| r.key == "6001").unwrap();
+        assert_eq!(rev.comparative, 1000.0);
+        let exp = income.rows.iter().find(|r| r.key == "6602").unwrap();
+        assert_eq!(exp.comparative, 400.0);
+        // 幂等：该月已有 active period_close 凭证时返回 0
+        let n2 = generate_period_close_vouchers(&conn, "2025-12").unwrap();
+        assert_eq!(n2, 0);
+
+        // 反月结作废
+        let voided = void_period_close_vouchers(&conn, "2025-12").unwrap();
+        assert_eq!(voided, 2);
+    }
+
+    #[test]
+    fn test_period_close_skips_non_december_and_zero() {
+        let conn = setup();
+        conn.execute("INSERT INTO opening_balances (month, account_code, debit_amount, credit_amount) VALUES ('2025-01', '1001', 0.0, 0.0)", []).unwrap();
+        assert_eq!(generate_period_close_vouchers(&conn, "2025-11").unwrap(), 0);
+        assert_eq!(generate_period_close_vouchers(&conn, "2025-12").unwrap(), 0);
+        // 无损益凭证
     }
 }
