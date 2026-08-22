@@ -493,7 +493,17 @@
       <div class="feature">
         <div class="feature-icon">📈</div>
         <div class="feature-name">三大报表 <span class="badge badge-new">新增</span></div>
-        <div class="feature-desc">资产负债表 / 利润表 / 现金流量表一键生成；支持导出 Excel</div>
+        <div class="feature-desc">资产负债表 / 利润表 / 现金流量表一键生成；支持导出 Excel；带上年同期对比</div>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">⚖️</div>
+        <div class="feature-name">账簿与结账 <span class="badge badge-new">新增</span></div>
+        <div class="feature-desc">科目余额表试算平衡；12 月月结自动年末结转损益</div>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">🛡️</div>
+        <div class="feature-name">社保台账 <span class="badge badge-new">新增</span></div>
+        <div class="feature-desc">按员工×年度维护社保公积金基数费率；年度一键调基；单位部分自动入账</div>
       </div>
       <div class="feature">
         <div class="feature-icon">🔒</div>
@@ -544,7 +554,7 @@
     <div class="steps">
       <div class="step">
         <strong>下载安装包</strong>
-        <span class="note">从内部 release 渠道获取 <code>salary-desktop_0.4.x_x64-setup.exe</code>，约 5.2 MB</span>
+        <span class="note">从内部 release 渠道获取 <code>salary-desktop_*_x64-setup.exe</code>（文件名版本号以 release 页面为准），约 5.2 MB</span>
       </div>
       <div class="step">
         <strong>双击运行安装程序</strong>
@@ -571,6 +581,7 @@
     <div class="steps">
       <div class="step"><strong>初始化密码</strong>：首次启动设置启动密码 + 恢复码 + 安全问题</div>
       <div class="step"><strong>配置工资规则</strong>：菜单「系统设置」→ 调整社保比例、起征点、扣款标准、个税税率表</div>
+      <div class="step"><strong>录入社保台账（可选）</strong>：菜单「薪酬核算 → 社保台账」→ 按员工×年度录入基数与费率（不录入则按员工档案基数计算，行为与旧版一致）<span class="badge badge-new">v0.6.0</span></div>
       <div class="step"><strong>导入员工档案</strong>：菜单「人员考勤 → 员工管理」→ 下载模板 → 填写 → 批量导入</div>
       <div class="step"><strong>录入月度考勤</strong>：菜单「考勤管理」→ Excel 导入或「打卡表管理」拍照 OCR</div>
       <div class="step"><strong>计算工资</strong>：菜单「工资计算」→ 选择月份 → 点「一键计算」</div>
@@ -755,8 +766,8 @@
       <tbody>
         <tr><td><strong>社保比例</strong></td><td>养老 / 医疗 / 失业 / 工伤 / 生育，个人与公司分别配置</td><td>养老个人 8%、公司 16%</td></tr>
         <tr><td><strong>公积金比例</strong></td><td>个人与公司分别配置，可设上下限</td><td>各 12%，上限 25201 元</td></tr>
-        <tr><td><strong>个税起征点</strong></td><td>累计预扣预缴税率计算</td><td>5000 元 / 月</td></tr>
-        <tr><td><strong>七级超额累进税率</strong></td><td>国家标准税率表，可按年度更新</td><td>3% / 10% / 20% ...</td></tr>
+        <tr><td><strong>个税起征点</strong></td><td>累计预扣预缴的月度减除费用</td><td>5000 元 / 月</td></tr>
+        <tr><td><strong>累计预扣率表</strong></td><td>七档国家标准预扣率（系统内置），个税按累计预扣法计算 <span class="badge badge-new">v0.6.0</span></td><td>3% ~ 45%</td></tr>
         <tr><td><strong>扣款标准</strong></td><td>迟到、早退、旷工每次扣款金额</td><td>迟到 30 分钟扣 50 元</td></tr>
       </tbody>
     </table>
@@ -768,7 +779,7 @@
     <div class="steps">
       <div class="step"><strong>选择月份</strong>：右上角选择需要计算的月份</div>
       <div class="step"><strong>一键计算</strong>：点「一键计算」按钮，引擎读取全员考勤 + 规则，自动算出应发 / 社保 / 公积金 / 个税 / 实发</div>
-      <div class="step"><strong>查看结果</strong>：表格展示每位员工明细；点击员工行进入详情</div>
+      <div class="step"><strong>查看结果</strong>：表格展示每位员工明细（含社保/公积金的单位与个人两侧）；点击员工行进入详情</div>
       <div class="step"><strong>单人重算</strong>：发现某员工数据异常，修改考勤后点该员工的「重算」按钮（不影响其他人）</div>
       <div class="step"><strong>手工调整</strong>：补贴 / 扣款项可在「其他补助」「其他扣款」列直接编辑，自动重算个税与实发</div>
       <div class="step"><strong>锁定工资</strong>：核对无误点「锁定」，锁定后该月工资不可再修改（防止误改）；发现计算错误需要修改时走「受控解锁」（见下）</div>
@@ -1040,7 +1051,7 @@
       <div class="feature">
         <div class="feature-icon">⚖️</div>
         <div class="feature-name">资产负债表</div>
-        <div class="feature-desc">期末余额 / 年初余额两列；货币资金、未分配利润自动归集；表尾自动校验资产 = 负债 + 权益</div>
+        <div class="feature-desc">期末余额 / 年初余额 / 上年年末三列；货币资金、未分配利润自动归集；表尾自动校验资产 = 负债 + 权益</div>
       </div>
       <div class="feature">
         <div class="feature-icon">💹</div>
@@ -1126,9 +1137,9 @@
     <div class="card-title"><span class="icon">📊</span>报表上年同期对比 <span class="badge badge-new">v0.6.0 新增</span></div>
     <p><strong>路径</strong>：菜单「财务管理 → 财务报表」各 Tab</p>
     <div class="steps">
-      <div class="step"><strong>同期列</strong>：资产负债表新增年初列，利润表 / 现金流量表新增「上年同期」列，便于同比分析</div>
-      <div class="step"><strong>自动隐藏</strong>：上年无数据时自动隐藏同期列，不占版面</div>
-      <div class="step"><strong>口径说明</strong>：上年同期为启用月起累计口径，早于启用月的部分为 0；Excel 导出同步包含同期列</div>
+      <div class="step"><strong>同期列</strong>：资产负债表新增「上年年末」列，利润表 / 现金流量表新增「上年同期」列（上年 1 月~上年同月累计），便于同比分析</div>
+      <div class="step"><strong>无数据提示</strong>：上年无数据（早于启用月）时同期列显示「-」，不报错</div>
+      <div class="step"><strong>口径说明</strong>：利润表同期为启用月起累计口径，早于启用月的部分为 0；Excel 导出同步包含同期列</div>
     </div>
   </div>
 </section>
@@ -1372,11 +1383,15 @@
         <tr><td>考勤管理</td><td>月度考勤数据</td></tr>
         <tr><td>打卡表管理</td><td>OCR 识别打卡表</td></tr>
         <tr><td>OCR 识别中心</td><td>OCR 设置 / 百度 token 配置</td></tr>
-        <tr><td rowspan="3"><strong>薪酬核算</strong></td><td>工资计算</td><td>一键计算 / 单人重算 / 锁定</td></tr>
+        <tr><td rowspan="4"><strong>薪酬核算</strong></td><td>工资计算</td><td>一键计算 / 单人重算 / 锁定 / 工资条 / 个税年度汇总</td></tr>
+        <tr><td>社保台账</td><td>按员工×年度基数费率 / 年度调基 / 上下限</td></tr>
         <tr><td>付款批次</td><td>工资 / 报销付款统一管理</td></tr>
-        <tr><td>银行流水</td><td>导入 / 自动匹配 / 人工对账</td></tr>
+        <tr><td>银行流水</td><td>导入 / 自动匹配 / 人工对账 / 生成凭证</td></tr>
         <tr><td rowspan="2"><strong>票据报销</strong></td><td>发票管理</td><td>OCR 上传 / 去重 / 详情</td></tr>
         <tr><td>报销管理</td><td>报销单审批</td></tr>
+        <tr><td rowspan="3"><strong>财务管理</strong></td><td>科目表</td><td>62 预置科目 / 期初余额 / 映射</td></tr>
+        <tr><td>记账凭证</td><td>自动生成 / 作废联动 / 分录明细</td></tr>
+        <tr><td>财务报表</td><td>三大报表 + 科目余额表 / 同期对比 / Excel</td></tr>
         <tr><td rowspan="3"><strong>输出审计</strong></td><td>导出中心</td><td>工资明细 / 银行代发 / 工资条 / 考勤汇总</td></tr>
         <tr><td>操作日志</td><td>业务 + 安全事件审计</td></tr>
         <tr><td>数据安全</td><td>备份 / 恢复 / 体检 / 压缩</td></tr>
@@ -1426,7 +1441,7 @@
 
 <footer>
   <div class="container">
-    <div>工资核算助手 · 产品使用说明书 · v0.4.3</div>
+    <div>工资核算助手 · 产品使用说明书 · v0.6.0</div>
     <div class="footer-meta">本地单机桌面工具 · 不上云 · 不联网（仅 OCR 时调用百度） · 数据完全自主可控</div>
   </div>
 </footer>
