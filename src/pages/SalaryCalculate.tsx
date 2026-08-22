@@ -320,6 +320,14 @@ const SalaryCalculate: React.FC = () => {
       render: (v: number) => <SensitiveText type="amount" value={v} />,
     },
     {
+      title: '社保(单位)', dataIndex: 'social_insurance_employer', key: 'social_insurance_employer', width: 110, align: 'right' as const,
+      render: (v: number) => <SensitiveText type="amount" value={v} />,
+    },
+    {
+      title: '公积金(单位)', dataIndex: 'housing_fund_employer', key: 'housing_fund_employer', width: 120, align: 'right' as const,
+      render: (v: number) => <SensitiveText type="amount" value={v} />,
+    },
+    {
       title: '考勤扣款', dataIndex: 'attendance_deduction', key: 'attendance_deduction', width: 110, align: 'right' as const,
       render: (v: number) => <SensitiveText type="amount" value={v} />,
     },

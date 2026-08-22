@@ -943,7 +943,8 @@ pub struct VoucherQuery {
 
 /// 报表通用行：current=本期数，comparative=比较期数
 /// （资产负债表为年初数，利润表为启用月至当月累计数，现金流量表不使用 comparative）；
-/// prior_year=上年同期数（资产负债表为上年年末时点数，利润表/现金流量表为上年 1 月~上年同月累计，
+/// prior_year=同期列：资产负债表为上年年末时点；利润表为启用月起至上年同月累计；
+/// 现金流量表为上年 1 月至上年同月累计；
 /// 上年早于启用月时 has_prior_year=false 且全 0）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReportRow {

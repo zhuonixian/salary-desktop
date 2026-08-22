@@ -135,6 +135,8 @@ export interface SalaryResult {
   gross_salary: number;
   social_insurance: number;
   housing_fund: number;
+  social_insurance_employer: number;
+  housing_fund_employer: number;
   attendance_deduction: number;
   income_tax: number;
   other_deduction: number;
@@ -831,6 +833,7 @@ export const VOUCHER_SOURCE_LABEL: Record<string, string> = {
   reimbursement_payment: '报销付款',
   invoice_expense: '发票入账',
   bank_manual: '银行流水',
+  period_close: '年末结转',
 };
 
 export interface VoucherQuery {

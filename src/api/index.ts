@@ -151,7 +151,9 @@ type BackendSalaryResult = {
   other_allowance?: number | null;
   gross_salary?: number | null;
   social_security_personal?: number | null;
+  social_security_employer?: number | null;
   housing_fund_personal?: number | null;
+  housing_fund_employer?: number | null;
   attendance_deduction?: number | null;
   tax_amount?: number | null;
   other_deduction?: number | null;
@@ -518,7 +520,9 @@ const normalizeSalaryStatus = (result: BackendSalaryResult): SalaryResult['statu
 
 const normalizeSalaryResult = (result: BackendSalaryResult): SalaryResult => {
   const socialInsurance = numberOrZero(result.social_security_personal);
+  const socialInsuranceEmployer = numberOrZero(result.social_security_employer);
   const housingFund = numberOrZero(result.housing_fund_personal);
+  const housingFundEmployer = numberOrZero(result.housing_fund_employer);
   const attendanceDeduction = numberOrZero(result.attendance_deduction);
   const incomeTax = numberOrZero(result.tax_amount);
   const otherDeduction = numberOrZero(result.other_deduction);
@@ -539,7 +543,9 @@ const normalizeSalaryResult = (result: BackendSalaryResult): SalaryResult => {
     other_allowance: numberOrZero(result.other_allowance),
     gross_salary: numberOrZero(result.gross_salary),
     social_insurance: socialInsurance,
+    social_insurance_employer: socialInsuranceEmployer,
     housing_fund: housingFund,
+    housing_fund_employer: housingFundEmployer,
     attendance_deduction: attendanceDeduction,
     income_tax: incomeTax,
     other_deduction: otherDeduction,

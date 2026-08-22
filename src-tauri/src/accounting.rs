@@ -1762,13 +1762,12 @@ pub fn build_cash_flow_statement(conn: &Connection, month: &str) -> AppResult<Ca
     )?;
     let cfc_map = cash_flow_categories(conn)?;
     let (cash, unclassified) = sum_cash_flow(&vouchers, &cfc_map);
-    // 上年同期：上年 1 月~上年 12 月区间凭证（排除 period_close）；同期不重复提示未分类明细
-    let prior_month = prior_year_month(month, "01");
+    // 上年同期：上年 1 月~上年同月区间凭证（排除 period_close）；同期不重复提示未分类明细
+    let prior_month = prior_year_month(month, month.get(5..).unwrap_or("01"));
     let prior_sums = match &prior_month {
         Some(pm) if month_enabled(conn, pm) => {
-            let year: i64 = month[..4].parse().unwrap();
-            let to = format!("{}-12", year - 1);
-            let prior_vouchers = get_vouchers_range(conn, pm, &to)?;
+            let to = pm.clone();
+            let prior_vouchers = get_vouchers_range(conn, &format!("{}-01", &pm[..4]), &to)?;
             sum_cash_flow(&prior_vouchers, &cfc_map).0
         }
         _ => CashFlowSums::default(),
@@ -2061,7 +2060,7 @@ mod tests {
         let rev24 = income24.rows.iter().find(|r| r.key == "6001").unwrap();
         assert_eq!(rev24.prior_year, 0.0);
 
-        // 现金流量表同期：2025-12 的上年区间 2024 全年，6001 分类 operating → 经营流入 1200
+        // 现金流量表同期：2025-12 的上年区间 2024-01~2024-12，6001 分类 operating → 经营流入 1200
         let cf = build_cash_flow_statement(&conn, "2025-12").unwrap();
         assert!(cf.has_prior_year);
         let op_in = cf
