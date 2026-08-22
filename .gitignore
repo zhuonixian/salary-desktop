@@ -44,3 +44,4 @@ graphify-out/
 
 # Agent scratch
 .gstack/
+.claude/scheduled_tasks.lock
