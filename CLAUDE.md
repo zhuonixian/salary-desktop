@@ -52,6 +52,7 @@ npm run lint                             # ESLint
 - [第三阶段计划](.claude/memory/stage3-local-finance.md) — 本地数据安全、正式月结、付款批次、银行流水、预算异常；完整计划见 `docs/superpowers/plans/2026-08-10-stage3-local-finance.md`
 - [第四阶段安全配置](.claude/memory/stage4-security.md) — 启动密码/锁屏/加密/脱敏/迁移；spec 见 `docs/superpowers/specs/2026-08-10-stage4-security-config-design.md`、plan 见 `docs/superpowers/plans/2026-08-10-stage4-security-config.md`
 - [第五阶段财务专业功能](.claude/memory/stage5-accounting.md) — 科目表、自动凭证、三大报表、Excel 导出；spec 见 `docs/superpowers/specs/2026-08-15-stage5-accounting-reports-design.md`、plan 见 `docs/superpowers/plans/2026-08-15-stage5-accounting-reports.md`
+- [第六阶段财务功能拓展](.claude/memory/stage6-finance-extensions.md) — 科目余额表、年末结转、社保台账、累计预扣、工资条、同期列；spec 见 `docs/superpowers/specs/2026-08-22-stage6-finance-extensions-design.md`、plan 见 `docs/superpowers/plans/2026-08-22-stage6-finance-extensions.md`
 
 ## 第三阶段开发
 
@@ -64,6 +65,10 @@ npm run lint                             # ESLint
 ## 第五阶段开发
 
 第五阶段以财务专业能力（科目表与三大报表）为目标，按凭证落库（事件驱动物化凭证）路线分四批推进：科目与期初 → 凭证引擎与业务挂接 → 报表与导出 → 前端页面与全量回归。开发时先读 `.claude/memory/stage5-accounting.md` 和 `docs/superpowers/plans/2026-08-15-stage5-progress.md`；spec 在 `docs/superpowers/specs/2026-08-15-stage5-accounting-reports-design.md`。涉及多模块开发时用 subagent 按互不重叠文件范围协作，由主 agent 统一合并、测试、commit、push。
+
+## 第六阶段开发
+
+第六阶段以财务功能拓展（账簿与结账闭环、社保公积金全链路、个税累计预扣）为目标，按批次推进：科目余额表与年末结转 → 社保台账与凭证联动 → 个税累计预扣与年度汇总 → 工资条打印 → 报表同期列 → 收尾回归。开发时先读 `.claude/memory/stage6-finance-extensions.md` 和 `docs/superpowers/plans/2026-08-22-stage6-progress.md`；spec 在 `docs/superpowers/specs/2026-08-22-stage6-finance-extensions-design.md`。涉及多模块开发时用 subagent 按互不重叠文件范围协作，由主 agent 统一合并、测试、commit、push。
 
 ## 编码约定
 

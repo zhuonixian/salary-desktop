@@ -402,7 +402,7 @@
     <h1>工资核算助手</h1>
     <p class="subtitle">面向中小微企业的本地工资核算与财务协同桌面工具</p>
     <div class="meta">
-      <div class="meta-item">📦 当前版本：v0.5.2</div>
+      <div class="meta-item">📦 当前版本：v0.6.0</div>
       <div class="meta-item">📅 文档日期：2026-08-15</div>
       <div class="meta-item">💻 适用平台：Windows 10 / 11（64 位）</div>
       <div class="meta-item">👥 适用对象：出纳 / 财务 / 人事</div>
@@ -1067,6 +1067,70 @@
       升级到 v0.5.0 后，启用月之前的历史月份报表为 0、历史发票不会自动补凭证，这是预期行为——从启用月开始正常使用即可。
     </div>
   </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">🧾</span>科目余额表 <span class="badge badge-new">v0.6.0 新增</span></div>
+    <p><strong>路径</strong>：菜单「财务管理 → 财务报表 → 科目余额表」Tab</p>
+    <div class="steps">
+      <div class="step"><strong>选择区间</strong>：选起止月份，展示各科目的期初余额、本期发生（借/贷）、期末余额</div>
+      <div class="step"><strong>试算平衡</strong>：借贷合计自动校验，不平衡时红色提示，先查凭证是否被手工改动</div>
+      <div class="step"><strong>含结转凭证</strong>：余额表反映真实账面（含年末结转凭证），与三大报表口径不同属预期</div>
+      <div class="step"><strong>Excel 导出</strong>：点「导出」生成 xlsx，文件名如 科目余额表_202601-202612.xlsx</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">📅</span>年末结转 <span class="badge badge-new">v0.6.0 新增</span></div>
+    <p><strong>路径</strong>：月结工作台，12 月正式月结时自动触发</p>
+    <div class="steps">
+      <div class="step"><strong>自动结转</strong>：12 月正式月结自动生成两张结转凭证——损益类科目 → 本年利润、本年利润 → 未分配利润</div>
+      <div class="step"><strong>检查项提示</strong>：12 月月结时工作台显示「年末结转」检查项，确认后一并完成</div>
+      <div class="step"><strong>反月结同步作废</strong>：12 月反月结时结转凭证在同一事务内自动作废，不会留下残账</div>
+      <div class="step"><strong>报表口径</strong>：利润表等计算已自动排除结转分录，本年累计不会因结转归零</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">🛡️</span>社保公积金台账 <span class="badge badge-new">v0.6.0 新增</span></div>
+    <p><strong>路径</strong>：菜单「工资核算 → 社保台账」（按员工 × 年度维护）</p>
+    <div class="steps">
+      <div class="step"><strong>录入基数费率</strong>：为员工录入当年社保/公积金基数与个人、单位四方费率</div>
+      <div class="step"><strong>年度调基</strong>：新年度一键复制上年基数 × 调整系数，并按上下限自动封顶保底；目标年度已有数据时拒绝执行</div>
+      <div class="step"><strong>上下限配置</strong>：基数上下限在设置中维护，0 表示不限制</div>
+      <div class="step"><strong>自动挂接</strong>：有台账的员工工资计算自动取台账（含单位部分）；无台账回退员工档案基数，行为与旧版一致</div>
+      <div class="step"><strong>凭证联动</strong>：工资计提凭证按全额成本口径生成，单位社保公积金计入费用，代扣部分单列分录</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">🧮</span>个税累计预扣与年度汇总 <span class="badge badge-new">v0.6.0 新增</span></div>
+    <p><strong>路径</strong>：工资核算页 →「个税年度汇总」按钮</p>
+    <div class="steps">
+      <div class="step"><strong>累计预扣法</strong>：个税按累计预扣法计算（当年累计应纳税所得额套预扣率表，减累计已预扣），切换前已存的税额自动视为已预扣基数，无需迁移</div>
+      <div class="step"><strong>年度汇总</strong>：选年度查看每位员工的月度收入、扣除、累计预扣明细，可导出 Excel</div>
+      <div class="step"><strong>提示</strong>：历史月份按当时月度算法的税额参与抵减，不重算历史</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">🖨️</span>工资条预览与打印 <span class="badge badge-new">v0.6.0 新增</span></div>
+    <p><strong>路径</strong>：工资核算页计算结果出来后 →「工资条」按钮</p>
+    <div class="steps">
+      <div class="step"><strong>敏感解锁</strong>：工资条含明文金额，需先通过敏感数据解锁（5 分钟全局窗口）</div>
+      <div class="step"><strong>预览</strong>：逐员工卡片式预览工资条（各项发放与扣款明细）</div>
+      <div class="step"><strong>打印</strong>：调起系统打印对话框，可打印或另存为 PDF 分发</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">📊</span>报表上年同期对比 <span class="badge badge-new">v0.6.0 新增</span></div>
+    <p><strong>路径</strong>：菜单「财务管理 → 财务报表」各 Tab</p>
+    <div class="steps">
+      <div class="step"><strong>同期列</strong>：资产负债表新增年初列，利润表 / 现金流量表新增「上年同期」列，便于同比分析</div>
+      <div class="step"><strong>自动隐藏</strong>：上年无数据时自动隐藏同期列，不占版面</div>
+      <div class="step"><strong>口径说明</strong>：上年同期为启用月起累计口径，早于启用月的部分为 0；Excel 导出同步包含同期列</div>
+    </div>
+  </div>
 </section>
 
 <!-- ==================== 11. 数据安全 ==================== -->
@@ -1327,6 +1391,7 @@
     <table>
       <thead><tr><th>版本</th><th>主要能力</th></tr></thead>
       <tbody>
+        <tr><td><strong>v0.6.0</strong></td><td>财务功能拓展（科目余额表 / 年末结转 / 社保台账 / 累计预扣 / 工资条 / 同期列）</td></tr>
         <tr><td><strong>v0.4.x</strong></td><td>安全配置（启动密码 / 锁屏 / 加密 / 脱敏）</td></tr>
         <tr><td><strong>v0.3.x</strong></td><td>本地财务管理（数据安全 / 月结 / 付款 / 银行流水 / 预算）</td></tr>
         <tr><td><strong>v0.2.x</strong></td><td>发票管理（OCR / 去重 / 报销）</td></tr>
