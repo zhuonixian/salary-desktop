@@ -154,6 +154,7 @@ function ResetPasswordModal(props: ResetPasswordModalProps) {
       title="找回密码"
       destroyOnClose
       maskClosable={false}
+      zIndex={10000}
     >
       <Tabs
         activeKey={tab}

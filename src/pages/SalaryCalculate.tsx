@@ -589,7 +589,7 @@ const SalaryCalculate: React.FC = () => {
           <Alert
             type="warning"
             showIcon
-            message="工资条含明文金额，请先解锁敏感数据（点击任意金额的眼睛图标解锁）"
+            message="金额已脱敏。请先解锁敏感数据（点击任意金额的眼睛图标解锁）查看明文并打印"
             style={{ marginBottom: 16 }}
           />
         )}
@@ -612,14 +612,14 @@ const SalaryCalculate: React.FC = () => {
                     <tr key={label}>
                       <td style={{ border: '1px solid #d9d9d9', padding: '2px 8px', width: '50%' }}>{label}</td>
                       <td style={{ border: '1px solid #d9d9d9', padding: '2px 8px', textAlign: 'right' }}>
-                        {fmtMoney(value)}
+                        {isSensitiveRevealed ? fmtMoney(value) : '¥ ****'}
                       </td>
                     </tr>
                   ))}
                   <tr>
                     <td style={{ border: '1px solid #333', padding: '4px 8px', fontWeight: 700 }}>实发工资</td>
                     <td style={{ border: '1px solid #333', padding: '4px 8px', textAlign: 'right', fontWeight: 700 }}>
-                      {fmtMoney(r.net_salary)}
+                      {isSensitiveRevealed ? fmtMoney(r.net_salary) : '¥ ****'}
                     </td>
                   </tr>
                 </tbody>
