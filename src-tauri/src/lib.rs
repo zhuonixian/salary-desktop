@@ -163,6 +163,7 @@ pub fn run() {
         commands::mark_payment_batch_paid,
         commands::void_payment_batch,
         commands::update_payment_batch_remark,
+        commands::preview_bank_transaction_import,
         commands::import_bank_transactions_file,
         commands::query_bank_transactions,
         commands::auto_match_bank_transactions,

@@ -986,13 +986,32 @@ pub fn update_payment_batch_remark(
     Ok(batch)
 }
 
+/// 银行流水导入预览（Task 11，spec 4.8）：解析结果先行展示，确认后才入库；只读不落库
+#[tauri::command]
+pub fn preview_bank_transaction_import(
+    path: String,
+    fund_account_id: i64,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<BankImportPreview, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    db::preview_bank_transaction_import(&conn, &path, fund_account_id)
+}
+
+/// 银行流水导入：必须指定 bank/third_party 资金账户（spec 4.8）。
+/// 前端应先 preview 确认，本命令按行落库（重复行跳过、月结行拦截进 errors）。
 #[tauri::command]
 pub fn import_bank_transactions_file(
     path: String,
+    fund_account_id: i64,
     state: tauri::State<'_, Mutex<Connection>>,
 ) -> Result<ImportResult, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
-    let transactions = excel::read_bank_transactions_file(&path)?;
+    // 账户前置校验（现金/停用直接失败，不进入逐行循环）
+    let account = db::ensure_bank_import_account(&conn, fund_account_id)?;
+    let mut transactions = excel::read_bank_transactions_file(&path)?;
+    for tx in &mut transactions {
+        tx.fund_account_id = Some(fund_account_id);
+    }
     let total = transactions.len() as i32;
     let mut imported = 0;
     let mut skipped = 0;
@@ -1023,7 +1042,10 @@ pub fn import_bank_transactions_file(
     db::log_operation(
         &conn,
         "import_bank_transactions",
-        &format!("导入银行流水: 总{total}, 成功{imported}, 跳过{skipped}"),
+        &format!(
+            "导入银行流水[账户{}]: 总{total}, 成功{imported}, 跳过{skipped}",
+            account.name
+        ),
         "system",
         Some(&path),
     )?;

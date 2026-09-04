@@ -231,7 +231,18 @@ pub fn read_attendance_excel(path: &str, month: &str) -> AppResult<Vec<Attendanc
 
 // ==================== Bank Transaction Import ====================
 
+/// 银行流水文件解析结果：表头（字段识别展示）+ 解析出的流水行
+pub struct BankTransactionFileContent {
+    pub headers: Vec<String>,
+    pub transactions: Vec<BankTransaction>,
+}
+
 pub fn read_bank_transactions_file(path: &str) -> AppResult<Vec<BankTransaction>> {
+    Ok(read_bank_transactions_file_content(path)?.transactions)
+}
+
+/// 解析流水文件（CSV/Excel），同时返回表头供导入预览做字段识别（Task 11）
+pub fn read_bank_transactions_file_content(path: &str) -> AppResult<BankTransactionFileContent> {
     let ext = Path::new(path)
         .extension()
         .and_then(|value| value.to_str())
@@ -244,7 +255,7 @@ pub fn read_bank_transactions_file(path: &str) -> AppResult<Vec<BankTransaction>
     }
 }
 
-fn read_bank_transactions_excel(path: &str) -> AppResult<Vec<BankTransaction>> {
+fn read_bank_transactions_excel(path: &str) -> AppResult<BankTransactionFileContent> {
     let mut workbook = open_workbook_auto(path)?;
     let sheet_names = workbook.sheet_names().to_vec();
     if sheet_names.is_empty() {
@@ -253,29 +264,45 @@ fn read_bank_transactions_excel(path: &str) -> AppResult<Vec<BankTransaction>> {
 
     let range = workbook.worksheet_range(&sheet_names[0])?;
     let mut rows = range.rows();
-    let headers = if let Some(header_row) = rows.next() {
-        header_map(header_row.iter().map(|cell| cell.to_string()).collect())
+    let (header_map, headers) = if let Some(header_row) = rows.next() {
+        let raw: Vec<String> = header_row.iter().map(|cell| cell.to_string()).collect();
+        (
+            header_map(raw.clone()),
+            raw.into_iter()
+                .map(|h| h.trim().trim_start_matches('\u{feff}').to_string())
+                .collect(),
+        )
     } else {
-        return Ok(Vec::new());
+        return Ok(BankTransactionFileContent {
+            headers: Vec::new(),
+            transactions: Vec::new(),
+        });
     };
 
     let mut transactions = Vec::new();
     for row in rows {
         let values: Vec<String> = row.iter().map(cell_to_string).collect();
-        if let Some(transaction) = bank_transaction_from_values(&headers, &values, path)? {
+        if let Some(transaction) = bank_transaction_from_values(&header_map, &values, path)? {
             transactions.push(transaction);
         }
     }
-    Ok(transactions)
+    Ok(BankTransactionFileContent {
+        headers,
+        transactions,
+    })
 }
 
-fn read_bank_transactions_csv(path: &str) -> AppResult<Vec<BankTransaction>> {
+fn read_bank_transactions_csv(path: &str) -> AppResult<BankTransactionFileContent> {
     let content = fs::read_to_string(path)?;
     let mut lines = content.lines();
     let Some(header_line) = lines.next() else {
-        return Ok(Vec::new());
+        return Ok(BankTransactionFileContent {
+            headers: Vec::new(),
+            transactions: Vec::new(),
+        });
     };
-    let headers = header_map(split_csv_line(header_line));
+    let raw_headers = split_csv_line(header_line);
+    let headers = header_map(raw_headers.clone());
 
     let mut transactions = Vec::new();
     for line in lines {
@@ -287,7 +314,13 @@ fn read_bank_transactions_csv(path: &str) -> AppResult<Vec<BankTransaction>> {
             transactions.push(transaction);
         }
     }
-    Ok(transactions)
+    Ok(BankTransactionFileContent {
+        headers: raw_headers
+            .into_iter()
+            .map(|h| h.trim().trim_start_matches('\u{feff}').to_string())
+            .collect(),
+        transactions,
+    })
 }
 
 fn header_map(headers: Vec<String>) -> HashMap<String, usize> {
@@ -370,6 +403,8 @@ fn bank_transaction_from_values(
         ignore_reason: None,
         imported_file: Some(path.to_string()),
         raw_json,
+        fund_account_id: None,
+        fund_account_name: None,
         matched_batch_id: None,
         matched_batch_no: None,
         matched_batch_type: None,

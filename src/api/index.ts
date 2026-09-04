@@ -34,6 +34,7 @@ import type {
   PaymentBatchVoidInput,
   PaymentItem,
   BankAutoMatchResult,
+  BankImportPreview,
   BankTransaction,
   BankTransactionIgnoreInput,
   BankTransactionMatch,
@@ -1001,6 +1002,21 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
       return { success: true, output_dir: String(args?.dir ?? ''), files: [] };
     case 'get_vouchers':
       return [];
+    case 'preview_bank_transaction_import':
+      return {
+        fund_account_id: Number((args?.fundAccountId as number | undefined) ?? 0),
+        fund_account_name: '演示账户',
+        file_path: String(args?.path ?? ''),
+        headers: ['交易日期', '摘要', '对方户名', '收入', '支出', '余额'],
+        total_rows: 0,
+        ok_rows: 0,
+        duplicate_rows: 0,
+        warning_rows: 0,
+        error_rows: 0,
+        income_total: 0,
+        expense_total: 0,
+        rows: [],
+      };
     case 'import_bank_transactions_file':
       return { success: true, total: 0, imported: 0, skipped: 0, errors: [] };
     case 'query_bank_transactions':
@@ -1383,8 +1399,24 @@ export async function updatePaymentBatchRemark(data: PaymentBatchRemarkInput): P
   return invoke<PaymentBatch>('update_payment_batch_remark', { data });
 }
 
-export async function importBankTransactionsFile(filePath: string): Promise<ImportResult> {
-  const result = await invoke<ImportResult & { skipped?: number }>('import_bank_transactions_file', { path: filePath });
+export async function previewBankTransactionImport(
+  filePath: string,
+  fundAccountId: number,
+): Promise<BankImportPreview> {
+  return invoke<BankImportPreview>('preview_bank_transaction_import', {
+    path: filePath,
+    fundAccountId,
+  });
+}
+
+export async function importBankTransactionsFile(
+  filePath: string,
+  fundAccountId: number,
+): Promise<ImportResult> {
+  const result = await invoke<ImportResult & { skipped?: number }>('import_bank_transactions_file', {
+    path: filePath,
+    fundAccountId,
+  });
   return normalizeImportResult(result);
 }
 

@@ -425,6 +425,10 @@ pub struct BankTransaction {
     pub ignore_reason: Option<String>,
     pub imported_file: Option<String>,
     pub raw_json: Option<String>,
+    /// 归属资金账户（spec 4.8：导入必须指定 bank/third_party 账户；历史 NULL 为待归集）
+    pub fund_account_id: Option<i64>,
+    /// 归属资金账户名称（查询联表回显）
+    pub fund_account_name: Option<String>,
     pub matched_batch_id: Option<i64>,
     pub matched_batch_no: Option<String>,
     pub matched_batch_type: Option<String>,
@@ -440,6 +444,8 @@ pub struct BankTransactionQuery {
     pub belong_month: Option<String>,
     pub status: Option<String>,
     pub keyword: Option<String>,
+    /// 按归属资金账户筛选
+    pub fund_account_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -471,6 +477,47 @@ pub struct BankAutoMatchResult {
     pub matched: i32,
     pub skipped: i32,
     pub errors: Vec<String>,
+}
+
+// ==================== 第七阶段 Task 11：银行流水导入预览（spec 4.8） ====================
+
+/// 导入预览单行：解析结果先行展示，用户确认/修正后才入库
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BankImportPreviewRow {
+    /// 文件内行号（1 起，不含表头）
+    pub row_no: i32,
+    pub transaction_date: String,
+    pub belong_month: String,
+    pub summary: Option<String>,
+    pub counterparty_name: Option<String>,
+    pub counterparty_account: Option<String>,
+    pub income_amount: f64,
+    pub expense_amount: f64,
+    /// 收支方向：income / expense
+    pub direction: String,
+    pub balance: Option<f64>,
+    /// ok / duplicate / warning / error
+    pub row_status: String,
+    /// 重复来源或校验说明
+    pub message: Option<String>,
+}
+
+/// 导入预览结果：行数、金额合计、去重冲突与异常行在落库前可见
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BankImportPreview {
+    pub fund_account_id: i64,
+    pub fund_account_name: String,
+    pub file_path: String,
+    /// 识别到的表头列（字段识别）
+    pub headers: Vec<String>,
+    pub total_rows: i32,
+    pub ok_rows: i32,
+    pub duplicate_rows: i32,
+    pub warning_rows: i32,
+    pub error_rows: i32,
+    pub income_total: f64,
+    pub expense_total: f64,
+    pub rows: Vec<BankImportPreviewRow>,
 }
 
 // ==================== Financial Analysis ====================

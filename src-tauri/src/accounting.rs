@@ -786,15 +786,16 @@ pub fn create_bank_manual_voucher(
     fund_account_id: i64,
     summary: Option<String>,
 ) -> AppResult<Voucher> {
-    let (belong_month, transaction_date, income, expense, status, ignore_reason): (
+    let (belong_month, transaction_date, income, expense, status, ignore_reason, tx_fund_account_id): (
         String,
         String,
         f64,
         f64,
         String,
         Option<String>,
+        Option<i64>,
     ) = conn.query_row(
-        "SELECT belong_month, transaction_date, income_amount, expense_amount, status, ignore_reason FROM bank_transactions WHERE id = ?1",
+        "SELECT belong_month, transaction_date, income_amount, expense_amount, status, ignore_reason, fund_account_id FROM bank_transactions WHERE id = ?1",
         params![transaction_id],
         |r| {
             Ok((
@@ -804,6 +805,7 @@ pub fn create_bank_manual_voucher(
                 r.get(3)?,
                 r.get(4)?,
                 r.get(5)?,
+                r.get(6)?,
             ))
         },
     )?;
@@ -811,6 +813,15 @@ pub fn create_bank_manual_voucher(
         return Err(AppError::General(
             "只有未匹配且未忽略的流水才能生成凭证".into(),
         ));
+    }
+    // 流水已归属账户（导入账户化，Task 11）时资金行必须写同一账户（spec 4.8/6.3 同账户硬条件）；
+    // 待归集旧流水（账户 NULL）保持兼容，允许人工指定账户
+    if let Some(tx_account) = tx_fund_account_id {
+        if tx_account != fund_account_id {
+            return Err(AppError::InvalidParam(
+                "所选资金账户与流水归属账户不一致，请使用流水归属账户入账".into(),
+            ));
+        }
     }
     // 已有 active bank_manual 凭证时先拦截，避免触发部分唯一索引裸 UNIQUE 报错
     let exists: i64 = conn.query_row(
@@ -3629,6 +3640,46 @@ mod tests {
         assert_eq!(active2.len(), 0);
         // 已忽略流水不能再生成凭证
         assert!(create_bank_manual_voucher(&conn, tx_id, "6603", acc, None).is_err());
+    }
+
+    #[test]
+    fn test_bank_manual_voucher_requires_same_account_as_transaction() {
+        // Task 11：流水已归属账户时，bank_manual 凭证资金行必须写同一账户（spec 4.8/6.3 同账户硬条件）
+        let conn = setup();
+        let acc1 = db::tests::make_batch_fund_account(&conn, "BANK-MV1");
+        let acc2 = db::tests::make_batch_fund_account(&conn, "BANK-MV2");
+        conn.execute(
+            "INSERT INTO bank_transactions (transaction_date, belong_month, summary, income_amount, expense_amount, balance, status, ignore_reason, fund_account_id)
+             VALUES ('2026-08-07', '2026-08', '账户内支出', 0.0, 30.0, 9970.0, 'unmatched', NULL, ?1)",
+            params![acc1],
+        )
+        .unwrap();
+        let tx_id: i64 = conn
+            .query_row("SELECT MAX(id) FROM bank_transactions", [], |r| r.get(0))
+            .unwrap();
+
+        // 所选账户与流水归属账户不一致 → 拦截
+        let err = create_bank_manual_voucher(&conn, tx_id, "6603", acc2, None).unwrap_err();
+        assert!(err.to_string().contains("不一致"), "got: {err:?}");
+
+        // 使用流水归属账户 → 成功，资金行写该账户
+        let v = create_bank_manual_voucher(&conn, tx_id, "6603", acc1, None).unwrap();
+        let credit_line = v.lines.iter().find(|l| l.credit_amount > 0.0).unwrap();
+        assert_eq!(credit_line.fund_account_id, Some(acc1));
+
+        // 待归集旧流水（账户 NULL）保持兼容：可用任选账户入账
+        conn.execute(
+            "INSERT INTO bank_transactions (transaction_date, belong_month, summary, income_amount, expense_amount, balance, status, ignore_reason, fund_account_id)
+             VALUES ('2026-08-08', '2026-08', '待归集支出', 0.0, 20.0, 9950.0, 'unmatched', NULL, NULL)",
+            [],
+        )
+        .unwrap();
+        let tx_id2: i64 = conn
+            .query_row("SELECT MAX(id) FROM bank_transactions", [], |r| r.get(0))
+            .unwrap();
+        let v2 = create_bank_manual_voucher(&conn, tx_id2, "6603", acc2, None).unwrap();
+        let credit2 = v2.lines.iter().find(|l| l.credit_amount > 0.0).unwrap();
+        assert_eq!(credit2.fund_account_id, Some(acc2));
     }
 
     #[test]

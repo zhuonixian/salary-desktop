@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  Alert,
   Button,
   Card,
   Col,
@@ -14,11 +15,13 @@ import {
   Statistic,
   Table,
   Tag,
+  Tooltip,
   message,
 } from 'antd';
 import {
   CheckCircleOutlined,
   DisconnectOutlined,
+  FileAddOutlined,
   FileDoneOutlined,
   ImportOutlined,
   ReloadOutlined,
@@ -35,6 +38,7 @@ import {
   getGlAccounts,
   ignoreBankTransaction,
   importBankTransactionsFile,
+  previewBankTransactionImport,
   queryBankTransactions,
   queryPaymentBatches,
 } from '@/api';
@@ -42,6 +46,8 @@ import { SensitiveText } from '@/components/SensitiveText';
 import { SensitiveStatistic } from '@/components/SensitiveStatistic';
 import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
 import type {
+  BankImportPreview,
+  BankImportPreviewRow,
   BankTransaction,
   BankTransactionStatus,
   FundAccount,
@@ -56,6 +62,13 @@ const statusMeta: Record<BankTransactionStatus, { text: string; color: string }>
   ignored: { text: '已忽略', color: 'default' },
 };
 
+const previewStatusMeta: Record<string, { text: string; color: string }> = {
+  ok: { text: '可导入', color: 'green' },
+  duplicate: { text: '重复', color: 'blue' },
+  warning: { text: '余额存疑', color: 'orange' },
+  error: { text: '异常', color: 'red' },
+};
+
 const typeText: Record<PaymentBatchType, string> = {
   salary: '工资',
   reimbursement: '报销',
@@ -68,6 +81,7 @@ const fmtMoney = (value?: number | null) =>
 const BankTransactions: React.FC = () => {
   const { month, setMonth } = useBusinessMonth();
   const [statusFilter, setStatusFilter] = useState<BankTransactionStatus | undefined>(undefined);
+  const [accountFilter, setAccountFilter] = useState<number | undefined>(undefined);
   const [keyword, setKeyword] = useState('');
   const [transactions, setTransactions] = useState<BankTransaction[]>([]);
   const [paidBatches, setPaidBatches] = useState<PaymentBatch[]>([]);
@@ -84,6 +98,12 @@ const BankTransactions: React.FC = () => {
   const [fundAccountOptions, setFundAccountOptions] = useState<FundAccount[]>([]);
   const [fundAccountId, setFundAccountId] = useState<number | undefined>(undefined);
   const [voucherSummary, setVoucherSummary] = useState('');
+  // 导入预览（Task 11）：选账户 → 选文件解析预览 → 确认入库
+  const [importOpen, setImportOpen] = useState(false);
+  const [importAccountId, setImportAccountId] = useState<number | undefined>(undefined);
+  const [importFile, setImportFile] = useState<string | null>(null);
+  const [importPreview, setImportPreview] = useState<BankImportPreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -94,6 +114,7 @@ const BankTransactions: React.FC = () => {
           belong_month: belongMonth,
           status: statusFilter,
           keyword: keyword.trim() || undefined,
+          fund_account_id: accountFilter,
         }),
         queryPaymentBatches({ belong_month: belongMonth, status: 'paid' }),
       ]);
@@ -104,11 +125,20 @@ const BankTransactions: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [keyword, month, statusFilter]);
+  }, [accountFilter, keyword, month, statusFilter]);
 
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  // 银行/第三方支付账户：导入目标与凭证资金行共用（现金账户不可导入银行流水）
+  useEffect(() => {
+    getFundAccounts({ is_active: true })
+      .then((accounts) =>
+        setFundAccountOptions(accounts.filter((a) => ['bank', 'third_party'].includes(a.account_type))),
+      )
+      .catch((e: unknown) => message.error('获取资金账户失败: ' + (e instanceof Error ? e.message : String(e))));
+  }, []);
 
   const summary = useMemo(() => ({
     total: transactions.length,
@@ -117,20 +147,69 @@ const BankTransactions: React.FC = () => {
     expenseAmount: transactions.reduce((sum, item) => sum + item.expense_amount, 0),
   }), [transactions]);
 
-  const handleImport = async () => {
+  // 导入流水三步（spec 4.8）：必选 bank/third_party 账户 → 文件解析预览（不落库）→ 确认导入
+  const openImportModal = () => {
+    setImportAccountId(undefined);
+    setImportFile(null);
+    setImportPreview(null);
+    setImportOpen(true);
+  };
+
+  const runImportPreview = useCallback(async (filePath: string, accountId: number) => {
+    setPreviewLoading(true);
+    try {
+      const preview = await previewBankTransactionImport(filePath, accountId);
+      setImportPreview(preview);
+    } catch (e: unknown) {
+      setImportPreview(null);
+      message.error('解析流水文件失败: ' + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setPreviewLoading(false);
+    }
+  }, []);
+
+  const handleSelectImportFile = async () => {
+    if (!importAccountId) {
+      message.warning('请先选择资金账户');
+      return;
+    }
     const selected = await open({
       filters: [{ name: '银行流水', extensions: ['xlsx', 'xls', 'csv'] }],
       multiple: false,
     });
     if (!selected) return;
+    const filePath = String(selected);
+    setImportFile(filePath);
+    await runImportPreview(filePath, importAccountId);
+  };
+
+  const handleImportAccountChange = (accountId: number) => {
+    setImportAccountId(accountId);
+    // 账户维度参与去重判定，切账户后旧预览失效
+    setImportPreview(null);
+    if (importFile) {
+      void runImportPreview(importFile, accountId);
+    }
+  };
+
+  const handleConfirmImport = async () => {
+    if (!importAccountId || !importFile || !importPreview) {
+      message.warning('请选择账户并解析文件');
+      return;
+    }
+    if (importPreview.error_rows > 0) {
+      message.error('存在异常行（如已月结月份），请先处理后再导入');
+      return;
+    }
     setAction('import');
     try {
-      const result = await importBankTransactionsFile(String(selected));
+      const result = await importBankTransactionsFile(importFile, importAccountId);
       if (result.errors.length > 0) {
-        message.warning(`导入完成：成功 ${result.imported} 条，跳过 ${result.failed} 条`);
+        message.warning(`导入完成：成功 ${result.imported} 条，跳过 ${result.failed} 条（重复或异常）`);
       } else {
         message.success(`导入完成：成功 ${result.imported} 条`);
       }
+      setImportOpen(false);
       await fetchData();
     } catch (e: unknown) {
       message.error('导入银行流水失败: ' + (e instanceof Error ? e.message : String(e)));
@@ -230,12 +309,12 @@ const BankTransactions: React.FC = () => {
 
   // 生成凭证弹窗：仅未匹配且未忽略的流水（后端同口径校验）。
   // 支出流水选借方科目（贷方为所选资金账户科目），收入流水选贷方科目（借方为资金账户科目）。
-  // 资金账户必选（spec 4.7：手工凭证资金行必须带 fund_account_id 辅助核算）。
+  // 资金账户必选（spec 4.7）；已账户化流水锁定为其归属账户（spec 4.8/6.3 同账户硬条件）。
   const isExpenseTx = (tx: BankTransaction | null): boolean => (tx?.expense_amount ?? 0) > 0;
 
   const openVoucherModal = async (tx: BankTransaction) => {
     setVoucherAccountCode(undefined);
-    setFundAccountId(undefined);
+    setFundAccountId(tx.fund_account_id ?? undefined);
     setVoucherSummary(tx.summary || '');
     setVoucherTx(tx);
     if (voucherAccounts.length === 0) {
@@ -243,18 +322,6 @@ const BankTransactions: React.FC = () => {
         setVoucherAccounts((await getGlAccounts()).filter((a) => a.is_active === 1));
       } catch (e: unknown) {
         message.error('获取科目列表失败: ' + (e instanceof Error ? e.message : String(e)));
-      }
-    }
-    if (fundAccountOptions.length === 0) {
-      try {
-        // 银行流水对应的资金账户：银行/第三方支付账户（现金账户不来自流水）
-        setFundAccountOptions(
-          (await getFundAccounts({ is_active: true })).filter((a) =>
-            ['bank', 'third_party'].includes(a.account_type),
-          ),
-        );
-      } catch (e: unknown) {
-        message.error('获取资金账户失败: ' + (e instanceof Error ? e.message : String(e)));
       }
     }
   };
@@ -294,6 +361,21 @@ const BankTransactions: React.FC = () => {
       key: 'status',
       width: 90,
       render: (status: BankTransactionStatus) => <Tag color={statusMeta[status].color}>{statusMeta[status].text}</Tag>,
+    },
+    {
+      title: '资金账户',
+      dataIndex: 'fund_account_name',
+      key: 'fund_account',
+      width: 140,
+      ellipsis: true,
+      render: (_: unknown, tx: BankTransaction) =>
+        tx.fund_account_name ? (
+          tx.fund_account_name
+        ) : (
+          <Tooltip title="历史流水未归集账户，不参与自动匹配">
+            <Tag color="orange">待归集</Tag>
+          </Tooltip>
+        ),
     },
     { title: '摘要', dataIndex: 'summary', key: 'summary', width: 180, ellipsis: true },
     { title: '对方户名', dataIndex: 'counterparty_name', key: 'counterparty_name', width: 140, ellipsis: true },
@@ -413,6 +495,19 @@ const BankTransactions: React.FC = () => {
               { value: 'ignored', label: '已忽略' },
             ]}
           />
+          <Select
+            placeholder="资金账户"
+            allowClear
+            showSearch
+            optionFilterProp="label"
+            value={accountFilter}
+            onChange={(value) => setAccountFilter(value)}
+            style={{ width: 180 }}
+            options={fundAccountOptions.map((a) => ({
+              value: a.id,
+              label: `${a.name}（${a.account_code}）`,
+            }))}
+          />
           <Input
             allowClear
             prefix={<SearchOutlined />}
@@ -424,7 +519,7 @@ const BankTransactions: React.FC = () => {
           <Button icon={<ReloadOutlined />} loading={loading} onClick={fetchData}>
             刷新
           </Button>
-          <Button icon={<ImportOutlined />} loading={action === 'import'} onClick={handleImport}>
+          <Button icon={<ImportOutlined />} loading={action === 'import'} onClick={openImportModal}>
             导入流水
           </Button>
           <Button type="primary" loading={action === 'auto-match'} onClick={handleAutoMatch}>
@@ -455,7 +550,7 @@ const BankTransactions: React.FC = () => {
             columns={columns}
             dataSource={transactions}
             pagination={{ pageSize: 12, showSizeChanger: true }}
-            scroll={{ x: 1520 }}
+            scroll={{ x: 1680 }}
           />
         </Card>
       </Spin>
@@ -549,12 +644,16 @@ const BankTransactions: React.FC = () => {
               placeholder="选择资金账户（资金行辅助核算）"
               value={fundAccountId}
               onChange={setFundAccountId}
+              disabled={!!voucherTx?.fund_account_id}
               style={{ width: '100%' }}
               options={fundAccountOptions.map((a) => ({
                 value: a.id,
                 label: `${a.name}（${a.account_code}）`,
               }))}
             />
+            {voucherTx?.fund_account_id && (
+              <div style={{ color: '#8c8c8c' }}>已账户化流水必须使用其归属账户入账</div>
+            )}
             <Select
               showSearch
               optionFilterProp="label"
@@ -574,6 +673,123 @@ const BankTransactions: React.FC = () => {
             />
           </Space>
         )}
+      </Modal>
+
+      <Modal
+        title="导入银行流水"
+        open={importOpen}
+        width={880}
+        okText="确认导入"
+        cancelText="取消"
+        okButtonProps={{
+          disabled: !importPreview || importPreview.error_rows > 0,
+          icon: <ImportOutlined />,
+        }}
+        confirmLoading={action === 'import'}
+        onOk={handleConfirmImport}
+        onCancel={() => setImportOpen(false)}
+      >
+        <Space direction="vertical" style={{ width: '100%' }} size={12}>
+          <Space wrap>
+            <Select
+              showSearch
+              optionFilterProp="label"
+              placeholder="选择资金账户（必选）"
+              value={importAccountId}
+              onChange={handleImportAccountChange}
+              style={{ width: 260 }}
+              options={fundAccountOptions.map((a) => ({
+                value: a.id,
+                label: `${a.name}（${a.account_code}）`,
+              }))}
+            />
+            <Button
+              icon={<FileAddOutlined />}
+              disabled={!importAccountId}
+              loading={previewLoading}
+              onClick={handleSelectImportFile}
+            >
+              {importFile ? '重新选择文件' : '选择流水文件'}
+            </Button>
+            {importFile && (
+              <span style={{ color: '#8c8c8c' }} title={importFile}>
+                {importFile.split(/[\\/]/).pop()}
+              </span>
+            )}
+          </Space>
+          {importPreview && (
+            <>
+              <Alert
+                type={importPreview.error_rows > 0 ? 'error' : 'info'}
+                showIcon
+                message={`共 ${importPreview.total_rows} 行：可导入 ${importPreview.ok_rows}、重复 ${importPreview.duplicate_rows}（导入时跳过）、余额存疑 ${importPreview.warning_rows}、异常 ${importPreview.error_rows}${importPreview.error_rows > 0 ? '（处理后才能导入）' : ''}`}
+                description={`收入合计 ¥${fmtMoney(importPreview.income_total)}，支出合计 ¥${fmtMoney(importPreview.expense_total)}，归属账户：${importPreview.fund_account_name}。确认后才会写入数据库。`}
+              />
+              <Table
+                size="small"
+                rowKey="row_no"
+                dataSource={importPreview.rows}
+                pagination={importPreview.rows.length > 10 ? { pageSize: 10 } : false}
+                scroll={{ y: 320 }}
+                columns={[
+                  { title: '行号', dataIndex: 'row_no', key: 'row_no', width: 56 },
+                  { title: '交易日期', dataIndex: 'transaction_date', key: 'transaction_date', width: 100 },
+                  { title: '摘要', dataIndex: 'summary', key: 'summary', width: 140, ellipsis: true },
+                  { title: '对方户名', dataIndex: 'counterparty_name', key: 'counterparty_name', width: 110, ellipsis: true },
+                  {
+                    title: '方向',
+                    dataIndex: 'direction',
+                    key: 'direction',
+                    width: 64,
+                    render: (d: string) => (d === 'income' ? '收入' : d === 'expense' ? '支出' : '异常'),
+                  },
+                  {
+                    title: '收入',
+                    dataIndex: 'income_amount',
+                    key: 'income_amount',
+                    width: 100,
+                    align: 'right' as const,
+                    render: (v: number) => (v > 0 ? <SensitiveText type="amount" value={v} /> : '-'),
+                  },
+                  {
+                    title: '支出',
+                    dataIndex: 'expense_amount',
+                    key: 'expense_amount',
+                    width: 100,
+                    align: 'right' as const,
+                    render: (v: number) => (v > 0 ? <SensitiveText type="amount" value={v} /> : '-'),
+                  },
+                  {
+                    title: '余额',
+                    dataIndex: 'balance',
+                    key: 'balance',
+                    width: 110,
+                    align: 'right' as const,
+                    render: (v?: number) => <SensitiveText type="amount" value={v ?? 0} />,
+                  },
+                  {
+                    title: '检查结果',
+                    key: 'row_status',
+                    width: 240,
+                    render: (_: unknown, row: BankImportPreviewRow) => {
+                      const meta = previewStatusMeta[row.row_status] ?? previewStatusMeta.error;
+                      return (
+                        <Space size={6}>
+                          <Tag color={meta.color}>{meta.text}</Tag>
+                          {row.message && (
+                            <Tooltip title={row.message}>
+                              <span style={{ color: '#8c8c8c' }}>{row.message}</span>
+                            </Tooltip>
+                          )}
+                        </Space>
+                      );
+                    },
+                  },
+                ]}
+              />
+            </>
+          )}
+        </Space>
       </Modal>
     </div>
   );

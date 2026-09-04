@@ -442,6 +442,9 @@ export interface BankTransaction {
   ignore_reason?: string;
   imported_file?: string;
   raw_json?: string;
+  /** 归属资金账户（历史 NULL 为待归集） */
+  fund_account_id?: number | null;
+  fund_account_name?: string | null;
   matched_batch_id?: number;
   matched_batch_no?: string;
   matched_batch_type?: PaymentBatchType;
@@ -456,6 +459,7 @@ export interface BankTransactionQuery {
   belong_month?: string;
   status?: BankTransactionStatus;
   keyword?: string;
+  fund_account_id?: number;
 }
 
 export interface BankTransactionMatch {
@@ -483,6 +487,40 @@ export interface BankAutoMatchResult {
   matched: number;
   skipped: number;
   errors: string[];
+}
+
+// ==================== 银行流水导入预览（Task 11） ====================
+
+export interface BankImportPreviewRow {
+  row_no: number;
+  transaction_date: string;
+  belong_month: string;
+  summary?: string;
+  counterparty_name?: string;
+  counterparty_account?: string;
+  income_amount: number;
+  expense_amount: number;
+  /** income / expense */
+  direction: string;
+  balance?: number;
+  /** ok / duplicate / warning / error */
+  row_status: string;
+  message?: string;
+}
+
+export interface BankImportPreview {
+  fund_account_id: number;
+  fund_account_name: string;
+  file_path: string;
+  headers: string[];
+  total_rows: number;
+  ok_rows: number;
+  duplicate_rows: number;
+  warning_rows: number;
+  error_rows: number;
+  income_total: number;
+  expense_total: number;
+  rows: BankImportPreviewRow[];
 }
 
 // ==================== 财务分析 ====================

@@ -3991,6 +3991,8 @@ fn row_to_bank_transaction(row: &rusqlite::Row<'_>) -> rusqlite::Result<BankTran
         matched_amount: row.get(18)?,
         match_score: row.get(19)?,
         match_remark: row.get(20)?,
+        fund_account_id: row.get(21)?,
+        fund_account_name: row.get(22)?,
     })
 }
 
@@ -4041,15 +4043,21 @@ pub fn query_bank_transactions(
         ));
         params_vec.push(Box::new(format!("%{}%", keyword.trim())));
     }
+    if let Some(account_id) = query.fund_account_id {
+        where_clauses.push(format!("t.fund_account_id = ?{idx}"));
+        params_vec.push(Box::new(account_id));
+    }
 
     let sql = format!(
         "SELECT t.id, t.transaction_date, t.belong_month, t.summary, t.counterparty_name,
                 t.counterparty_account, t.income_amount, t.expense_amount, t.balance, t.status,
                 t.ignore_reason, t.imported_file, t.raw_json, t.created_at, t.updated_at,
-                b.id, b.batch_no, b.batch_type, b.total_amount, m.match_score, m.remark
+                b.id, b.batch_no, b.batch_type, b.total_amount, m.match_score, m.remark,
+                t.fund_account_id, fa.name
          FROM bank_transactions t
          LEFT JOIN bank_transaction_matches m ON m.transaction_id = t.id AND m.status = 'active'
          LEFT JOIN payment_batches b ON b.id = m.payment_batch_id
+         LEFT JOIN fund_accounts fa ON fa.id = t.fund_account_id
          WHERE {}
          ORDER BY t.transaction_date DESC, t.id DESC",
         where_clauses.join(" AND ")
@@ -4061,14 +4069,38 @@ pub fn query_bank_transactions(
     rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
 }
 
+/// 流水导入目标账户校验（spec 4.8）：必须存在、启用且为 bank/third_party；现金账户不可导入银行流水
+pub(crate) fn ensure_bank_import_account(
+    conn: &Connection,
+    account_id: i64,
+) -> AppResult<crate::models::FundAccount> {
+    let account = crate::cashier::get_fund_account(conn, account_id)?;
+    if account.account_type == "cash" {
+        return Err(AppError::InvalidParam(
+            "现金账户不能导入银行流水，请选择银行或第三方支付账户".into(),
+        ));
+    }
+    if !account.is_active {
+        return Err(AppError::InvalidParam(format!(
+            "资金账户 {} 已停用，不能导入银行流水",
+            account.account_code
+        )));
+    }
+    Ok(account)
+}
+
 pub fn insert_bank_transaction(conn: &Connection, tx: &BankTransaction) -> AppResult<bool> {
     ensure_month_open(conn, &tx.belong_month)?;
+    if let Some(account_id) = tx.fund_account_id {
+        ensure_bank_import_account(conn, account_id)?;
+    }
     let now = Utc::now().to_rfc3339();
     let inserted = conn.execute(
         "INSERT OR IGNORE INTO bank_transactions
             (transaction_date, belong_month, summary, counterparty_name, counterparty_account,
-             income_amount, expense_amount, balance, status, ignore_reason, imported_file, raw_json, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'unmatched', NULL, ?9, ?10, ?11, ?12)",
+             income_amount, expense_amount, balance, status, ignore_reason, imported_file, raw_json,
+             fund_account_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'unmatched', NULL, ?9, ?10, ?11, ?12, ?13)",
         params![
             tx.transaction_date,
             tx.belong_month,
@@ -4080,6 +4112,7 @@ pub fn insert_bank_transaction(conn: &Connection, tx: &BankTransaction) -> AppRe
             tx.balance,
             tx.imported_file,
             tx.raw_json,
+            tx.fund_account_id,
             now,
             now
         ],
@@ -4097,6 +4130,162 @@ pub fn get_bank_transaction(conn: &Connection, id: i64) -> AppResult<BankTransac
     .into_iter()
     .find(|tx| tx.id == id)
     .ok_or_else(|| AppError::NotFound(format!("银行流水ID={id}未找到")))
+}
+
+/// 银行流水导入预览（spec 4.8/Task 11）：解析结果先行展示，确认后才入库。
+/// 账户必选且须为启用的 bank/third_party 账户；逐行给出收支方向、
+/// 去重冲突（与库内同账户唯一索引口径一致 + 文件内重复）、月结拦截与余额列衔接校验。
+/// 本函数只读，不写库。
+pub fn preview_bank_transaction_import(
+    conn: &Connection,
+    path: &str,
+    fund_account_id: i64,
+) -> AppResult<BankImportPreview> {
+    let account = ensure_bank_import_account(conn, fund_account_id)?;
+    let content = crate::excel::read_bank_transactions_file_content(path)?;
+
+    let mut rows: Vec<BankImportPreviewRow> = Vec::new();
+    let mut ok_rows = 0i32;
+    let mut duplicate_rows = 0i32;
+    let mut warning_rows = 0i32;
+    let mut error_rows = 0i32;
+    let mut income_total = 0.0f64;
+    let mut expense_total = 0.0f64;
+    let mut seen_in_file: std::collections::HashSet<(
+        String,
+        String,
+        String,
+        String,
+        i64,
+        i64,
+        i64,
+    )> = std::collections::HashSet::new();
+
+    for (idx, tx) in content.transactions.iter().enumerate() {
+        let row_no = (idx + 1) as i32;
+        let direction = if tx.income_amount > 0.0 && tx.expense_amount > 0.0 {
+            "invalid"
+        } else if tx.income_amount > 0.0 {
+            "income"
+        } else {
+            "expense"
+        };
+        let mut row_status = "ok".to_string();
+        let mut messages: Vec<String> = Vec::new();
+
+        // 收支方向校验
+        if direction == "invalid" {
+            row_status = "error".into();
+            messages.push("收入与支出同时有值".into());
+        }
+
+        // 月结保护：目标月已结 → 该行不能导入
+        if let Err(e) = ensure_month_open(conn, &tx.belong_month) {
+            row_status = "error".into();
+            messages.push(e.to_string());
+        }
+
+        // 去重冲突：与唯一索引 idx_bank_transactions_dedup 同口径（含账户维度，spec 4.8）
+        let dup_key = (
+            tx.transaction_date.clone(),
+            tx.summary.clone().unwrap_or_default(),
+            tx.counterparty_name.clone().unwrap_or_default(),
+            tx.counterparty_account.clone().unwrap_or_default(),
+            (tx.income_amount * 100.0).round() as i64,
+            (tx.expense_amount * 100.0).round() as i64,
+            (tx.balance.unwrap_or(0.0) * 100.0).round() as i64,
+        );
+        let db_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM bank_transactions
+             WHERE transaction_date=?1 AND COALESCE(summary,'')=COALESCE(?2,'')
+               AND COALESCE(counterparty_name,'')=COALESCE(?3,'')
+               AND COALESCE(counterparty_account,'')=COALESCE(?4,'')
+               AND income_amount=?5 AND expense_amount=?6
+               AND COALESCE(balance,0)=?7 AND COALESCE(fund_account_id,0)=?8",
+            params![
+                tx.transaction_date,
+                tx.summary,
+                tx.counterparty_name,
+                tx.counterparty_account,
+                tx.income_amount,
+                tx.expense_amount,
+                tx.balance.unwrap_or(0.0),
+                fund_account_id
+            ],
+            |r| r.get(0),
+        )?;
+        let in_file_dup = !seen_in_file.insert(dup_key);
+        if db_count > 0 || in_file_dup {
+            if row_status == "ok" {
+                row_status = "duplicate".into();
+            }
+            messages.push(if db_count > 0 {
+                "与库内同账户流水重复，导入时将跳过".to_string()
+            } else {
+                "文件内重复行，导入时仅保留一条".to_string()
+            });
+        }
+
+        // 余额列衔接校验（流水余额为交易后余额：上行余额 + 本行收入 - 本行支出 = 本行余额，容差 0.005）
+        if row_status != "error" {
+            if let Some(prev) = rows.last() {
+                if let (Some(prev_balance), Some(cur_balance)) = (prev.balance, tx.balance) {
+                    let expected = prev_balance + tx.income_amount - tx.expense_amount;
+                    if (expected - cur_balance).abs() > 0.005 {
+                        if row_status == "ok" {
+                            row_status = "warning".into();
+                        }
+                        messages.push(format!(
+                            "余额与上一行不衔接（按上行推算应为 {expected:.2}）"
+                        ));
+                    }
+                }
+            }
+        }
+
+        match row_status.as_str() {
+            "ok" => ok_rows += 1,
+            "duplicate" => duplicate_rows += 1,
+            "warning" => warning_rows += 1,
+            _ => error_rows += 1,
+        }
+        income_total += tx.income_amount;
+        expense_total += tx.expense_amount;
+
+        rows.push(BankImportPreviewRow {
+            row_no,
+            transaction_date: tx.transaction_date.clone(),
+            belong_month: tx.belong_month.clone(),
+            summary: tx.summary.clone(),
+            counterparty_name: tx.counterparty_name.clone(),
+            counterparty_account: tx.counterparty_account.clone(),
+            income_amount: tx.income_amount,
+            expense_amount: tx.expense_amount,
+            direction: direction.to_string(),
+            balance: tx.balance,
+            row_status,
+            message: if messages.is_empty() {
+                None
+            } else {
+                Some(messages.join("；"))
+            },
+        });
+    }
+
+    Ok(BankImportPreview {
+        fund_account_id: account.id,
+        fund_account_name: account.name,
+        file_path: path.to_string(),
+        headers: content.headers,
+        total_rows: rows.len() as i32,
+        ok_rows,
+        duplicate_rows,
+        warning_rows,
+        error_rows,
+        income_total,
+        expense_total,
+        rows,
+    })
 }
 
 pub fn confirm_bank_transaction_match(
@@ -4117,6 +4306,12 @@ pub fn confirm_bank_transaction_match(
     if tx.belong_month != batch.belong_month {
         return Err(AppError::InvalidParam(
             "银行流水月份与付款批次月份不一致".into(),
+        ));
+    }
+    // 账户维度一致（spec 4.8/4.9：不同账户流水不得核销同一次付款）
+    if tx.fund_account_id.is_some() && tx.fund_account_id != batch.fund_account_id {
+        return Err(AppError::InvalidParam(
+            "银行流水与付款批次的资金账户不一致，不能匹配".into(),
         ));
     }
     if (tx.expense_amount - batch.total_amount).abs() > 0.01 {
@@ -4218,6 +4413,10 @@ pub fn ignore_bank_transaction(
 /// 自动匹配：金额相等的已付款批次与未匹配流水一一对应时匹配。
 /// 已生成 active bank_manual 入账凭证的流水被排除——若再匹配批次，
 /// 流水凭证与批次付款凭证会各贷记一次 1002（银行存款双重贷记）。
+/// 待归集流水（fund_account_id IS NULL，spec 4.8）可查询但不参与自动匹配；
+/// 流水与批次资金账户不同也不匹配（同账户为 spec 6.3 硬条件）。
+/// 注：spec 6.3 评分升级（金额/单号/户名/尾号/摘要/日期距离 → 匹配账面资金分录）
+/// 归 Task 12 多对多核销引擎实现，其硬条件依赖本任务的流水账户维度。
 pub fn auto_match_bank_transactions(
     conn: &Connection,
     month: &str,
@@ -4229,9 +4428,12 @@ pub fn auto_match_bank_transactions(
             belong_month: Some(month.to_string()),
             status: Some("unmatched".to_string()),
             keyword: None,
+            fund_account_id: None,
         },
     )?
     .into_iter()
+    // 待归集（账户 NULL）不自动匹配
+    .filter(|tx| tx.fund_account_id.is_some())
     // 查询失败时保守排除（与下方 active_bank_match_* 的 unwrap_or(true) 口径一致）
     .filter(|tx| !active_bank_manual_voucher_exists(conn, tx.id).unwrap_or(true))
     .collect::<Vec<_>>();
@@ -4251,6 +4453,8 @@ pub fn auto_match_bank_transactions(
         let candidates: Vec<&PaymentBatch> = batches
             .iter()
             .filter(|batch| (tx.expense_amount - batch.total_amount).abs() <= 0.01)
+            // 资金账户一致（批次自 Task 9 起必有账户）
+            .filter(|batch| batch.fund_account_id == tx.fund_account_id)
             .filter(|batch| {
                 !active_bank_match_for_batch_exists(conn, batch.id).unwrap_or(true)
                     && !active_bank_match_for_transaction_exists(conn, tx.id).unwrap_or(true)
@@ -7146,6 +7350,8 @@ pub mod tests {
                 ignore_reason: None,
                 imported_file: None,
                 raw_json: None,
+                fund_account_id: Some(acc),
+                fund_account_name: None,
                 matched_batch_id: None,
                 matched_batch_no: None,
                 matched_batch_type: None,
@@ -7166,6 +7372,7 @@ pub mod tests {
                 belong_month: Some("2026-08".into()),
                 status: Some("matched".into()),
                 keyword: None,
+                fund_account_id: None,
             },
         )
         .unwrap();
@@ -7179,6 +7386,7 @@ pub mod tests {
                 belong_month: Some("2026-08".into()),
                 status: Some("unmatched".into()),
                 keyword: None,
+                fund_account_id: None,
             },
         )
         .unwrap();
@@ -7247,6 +7455,8 @@ pub mod tests {
                 ignore_reason: None,
                 imported_file: None,
                 raw_json: None,
+                fund_account_id: Some(acc),
+                fund_account_name: None,
                 matched_batch_id: None,
                 matched_batch_no: None,
                 matched_batch_type: None,
@@ -7297,6 +7507,283 @@ pub mod tests {
         assert_eq!(result.matched, 1);
     }
 
+    // ==================== Task 11：流水账户化导入与预览 ====================
+
+    /// 现金账户（流水导入禁止目标，spec 4.8）
+    fn make_cash_fund_account(conn: &Connection, code: &str) -> i64 {
+        conn.execute(
+            "INSERT INTO fund_accounts
+                (account_code, name, account_type, bank_name, account_no, currency,
+                 gl_account_code, opening_date, opening_balance, is_default, is_active,
+                 created_at, updated_at)
+             VALUES (?1, '测试现金户', 'cash', NULL, NULL, 'CNY',
+                     '1001', '2026-08-01', 5000, 0, 1, '2026-08-01', '2026-08-01')",
+            params![code],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn bank_tx_fixture(
+        summary: &str,
+        income: f64,
+        expense: f64,
+        balance: f64,
+        account: Option<i64>,
+    ) -> BankTransaction {
+        BankTransaction {
+            id: 0,
+            transaction_date: "2026-08-11".into(),
+            belong_month: "2026-08".into(),
+            summary: Some(summary.into()),
+            counterparty_name: Some("测试对方".into()),
+            counterparty_account: Some("6222000001".into()),
+            income_amount: income,
+            expense_amount: expense,
+            balance: Some(balance),
+            status: "unmatched".into(),
+            ignore_reason: None,
+            imported_file: None,
+            raw_json: None,
+            fund_account_id: account,
+            fund_account_name: None,
+            matched_batch_id: None,
+            matched_batch_no: None,
+            matched_batch_type: None,
+            matched_amount: None,
+            match_score: None,
+            match_remark: None,
+            created_at: None,
+            updated_at: None,
+        }
+    }
+
+    #[test]
+    fn test_bank_transaction_import_with_account_and_cross_account_dedup() {
+        let conn = setup_financial_db();
+        let acc1 = make_batch_fund_account(&conn, "BANK-T11A");
+        let acc2 = make_batch_fund_account(&conn, "BANK-T11B");
+
+        // 带账户落库，查询回显账户 id 与名称
+        assert!(insert_bank_transaction(
+            &conn,
+            &bank_tx_fixture("手续费A", 0.0, 100.0, 9900.0, Some(acc1))
+        )
+        .unwrap());
+        let rows = query_bank_transactions(&conn, &BankTransactionQuery::default()).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].fund_account_id, Some(acc1));
+        assert_eq!(rows[0].fund_account_name.as_deref(), Some("测试付款户"));
+
+        // 同账户重复导入 → 去重跳过
+        assert!(!insert_bank_transaction(
+            &conn,
+            &bank_tx_fixture("手续费A", 0.0, 100.0, 9900.0, Some(acc1))
+        )
+        .unwrap());
+
+        // 不同账户同号流水允许（唯一索引含账户维度，spec 4.8）
+        assert!(insert_bank_transaction(
+            &conn,
+            &bank_tx_fixture("手续费A", 0.0, 100.0, 9900.0, Some(acc2))
+        )
+        .unwrap());
+        let acc2_rows = query_bank_transactions(
+            &conn,
+            &BankTransactionQuery {
+                fund_account_id: Some(acc2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(acc2_rows.len(), 1);
+        assert_eq!(acc2_rows[0].fund_account_id, Some(acc2));
+    }
+
+    #[test]
+    fn test_bank_import_rejects_cash_account_and_closed_month() {
+        let conn = setup_financial_db();
+        let acc = make_batch_fund_account(&conn, "BANK-T11A");
+        let cash = make_cash_fund_account(&conn, "CASH-T11");
+
+        // 现金账户不能导入银行流水（spec 4.8：导入必须指定 bank/third_party 账户）
+        let err = insert_bank_transaction(
+            &conn,
+            &bank_tx_fixture("手续费B", 0.0, 50.0, 9950.0, Some(cash)),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("现金"), "got: {err:?}");
+
+        // 月结保护：目标月已结 → ensure_month_open 拦截
+        conn.execute(
+            "INSERT INTO month_closes (month, status, created_at, updated_at)
+             VALUES ('2026-08', 'closed', '2026-09-01', '2026-09-01')",
+            [],
+        )
+        .unwrap();
+        let err = insert_bank_transaction(
+            &conn,
+            &bank_tx_fixture("手续费C", 0.0, 50.0, 9950.0, Some(acc)),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("月结"), "got: {err:?}");
+
+        // 预览同样拦截：已结月份的行标记 error 且提示月结
+        let path =
+            std::env::temp_dir().join(format!("bank-t11-closed-{}.csv", conn.last_insert_rowid()));
+        std::fs::write(
+            &path,
+            "交易日期,摘要,对方户名,收入,支出,余额\n2026-08-12,手续费D,测试对方,0,60,9890\n",
+        )
+        .unwrap();
+        let preview = preview_bank_transaction_import(&conn, &path.to_string_lossy(), acc).unwrap();
+        assert_eq!(preview.total_rows, 1);
+        assert_eq!(preview.error_rows, 1);
+        assert!(preview.rows[0]
+            .message
+            .as_deref()
+            .unwrap_or("")
+            .contains("月结"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_bank_transaction_import_preview_does_not_write() {
+        let conn = setup_financial_db();
+        let acc1 = make_batch_fund_account(&conn, "BANK-T11A");
+        let acc2 = make_batch_fund_account(&conn, "BANK-T11B");
+        let path = std::env::temp_dir().join("bank-t11-preview.csv");
+        std::fs::write(
+            &path,
+            "交易日期,摘要,对方户名,收入,支出,余额\n\
+             2026-08-01,货款,客户甲,100.50,0,1200.50\n\
+             2026-08-02,手续费,,0,30,1170.50\n\
+             2026-08-02,手续费,,0,30,1170.50\n\
+             2026-08-03,异常余额,,0,20,9999.00\n",
+        )
+        .unwrap();
+        let path_str = path.to_string_lossy().to_string();
+
+        // 预览：4 行 = 2 正常 + 1 文件内重复 + 1 余额不衔接（warning），不落库
+        let preview = preview_bank_transaction_import(&conn, &path_str, acc1).unwrap();
+        assert_eq!(preview.fund_account_id, acc1);
+        assert_eq!(preview.fund_account_name.as_str(), "测试付款户");
+        assert_eq!(preview.total_rows, 4);
+        assert_eq!(preview.ok_rows, 2);
+        assert_eq!(preview.duplicate_rows, 1);
+        assert_eq!(preview.warning_rows, 1);
+        assert_eq!(preview.error_rows, 0);
+        assert!((preview.income_total - 100.50).abs() < 0.005);
+        assert!((preview.expense_total - 80.0).abs() < 0.005);
+        assert_eq!(preview.rows[0].direction, "income");
+        assert_eq!(preview.rows[1].direction, "expense");
+        assert_eq!(preview.rows[2].row_status, "duplicate");
+        assert_eq!(preview.rows[3].row_status, "warning");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM bank_transactions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "预览不得写库");
+
+        // 换账户预览：库内无该账户流水，仅文件内重复被标记
+        let preview_acc2 = preview_bank_transaction_import(&conn, &path_str, acc2).unwrap();
+        assert_eq!(preview_acc2.duplicate_rows, 1);
+
+        // 确认后入库：重复行被唯一索引跳过
+        for row in &preview.rows {
+            let _ = insert_bank_transaction(
+                &conn,
+                &BankTransaction {
+                    fund_account_id: Some(acc1),
+                    imported_file: Some(path_str.clone()),
+                    income_amount: row.income_amount,
+                    expense_amount: row.expense_amount,
+                    balance: row.balance,
+                    transaction_date: row.transaction_date.clone(),
+                    belong_month: row.belong_month.clone(),
+                    summary: row.summary.clone(),
+                    counterparty_name: row.counterparty_name.clone(),
+                    counterparty_account: row.counterparty_account.clone(),
+                    ..bank_tx_fixture("", 0.0, 0.0, 0.0, Some(acc1))
+                },
+            );
+        }
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM bank_transactions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 3, "重复行应被去重");
+
+        // 再次预览：全部行与库内同账户流水重复
+        let preview_again = preview_bank_transaction_import(&conn, &path_str, acc1).unwrap();
+        assert_eq!(preview_again.duplicate_rows, 4);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_auto_match_excludes_unassigned_and_cross_account_transactions() {
+        let mut conn = setup_financial_db();
+        fill_employee_bank_info(&conn);
+        make_august_closable(&conn);
+        let acc = make_batch_fund_account(&conn, "BANK-T1");
+        let other = make_batch_fund_account(&conn, "BANK-T11C");
+        let operator = batch_operator();
+        let detail = create_payment_batch(
+            &mut conn,
+            &PaymentBatchInput {
+                belong_month: "2026-08".into(),
+                batch_type: "salary".into(),
+                fund_account_id: Some(acc),
+                source_ids: None,
+                remark: None,
+            },
+            &operator,
+        )
+        .unwrap();
+        mark_payment_batch_exported(&conn, detail.batch.id).unwrap();
+        mark_payment_batch_paid(
+            &mut conn,
+            &PaymentBatchPaidInput {
+                id: detail.batch.id,
+                payment_date: "2026-08-31".into(),
+            },
+            &operator,
+        )
+        .unwrap();
+
+        // 待归集流水（fund_account_id 为 NULL）可查询但不参与自动匹配（spec 4.8）
+        assert!(insert_bank_transaction(
+            &conn,
+            &bank_tx_fixture("工资代发", 0.0, detail.batch.total_amount, 9000.0, None)
+        )
+        .unwrap());
+        let result = auto_match_bank_transactions(&conn, "2026-08").unwrap();
+        assert_eq!(result.matched, 0, "待归集流水不能自动匹配");
+        assert_eq!(
+            query_bank_transactions(&conn, &BankTransactionQuery::default())
+                .unwrap()
+                .len(),
+            1,
+            "待归集流水仍可查询"
+        );
+
+        // 跨账户流水不匹配批次（批次资金账户为 acc）
+        conn.execute(
+            "UPDATE bank_transactions SET fund_account_id = ?1",
+            params![other],
+        )
+        .unwrap();
+        let result = auto_match_bank_transactions(&conn, "2026-08").unwrap();
+        assert_eq!(result.matched, 0, "跨账户流水不能自动匹配");
+
+        // 同账户流水可自动匹配
+        conn.execute(
+            "UPDATE bank_transactions SET fund_account_id = ?1",
+            params![acc],
+        )
+        .unwrap();
+        let result = auto_match_bank_transactions(&conn, "2026-08").unwrap();
+        assert_eq!(result.matched, 1);
+    }
+
     #[test]
     fn test_ignore_bank_transaction_requires_open_unmatched_transaction() {
         let conn = setup_financial_db();
@@ -7316,6 +7803,8 @@ pub mod tests {
                 ignore_reason: None,
                 imported_file: None,
                 raw_json: None,
+                fund_account_id: None,
+                fund_account_name: None,
                 matched_batch_id: None,
                 matched_batch_no: None,
                 matched_batch_type: None,
@@ -7333,6 +7822,7 @@ pub mod tests {
                 belong_month: Some("2026-08".into()),
                 status: Some("unmatched".into()),
                 keyword: None,
+                fund_account_id: None,
             },
         )
         .unwrap()
@@ -7352,6 +7842,7 @@ pub mod tests {
                 belong_month: Some("2026-08".into()),
                 status: Some("ignored".into()),
                 keyword: None,
+                fund_account_id: None,
             },
         )
         .unwrap();
