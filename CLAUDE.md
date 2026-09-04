@@ -1,6 +1,6 @@
 # Salary Desktop - 工资核算助手
 
-Tauri 2 + React 19 + SQLite 的中文桌面工资核算工具。出纳用，含员工管理、考勤 OCR、工资核算、发票 OCR 去重、Excel 导出。
+Tauri 2 + React 19 + SQLite 的中文桌面工资与本地财务出纳工具。含员工考勤、薪酬社保个税、发票报销、付款与银行流水、自动凭证、财务报表、月结和数据安全。
 
 ## 核心命令
 
@@ -25,7 +25,7 @@ npm run lint                             # ESLint
 
 ## 架构摘要
 
-后端单文件模块：`commands.rs`（tauri 命令入口）→ `db.rs`（CRUD）+ `invoice.rs`（业务层）+ `ocr.rs`（考勤 OCR）+ `salary.rs`（工资引擎）+ `excel.rs`（导入导出）。前端单页：`App.tsx` + 9 个 page。SQLite 单文件 `salary.db` 存于 `app_data_dir`。发票原图归档 `app_data_dir/invoices/{belong_month}/{timestamp}_{filename}`。
+后端模块：`commands.rs`（Tauri 命令入口）→ `db.rs`（schema/CRUD）+ `invoice.rs`（发票业务）+ `ocr.rs`（考勤 OCR）+ `salary.rs`（工资引擎）+ `accounting.rs`（凭证与报表）+ `security*.rs`（安全）+ `data_safety.rs`（备份恢复）+ `excel.rs`（导入导出）。前端为 `App.tsx` + 21 个 page。SQLite 单文件 `salary.db` 存于 `app_data_dir`。发票原图归档 `app_data_dir/invoices/{belong_month}/{timestamp}_{filename}`。
 
 ## 关键设计
 
@@ -53,6 +53,7 @@ npm run lint                             # ESLint
 - [第四阶段安全配置](.claude/memory/stage4-security.md) — 启动密码/锁屏/加密/脱敏/迁移；spec 见 `docs/superpowers/specs/2026-08-10-stage4-security-config-design.md`、plan 见 `docs/superpowers/plans/2026-08-10-stage4-security-config.md`
 - [第五阶段财务专业功能](.claude/memory/stage5-accounting.md) — 科目表、自动凭证、三大报表、Excel 导出；spec 见 `docs/superpowers/specs/2026-08-15-stage5-accounting-reports-design.md`、plan 见 `docs/superpowers/plans/2026-08-15-stage5-accounting-reports.md`
 - [第六阶段财务功能拓展](.claude/memory/stage6-finance-extensions.md) — 科目余额表、年末结转、社保台账、累计预扣、工资条、同期列；spec 见 `docs/superpowers/specs/2026-08-22-stage6-finance-extensions-design.md`、plan 见 `docs/superpowers/plans/2026-08-22-stage6-finance-extensions.md`
+- [第七阶段出纳运营闭环](.claude/memory/stage7-cashier-operations.md) — 资金账户、通用收付款、审批留痕、多对多银行对账、资金日记账、借款核销；spec 见 `docs/superpowers/specs/2026-08-30-stage7-cashier-operations-design.md`、plan 见 `docs/superpowers/plans/2026-08-30-stage7-cashier-operations.md`
 
 ## 第三阶段开发
 
@@ -69,6 +70,10 @@ npm run lint                             # ESLint
 ## 第六阶段开发
 
 第六阶段以财务功能拓展（账簿与结账闭环、社保公积金全链路、个税累计预扣）为目标，按批次推进：科目余额表与年末结转 → 社保台账与凭证联动 → 个税累计预扣与年度汇总 → 工资条打印 → 报表同期列 → 收尾回归。开发时先读 `.claude/memory/stage6-finance-extensions.md` 和 `docs/superpowers/plans/2026-08-22-stage6-progress.md`；spec 在 `docs/superpowers/specs/2026-08-22-stage6-finance-extensions-design.md`。涉及多模块开发时用 subagent 按互不重叠文件范围协作，由主 agent 统一合并、测试、commit、push。
+
+## 第七阶段开发
+
+第七阶段以出纳运营闭环为目标，按 Gate 0 → 7A 基础底座 → 7B 通用收付款与付款 → 7C 资金日记账与多对多银行对账 → 7D 借款/报销治理/月结收尾推进。开发前先读 `.claude/memory/stage7-cashier-operations.md`、`docs/superpowers/plans/2026-08-30-stage7-progress.md` 和 spec；旧库迁移、资金金额守恒、状态机、月结保护及 Windows exe 验收为阻断项。涉及多模块开发时用 subagent 按互不重叠文件范围协作，由主 agent 统一集成、测试、commit、push。
 
 ## 编码约定
 

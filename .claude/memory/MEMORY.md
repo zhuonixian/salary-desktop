@@ -11,3 +11,4 @@
 - [第四阶段安全配置](stage4-security.md) — 启动密码/锁屏/加密/脱敏/迁移
 - [第五阶段财务专业功能](stage5-accounting.md) — 科目表、自动凭证、三大报表、Excel 导出
 - [第六阶段财务功能拓展](stage6-finance-extensions.md) — 科目余额表、年末结转、社保台账、累计预扣、工资条、同期列
+- [第七阶段出纳运营闭环](stage7-cashier-operations.md) — 资金账户、通用收付款、审批留痕、多对多银行对账、资金日记账、借款核销
