@@ -4297,4 +4297,81 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&app_dir);
     }
+
+    /// 查询条件：account_id 命中来源或目标任一侧；非法类型/状态入参在拼 SQL 前报错
+    /// （Task 7：命令层账户筛选与枚举前置校验）
+    #[test]
+    fn test_get_fund_documents_account_filter_and_enum_guard() {
+        let (conn, current) = fund_doc_env();
+        let fx = setup_doc_fixtures(&conn);
+        let receipt = create_fund_document(&conn, &current, &receipt_input(&fx)).unwrap();
+        let payment = create_fund_document(&conn, &current, &payment_input(&fx)).unwrap();
+
+        // bank 同时是 receipt 的目标、payment 的来源 → 两条全命中
+        let by_bank = get_fund_documents(
+            &conn,
+            &FundDocumentQuery {
+                account_id: Some(fx.bank.id),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(by_bank.len(), 2);
+
+        // cash 未被任何单据引用 → 空列表
+        let by_cash = get_fund_documents(
+            &conn,
+            &FundDocumentQuery {
+                account_id: Some(fx.cash.id),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(by_cash.is_empty());
+
+        // 账户 + 类型组合：bank + payment 只命中付款单
+        let by_bank_payment = get_fund_documents(
+            &conn,
+            &FundDocumentQuery {
+                account_id: Some(fx.bank.id),
+                document_type: Some("payment".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(by_bank_payment.len(), 1);
+        assert_eq!(by_bank_payment[0].id, payment.id);
+
+        // 非法状态/类型入参报错而非静默空列表
+        let bad_status = get_fund_documents(
+            &conn,
+            &FundDocumentQuery {
+                status: Some("no_such_status".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(bad_status.to_string().contains("单据状态"));
+        let bad_type = get_fund_documents(
+            &conn,
+            &FundDocumentQuery {
+                document_type: Some("no_such_type".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(bad_type.to_string().contains("单据类型"));
+
+        // 合法状态入参仍可正常过滤
+        let drafts = get_fund_documents(
+            &conn,
+            &FundDocumentQuery {
+                status: Some("draft".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(drafts.len(), 2);
+        assert!(drafts.iter().any(|d| d.id == receipt.id));
+    }
 }
