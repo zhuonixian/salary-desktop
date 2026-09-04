@@ -953,3 +953,130 @@ export interface SocialInsuranceProfileInput {
   hf_personal_rate?: number;
   remark?: string;
 }
+
+// ==================== 出纳基础资料（第七阶段） ====================
+
+// 字段与后端 src-tauri/src/models.rs FundAccount/BusinessPartner/OperatorProfile
+// 1:1 对齐；snake_case 命名直接对齐 serde 序列化字段，避免映射层。
+// 入参可空字段为 patch 语义：undefined=保留原值，''=清空（对齐后端 resolve_optional）。
+
+export interface FundAccount {
+  id: number;
+  account_code: string;
+  name: string;
+  account_type: string;
+  bank_name: string | null;
+  account_no: string | null;
+  currency: string;
+  gl_account_code: string;
+  opening_date: string | null;
+  opening_balance: number;
+  is_default: boolean;
+  is_active: boolean;
+  remark: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface FundAccountInput {
+  id?: number;
+  account_code: string;
+  name: string;
+  account_type: string;
+  bank_name?: string | null;
+  account_no?: string | null;
+  gl_account_code: string;
+  opening_date?: string | null;
+  opening_balance?: number;
+  is_default?: boolean;
+  is_active?: boolean;
+  remark?: string | null;
+}
+
+export interface FundAccountQuery {
+  account_type?: string;
+  is_active?: boolean;
+  keyword?: string;
+}
+
+export interface BusinessPartner {
+  id: number;
+  partner_code: string;
+  name: string;
+  partner_type: string;
+  tax_id: string | null;
+  contact_person: string | null;
+  phone: string | null;
+  bank_name: string | null;
+  bank_account: string | null;
+  gl_account_code: string | null;
+  status: string;
+  remark: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface BusinessPartnerInput {
+  id?: number;
+  partner_code: string;
+  name: string;
+  partner_type: string;
+  tax_id?: string | null;
+  contact_person?: string | null;
+  phone?: string | null;
+  bank_name?: string | null;
+  bank_account?: string | null;
+  gl_account_code?: string | null;
+  status?: string;
+  remark?: string | null;
+}
+
+export interface BusinessPartnerQuery {
+  partner_type?: string;
+  status?: string;
+  keyword?: string;
+}
+
+export interface OperatorProfile {
+  id: number;
+  name: string;
+  role: string;
+  is_active: boolean;
+  remark: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface OperatorProfileInput {
+  id?: number;
+  name: string;
+  role: string;
+  is_active?: boolean;
+  remark?: string | null;
+}
+
+// 枚举取值与后端 cashier.rs 常量保持一致（bank/cash/third_party、
+// supplier/customer/other、active/inactive、requester/approver/cashier/admin）。
+export const FUND_ACCOUNT_TYPE_LABEL: Record<string, string> = {
+  bank: '银行账户',
+  cash: '现金',
+  third_party: '第三方支付',
+};
+
+export const PARTNER_TYPE_LABEL: Record<string, string> = {
+  supplier: '供应商',
+  customer: '客户',
+  other: '其他',
+};
+
+export const PARTNER_STATUS_LABEL: Record<string, string> = {
+  active: '启用',
+  inactive: '停用',
+};
+
+export const OPERATOR_ROLE_LABEL: Record<string, string> = {
+  requester: '申请人',
+  approver: '审批人',
+  cashier: '出纳',
+  admin: '管理员',
+};

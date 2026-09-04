@@ -74,6 +74,14 @@ import type {
   FinancialReportType,
   SocialInsuranceProfile,
   SocialInsuranceProfileInput,
+  FundAccount,
+  FundAccountInput,
+  FundAccountQuery,
+  BusinessPartner,
+  BusinessPartnerInput,
+  BusinessPartnerQuery,
+  OperatorProfile,
+  OperatorProfileInput,
 } from '@/types';
 
 type BackendDashboardSummary = {
@@ -193,8 +201,195 @@ const emptyMonthCloseSummary = (month = '') => ({
   paid_reimbursement_amount: 0,
 });
 
+// ==================== 出纳基础资料预览数据（第七阶段） ====================
+// 浏览器预览用种子数据；字段结构与后端 models.rs 对应类型 1:1。
+const mockFundAccounts: FundAccount[] = [
+  {
+    id: 1,
+    account_code: 'BANK-001',
+    name: '基本存款账户',
+    account_type: 'bank',
+    bank_name: '工商银行',
+    account_no: '6222021234567890',
+    currency: 'CNY',
+    gl_account_code: '1002',
+    opening_date: '2026-01-01',
+    opening_balance: 50000,
+    is_default: true,
+    is_active: true,
+    remark: null,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+  },
+  {
+    id: 2,
+    account_code: 'CASH-001',
+    name: '备用金现金库',
+    account_type: 'cash',
+    bank_name: null,
+    account_no: null,
+    currency: 'CNY',
+    gl_account_code: '1001',
+    opening_date: '2026-01-01',
+    opening_balance: 3000,
+    is_default: true,
+    is_active: true,
+    remark: null,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+  },
+];
+
+const mockBusinessPartners: BusinessPartner[] = [
+  {
+    id: 1,
+    partner_code: 'GYS-001',
+    name: '示例供应商',
+    partner_type: 'supplier',
+    tax_id: '91110000MA01X',
+    contact_person: '王经理',
+    phone: '13800138000',
+    bank_name: '建设银行',
+    bank_account: '6217001234567890',
+    gl_account_code: null,
+    status: 'active',
+    remark: null,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+  },
+];
+
+const mockOperatorProfiles: OperatorProfile[] = [
+  {
+    id: 1,
+    name: '张会计',
+    role: 'cashier',
+    is_active: true,
+    remark: null,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+  },
+  {
+    id: 2,
+    name: '李出纳',
+    role: 'approver',
+    is_active: true,
+    remark: null,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+  },
+];
+
+// 预览模式下的当前操作人（内存态，模拟后端 CurrentOperatorState 会话）
+let mockCurrentOperatorId: number | null = 1;
+
 const mockTauriResponse = (command: string, args?: Record<string, unknown>): unknown => {
   switch (command) {
+    case 'get_fund_accounts':
+      return mockFundAccounts;
+    case 'save_fund_account': {
+      const data = args?.data as FundAccountInput | undefined;
+      return {
+        id: data?.id ?? Date.now(),
+        currency: 'CNY',
+        opening_balance: 0,
+        is_default: false,
+        is_active: true,
+        bank_name: null,
+        account_no: null,
+        opening_date: null,
+        remark: null,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        ...data,
+      };
+    }
+    case 'set_active_fund_account': {
+      const seed = mockFundAccounts[0];
+      return { ...seed, is_active: Boolean(args?.active) };
+    }
+    case 'get_business_partners':
+      return mockBusinessPartners;
+    case 'save_business_partner': {
+      const data = args?.data as BusinessPartnerInput | undefined;
+      return {
+        id: data?.id ?? Date.now(),
+        status: 'active',
+        tax_id: null,
+        contact_person: null,
+        phone: null,
+        bank_name: null,
+        bank_account: null,
+        gl_account_code: null,
+        remark: null,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        ...data,
+      };
+    }
+    case 'set_active_business_partner': {
+      const seed = mockBusinessPartners[0];
+      return { ...seed, status: args?.active ? 'active' : 'inactive' };
+    }
+    case 'get_operator_profiles':
+      return mockOperatorProfiles;
+    case 'save_operator_profile': {
+      const data = args?.data as OperatorProfileInput | undefined;
+      const saved: OperatorProfile = {
+        id: data?.id ?? Date.now(),
+        name: data?.name ?? '预览操作人',
+        role: data?.role ?? 'cashier',
+        is_active: data?.is_active ?? true,
+        remark: data?.remark ?? null,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      const idx = mockOperatorProfiles.findIndex((p) => p.id === saved.id);
+      if (idx >= 0) {
+        mockOperatorProfiles[idx] = saved;
+      } else {
+        mockOperatorProfiles.push(saved);
+      }
+      return saved;
+    }
+    case 'set_active_operator_profile': {
+      const id = Number(args?.id ?? 0);
+      const active = Boolean(args?.active);
+      const target = mockOperatorProfiles.find((p) => p.id === id) ?? mockOperatorProfiles[0];
+      const updated = { ...target, is_active: active };
+      const idx = mockOperatorProfiles.findIndex((p) => p.id === updated.id);
+      if (idx >= 0) mockOperatorProfiles[idx] = updated;
+      // 与后端一致：停用当前操作人时清空会话，要求重新选择。
+      if (!active && mockCurrentOperatorId === updated.id) mockCurrentOperatorId = null;
+      return updated;
+    }
+    case 'set_current_operator': {
+      const id = Number(args?.operatorId ?? 0);
+      const target = mockOperatorProfiles.find((p) => p.id === id && p.is_active);
+      if (!target) {
+        throw new Error('操作人不存在或已停用，请重新选择');
+      }
+      mockCurrentOperatorId = target.id;
+      return target;
+    }
+    case 'get_current_operator':
+      return mockOperatorProfiles.find((p) => p.id === mockCurrentOperatorId && p.is_active) ?? null;
+    // 预览模式跳过启动密码/锁屏（仅在非 Tauri 环境生效），让业务页面可打开。
+    case 'is_security_initialized':
+      return true;
+    case 'unlock':
+      return { unlocked: true, failed_attempts: 0, lock_until: null };
+    case 'get_security_status':
+      return {
+        initialized: true,
+        locked: false,
+        failed_attempts: 0,
+        lock_until: null,
+        idle_lock_enabled: false,
+        idle_timeout_seconds: 300,
+        sensitive_reveal_seconds: 300,
+        migration_status: null,
+      };
     case 'get_dashboard_summary':
       return {
         employee_count: 0,
@@ -1289,4 +1484,52 @@ export async function setSocialBaseLimits(
   hfMax: number,
 ): Promise<void> {
   await invoke<void>('set_social_base_limits', { ssMin, ssMax, hfMin, hfMax });
+}
+
+// ==================== 出纳基础资料（第七阶段 Task 4） ====================
+// invoke 参数 key 用 camelCase（Tauri 2 自动映射 snake_case），与本文件既有约定一致。
+// 入参可空字段为 patch 语义：undefined=保留原值，''=清空。
+
+export async function getFundAccounts(query: FundAccountQuery = {}): Promise<FundAccount[]> {
+  return invoke<FundAccount[]>('get_fund_accounts', { query });
+}
+
+export async function saveFundAccount(data: FundAccountInput): Promise<FundAccount> {
+  return invoke<FundAccount>('save_fund_account', { data });
+}
+
+export async function setFundAccountActive(id: number, active: boolean): Promise<FundAccount> {
+  return invoke<FundAccount>('set_active_fund_account', { id, active });
+}
+
+export async function getBusinessPartners(query: BusinessPartnerQuery = {}): Promise<BusinessPartner[]> {
+  return invoke<BusinessPartner[]>('get_business_partners', { query });
+}
+
+export async function saveBusinessPartner(data: BusinessPartnerInput): Promise<BusinessPartner> {
+  return invoke<BusinessPartner>('save_business_partner', { data });
+}
+
+export async function setBusinessPartnerActive(id: number, active: boolean): Promise<BusinessPartner> {
+  return invoke<BusinessPartner>('set_active_business_partner', { id, active });
+}
+
+export async function getOperatorProfiles(): Promise<OperatorProfile[]> {
+  return invoke<OperatorProfile[]>('get_operator_profiles');
+}
+
+export async function saveOperatorProfile(data: OperatorProfileInput): Promise<OperatorProfile> {
+  return invoke<OperatorProfile>('save_operator_profile', { data });
+}
+
+export async function setOperatorProfileActive(id: number, active: boolean): Promise<OperatorProfile> {
+  return invoke<OperatorProfile>('set_active_operator_profile', { id, active });
+}
+
+export async function setCurrentOperator(operatorId: number): Promise<OperatorProfile> {
+  return invoke<OperatorProfile>('set_current_operator', { operatorId });
+}
+
+export async function getCurrentOperator(): Promise<OperatorProfile | null> {
+  return invoke<OperatorProfile | null>('get_current_operator');
 }

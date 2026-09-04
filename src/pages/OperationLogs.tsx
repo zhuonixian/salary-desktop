@@ -58,6 +58,18 @@ const operationTypeLabels: Record<string, string> = {
   delete_social_profile: '删除社保台账',
   copy_social_profiles: '年度调基',
   set_social_base_limits: '保存基数上下限',
+  // 第七阶段出纳命令（与 src-tauri/src/commands.rs 实名一一对应）
+  get_fund_accounts: '查询资金账户',
+  save_fund_account: '保存资金账户',
+  set_active_fund_account: '启停资金账户',
+  get_business_partners: '查询往来单位',
+  save_business_partner: '保存往来单位',
+  set_active_business_partner: '启停往来单位',
+  get_operator_profiles: '查询操作人',
+  save_operator_profile: '保存操作人',
+  set_active_operator_profile: '启停操作人',
+  set_current_operator: '切换当前操作人',
+  get_current_operator: '查询当前操作人',
 };
 
 const getOperationLabel = (value?: string) =>
@@ -67,6 +79,7 @@ const OperationLogs: React.FC = () => {
   const [logs, setLogs] = useState<OperationLog[]>([]);
   const [loading, setLoading] = useState(false);
   const [operationType, setOperationType] = useState<string | undefined>(undefined);
+  const [operatorFilter, setOperatorFilter] = useState<string | undefined>(undefined);
   const [keyword, setKeyword] = useState('');
   const [range, setRange] = useState<[Dayjs, Dayjs] | null>(null);
 
@@ -74,6 +87,18 @@ const OperationLogs: React.FC = () => {
     const values = Array.from(new Set(logs.map((log) => log.operation_type))).filter(Boolean);
     return values.map((value) => ({ value, label: getOperationLabel(value) }));
   }, [logs]);
+
+  // 后端 query_operation_logs 暂无 operator 精确筛选参数，
+  // 操作人下拉对当前已加载结果做前端过滤（数据源仍是后端查询结果）。
+  const operatorOptions = useMemo(() => {
+    const values = Array.from(new Set(logs.map((log) => log.operator).filter(Boolean))) as string[];
+    return values.map((value) => ({ value, label: value }));
+  }, [logs]);
+
+  const displayLogs = useMemo(
+    () => (operatorFilter ? logs.filter((log) => log.operator === operatorFilter) : logs),
+    [logs, operatorFilter],
+  );
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -137,6 +162,15 @@ const OperationLogs: React.FC = () => {
             onChange={setOperationType}
             options={operationOptions}
           />
+          <Select
+            style={{ width: 160 }}
+            allowClear
+            showSearch
+            placeholder="操作人"
+            value={operatorFilter}
+            onChange={setOperatorFilter}
+            options={operatorOptions}
+          />
           <RangePicker value={range} onChange={(value) => setRange(value as [Dayjs, Dayjs] | null)} />
           <Input.Search
             style={{ width: 280 }}
@@ -155,7 +189,7 @@ const OperationLogs: React.FC = () => {
         <Table
           rowKey="id"
           columns={columns}
-          dataSource={logs}
+          dataSource={displayLogs}
           loading={loading}
           size="small"
           pagination={{ pageSize: 30, showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}

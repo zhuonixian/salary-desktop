@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   HashRouter,
   Routes,
@@ -7,7 +7,7 @@ import {
   useNavigate,
   useLocation,
 } from 'react-router-dom';
-import { Layout, Menu, DatePicker } from 'antd';
+import { Button, Layout, Menu, DatePicker, Result, Select, Space, Tooltip, message } from 'antd';
 import type { MenuProps } from 'antd';
 import {
   DashboardOutlined,
@@ -31,6 +31,9 @@ import {
   MenuFoldOutlined,
   MenuUnfoldOutlined,
   SafetyCertificateOutlined,
+  MoneyCollectOutlined,
+  TransactionOutlined,
+  UserOutlined,
 } from '@ant-design/icons';
 import Dashboard from '@/pages/Dashboard';
 import Employees from '@/pages/Employees';
@@ -53,10 +56,13 @@ import ChartOfAccounts from '@/pages/ChartOfAccounts';
 import Vouchers from '@/pages/Vouchers';
 import FinancialReports from '@/pages/FinancialReports';
 import SecurityCenter from '@/pages/SecurityCenter';
+import FundAccounts from '@/pages/FundAccounts';
 import LockScreen from '@/components/LockScreen';
 import SetupSecurity from '@/components/SetupSecurity';
 import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
 import { useSecurity } from '@/contexts/SecurityContext';
+import { useOperator } from '@/contexts/OperatorContext';
+import { OPERATOR_ROLE_LABEL } from '@/types';
 
 const { Sider, Header, Content } = Layout;
 
@@ -88,8 +94,6 @@ const menuItems: MenuProps['items'] = [
     icon: <CalculatorOutlined />,
     children: [
       { key: '/salary', label: '工资计算', icon: <CalculatorOutlined /> },
-      { key: '/payments', label: '付款批次', icon: <WalletOutlined /> },
-      { key: '/bank-transactions', label: '银行流水', icon: <BankOutlined /> },
       { key: '/social-insurance', label: '社保台账', icon: <SafetyCertificateOutlined /> },
     ],
   },
@@ -100,6 +104,16 @@ const menuItems: MenuProps['items'] = [
     children: [
       { key: '/invoices', label: '发票管理', icon: <FileTextOutlined /> },
       { key: '/reimbursements', label: '报销管理', icon: <WalletOutlined /> },
+    ],
+  },
+  {
+    key: 'fund-cashier',
+    label: '资金出纳',
+    icon: <MoneyCollectOutlined />,
+    children: [
+      { key: '/fund-accounts', label: '资金账户', icon: <BankOutlined /> },
+      { key: '/payments', label: '付款批次', icon: <WalletOutlined /> },
+      { key: '/bank-transactions', label: '银行流水', icon: <TransactionOutlined /> },
     ],
   },
   {
@@ -137,12 +151,42 @@ for (const item of menuItems) {
 
 const defaultOpenKeys = ['workbench'];
 
+// 无有效操作人时仅放行的路径：基础资料（含操作人选择）与安全类页面。
+const OPERATOR_FREE_PATHS = new Set<string>(['/fund-accounts', '/security', '/data-safety']);
+
+// 未选择操作人时禁用其余菜单叶子项（分组保留可展开）。
+function gateMenuItems(items: MenuProps['items']): MenuProps['items'] {
+  return (items ?? []).map((item) => {
+    const probe = item as unknown as { key?: unknown; children?: MenuProps['items'] };
+    if (Array.isArray(probe.children)) {
+      return { ...item, children: gateMenuItems(probe.children) };
+    }
+    if (typeof probe.key === 'string') {
+      return { ...item, disabled: !OPERATOR_FREE_PATHS.has(probe.key) };
+    }
+    return item;
+  }) as MenuProps['items'];
+}
+
+const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
 const AppLayout: React.FC = () => {
   const [collapsed, setCollapsed] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
   const { month, setMonth } = useBusinessMonth();
+  const {
+    operator,
+    operators,
+    loading: operatorLoading,
+    selectOperator,
+  } = useOperator();
   const [openKeys, setOpenKeys] = useState<string[]>(defaultOpenKeys);
+
+  // 未选择当前操作人时的导航限制（本地署名，不是多用户权限）：
+  // 仅放行基础资料与安全类页面，其余业务页面引导先选择操作人。
+  const operatorRequired = !operatorLoading && !operator;
+  const currentPathAllowed = OPERATOR_FREE_PATHS.has(location.pathname);
 
   useEffect(() => {
     const groupKey = menuPathToGroupKey.get(location.pathname);
@@ -162,8 +206,37 @@ const AppLayout: React.FC = () => {
   };
 
   const handleMenuClick: MenuProps['onClick'] = ({ key }) => {
+    if (operatorRequired && !OPERATOR_FREE_PATHS.has(key)) {
+      message.warning('请先选择当前操作人（本地署名，不是多用户权限）');
+      navigate('/fund-accounts');
+      return;
+    }
     navigate(key);
   };
+
+  const handleSwitchOperator = async (operatorId: number) => {
+    try {
+      await selectOperator(operatorId);
+      message.success('当前操作人已切换');
+    } catch (e: unknown) {
+      message.error('切换失败: ' + errText(e));
+    }
+  };
+
+  const displayMenuItems = useMemo(
+    () => (operatorRequired ? gateMenuItems(menuItems) : menuItems),
+    [operatorRequired],
+  );
+
+  const activeOperatorOptions = useMemo(
+    () => operators
+      .filter((item) => item.is_active)
+      .map((item) => ({
+        value: item.id,
+        label: `${item.name}（${OPERATOR_ROLE_LABEL[item.role] ?? item.role}）`,
+      })),
+    [operators],
+  );
 
   return (
     <Layout className="app-layout">
@@ -192,7 +265,7 @@ const AppLayout: React.FC = () => {
           mode="inline"
           selectedKeys={[location.pathname]}
           openKeys={collapsed ? [] : openKeys}
-          items={menuItems}
+          items={displayMenuItems}
           onOpenChange={handleOpenChange}
           onClick={handleMenuClick}
           style={{ borderRight: 0 }}
@@ -203,6 +276,27 @@ const AppLayout: React.FC = () => {
         <Header className="app-header">
           <div className="app-header-left" />
           <div className="app-header-right">
+            <Tooltip title="操作人仅用于本地操作留痕（本地署名），不是多用户权限">
+              <Space size={4}>
+                <UserOutlined style={{ color: '#666' }} />
+                <span style={{ color: '#666', fontSize: 14 }}>当前操作人：</span>
+              </Space>
+            </Tooltip>
+            <Select
+              style={{ width: 190 }}
+              placeholder="未选择"
+              value={operator?.id}
+              loading={operatorLoading}
+              options={activeOperatorOptions}
+              onChange={(value) => {
+                void handleSwitchOperator(value);
+              }}
+            />
+            {!operator && (
+              <Button type="link" size="small" onClick={() => navigate('/fund-accounts')}>
+                去选择
+              </Button>
+            )}
             <span style={{ color: '#666', fontSize: 14 }}>当前月份：</span>
             <DatePicker
               picker="month"
@@ -215,30 +309,44 @@ const AppLayout: React.FC = () => {
         </Header>
 
         <Content className="app-main">
-          <Routes>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/employees" element={<Employees />} />
-            <Route path="/attendance" element={<Attendance />} />
-            <Route path="/punch-card" element={<PunchCard />} />
-            <Route path="/ocr" element={<OcrCenter />} />
-            <Route path="/invoices" element={<Invoices />} />
-            <Route path="/reimbursements" element={<Reimbursements />} />
-            <Route path="/month-close" element={<MonthClose />} />
-            <Route path="/financial-analysis" element={<FinancialAnalysis />} />
-            <Route path="/rules" element={<SalaryRules />} />
-            <Route path="/salary" element={<SalaryCalculate />} />
-            <Route path="/payments" element={<Payments />} />
-            <Route path="/bank-transactions" element={<BankTransactions />} />
-            <Route path="/social-insurance" element={<SocialInsurance />} />
-            <Route path="/accounts" element={<ChartOfAccounts />} />
-            <Route path="/vouchers" element={<Vouchers />} />
-            <Route path="/reports" element={<FinancialReports />} />
-            <Route path="/export" element={<ExportCenter />} />
-            <Route path="/logs" element={<OperationLogs />} />
-            <Route path="/data-safety" element={<DataSafety />} />
-            <Route path="/security" element={<SecurityCenter />} />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
+          {operatorRequired && !currentPathAllowed ? (
+            <Result
+              status="warning"
+              title="尚未选择当前操作人"
+              subTitle="出纳与薪酬等业务操作需要先选择操作人进行本地署名。操作人仅用于本地记录留痕（本地署名），不是多用户权限体系。"
+              extra={
+                <Button type="primary" onClick={() => navigate('/fund-accounts')}>
+                  去选择操作人
+                </Button>
+              }
+            />
+          ) : (
+            <Routes>
+              <Route path="/" element={<Dashboard />} />
+              <Route path="/employees" element={<Employees />} />
+              <Route path="/attendance" element={<Attendance />} />
+              <Route path="/punch-card" element={<PunchCard />} />
+              <Route path="/ocr" element={<OcrCenter />} />
+              <Route path="/invoices" element={<Invoices />} />
+              <Route path="/reimbursements" element={<Reimbursements />} />
+              <Route path="/month-close" element={<MonthClose />} />
+              <Route path="/financial-analysis" element={<FinancialAnalysis />} />
+              <Route path="/rules" element={<SalaryRules />} />
+              <Route path="/salary" element={<SalaryCalculate />} />
+              <Route path="/payments" element={<Payments />} />
+              <Route path="/bank-transactions" element={<BankTransactions />} />
+              <Route path="/social-insurance" element={<SocialInsurance />} />
+              <Route path="/fund-accounts" element={<FundAccounts />} />
+              <Route path="/accounts" element={<ChartOfAccounts />} />
+              <Route path="/vouchers" element={<Vouchers />} />
+              <Route path="/reports" element={<FinancialReports />} />
+              <Route path="/export" element={<ExportCenter />} />
+              <Route path="/logs" element={<OperationLogs />} />
+              <Route path="/data-safety" element={<DataSafety />} />
+              <Route path="/security" element={<SecurityCenter />} />
+              <Route path="*" element={<Navigate to="/" replace />} />
+            </Routes>
+          )}
         </Content>
       </div>
     </Layout>
