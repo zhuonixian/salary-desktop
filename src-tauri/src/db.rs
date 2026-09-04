@@ -356,7 +356,8 @@ pub fn create_tables(conn: &Connection) -> AppResult<()> {
             belong_month TEXT NOT NULL,
             source_type TEXT NOT NULL CHECK (source_type IN (
                 'salary_accrual','salary_payment','reimbursement_accrual',
-                'reimbursement_payment','invoice_expense','bank_manual','period_close')),
+                'reimbursement_payment','invoice_expense','bank_manual','period_close',
+                'fund_document')),
             source_id INTEGER NOT NULL,
             total_amount REAL NOT NULL DEFAULT 0,
             status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','void')),
@@ -630,6 +631,8 @@ const STAGE7_NEW_TABLES: &[&str] = &[
 ];
 
 /// 第七阶段 schema 迁移入口（幂等，可在新旧库上重复执行）：
+/// 0. 重建 `vouchers` 表扩展 `source_type` 白名单（`'fund_document'`，spec 4.7），保留原 id、
+///    分录外键关系与全部索引；新库 DDL 已含该类型时跳过；
 /// 1. 建六张资金领域新表（资金账户/往来单位/操作人/资金单据/审批事件/业务附件）；
 /// 2. 为凭证分录、付款批次、银行流水补可空 `fund_account_id`（历史数据保持 NULL 进待归集，不猜测归属）；
 /// 3. 银行流水去重唯一索引重建为含账户维度，避免不同账户同日同金额流水误判重复；
@@ -639,6 +642,9 @@ const STAGE7_NEW_TABLES: &[&str] = &[
 /// 全程在单事务中执行，任一步失败整体回滚（含建表/加列/重建索引），不留半成品。
 /// 注意：不在迁移中伪造默认资金账户，默认账户由归集向导确认后创建（spec 9.2）。
 pub fn migrate_stage7_schema(conn: &Connection) -> AppResult<Stage7MigrationReport> {
+    // vouchers 表重建必须在外键开关可切换的 autocommit 状态下进行（事务内切换 pragma 无效），
+    // 自身仍包在独立事务中，失败整体回滚
+    rebuild_vouchers_source_type_check(conn)?;
     run_migration_in_transaction(conn, |c| {
         create_stage7_tables(c)?;
         // 兼容迁移：三处资金辅助核算列（可空、无默认值），带外键引用
@@ -690,6 +696,98 @@ pub fn migrate_stage7_schema(conn: &Connection) -> AppResult<Stage7MigrationRepo
         report.completed_at = get_setting(c, "stage7_migration_completed_at")?;
         Ok(report)
     })
+}
+
+/// 重建 `vouchers` 表扩展 `source_type` CHECK 白名单（`'fund_document'`，spec 4.7）。
+///
+/// 旧库的 CHECK 约束固化在表定义里，只能重建表放行新类型；新库 DDL 已含该类型时跳过（幂等）。
+/// 重建在独立事务中进行：新建 `vouchers_new` → 按 id 原序复制全部行 → 删除旧表 → 改名回
+/// `vouchers` → 重建原有三条索引，保留原 id、分录外键关系与索引定义。
+///
+/// SQLite 在 `foreign_keys=ON` 时 `DROP TABLE` 父表会触发隐式删除并级联清空 `voucher_lines`，
+/// 因此重建期间临时关闭外键（事务内切换 pragma 无效，必须在 autocommit 下操作），
+/// 提交前用 `PRAGMA foreign_key_check` 全量校验兜底——并非"关外键后无校验覆盖"。
+/// 函数返回时恢复连接原有的外键开关状态。
+fn rebuild_vouchers_source_type_check(conn: &Connection) -> AppResult<()> {
+    let create_sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='vouchers'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(None);
+    // 表不存在（最小测试库）或已是新定义时无需重建
+    let Some(sql) = create_sql else {
+        return Ok(());
+    };
+    if sql.contains("fund_document") {
+        return Ok(());
+    }
+    let fk_before: i64 = conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0))?;
+    conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
+    let result = run_migration_in_transaction(conn, |c| {
+        // 列清单必须与 create_tables 中 vouchers 定义一致；新增列时同步此处
+        c.execute_batch(
+            "
+            CREATE TABLE vouchers_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                voucher_no TEXT UNIQUE NOT NULL,
+                voucher_date TEXT NOT NULL,
+                belong_month TEXT NOT NULL,
+                source_type TEXT NOT NULL CHECK (source_type IN (
+                    'salary_accrual','salary_payment','reimbursement_accrual',
+                    'reimbursement_payment','invoice_expense','bank_manual','period_close',
+                    'fund_document')),
+                source_id INTEGER NOT NULL,
+                total_amount REAL NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','void')),
+                remark TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            );
+            INSERT INTO vouchers_new
+                (id, voucher_no, voucher_date, belong_month, source_type, source_id,
+                 total_amount, status, remark, created_at, updated_at)
+            SELECT id, voucher_no, voucher_date, belong_month, source_type, source_id,
+                   total_amount, status, remark, created_at, updated_at
+            FROM vouchers ORDER BY id;
+            DROP TABLE vouchers;
+            ALTER TABLE vouchers_new RENAME TO vouchers;
+            CREATE INDEX IF NOT EXISTS idx_vouchers_month ON vouchers(belong_month, status);
+            CREATE INDEX IF NOT EXISTS idx_vouchers_source ON vouchers(source_type, source_id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_vouchers_source_active
+                ON vouchers(source_type, source_id) WHERE status = 'active';
+            ",
+        )?;
+        // 结构防漂移：重建后列清单必须与预期一致，防止后续演进只改一处
+        let actual: String = {
+            let mut stmt = c.prepare("PRAGMA table_info(vouchers)")?;
+            let names = stmt
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<Result<Vec<_>, _>>()?;
+            names.join(",")
+        };
+        let expected = "id,voucher_no,voucher_date,belong_month,source_type,source_id,\
+                        total_amount,status,remark,created_at,updated_at";
+        if actual != expected {
+            return Err(AppError::General(format!(
+                "vouchers 表重建异常：列清单与预期不一致（{actual}）"
+            )));
+        }
+        // 提交前全量外键校验：悬空引用（含 vouchers 之外的表）视为升级阻断项，整体回滚
+        let violations = count_fk_check_violations(c)?;
+        if violations > 0 {
+            return Err(AppError::General(format!(
+                "vouchers 表重建中止：发现 {violations} 处外键悬空引用（PRAGMA foreign_key_check），请先通过数据安全中心备份数据并修复后重试"
+            )));
+        }
+        Ok(())
+    });
+    conn.execute_batch(&format!(
+        "PRAGMA foreign_keys={};",
+        if fk_before != 0 { "ON" } else { "OFF" }
+    ))?;
+    result
 }
 
 /// 在单个事务中执行迁移步骤；任一步失败整体回滚，库保持迁移前状态。
@@ -7618,6 +7716,105 @@ mod stage7_tests {
             .query_row("SELECT COUNT(*) FROM fund_accounts", [], |r| r.get(0))
             .unwrap();
         assert_eq!(accounts, 1);
+    }
+
+    /// v0.6.1：vouchers 表 CHECK 白名单扩展 'fund_document'（spec 4.7）。
+    /// 旧库须在事务中安全重建 vouchers 表：断言原 id、分录外键关系、索引与旧查询不变，
+    /// 新类型可写入、非法类型仍被拦截；重建后外键开关恢复原状态、迁移幂等。
+    #[test]
+    fn test_stage7_migration_rebuilds_vouchers_check_whitelist() {
+        let conn = setup_stage7_legacy_db();
+        // 模拟真实应用的连接状态（init_db 会开启外键）
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        let fk_before: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fk_before, 1);
+        migrate_stage7_schema(&conn).unwrap();
+
+        // 表定义已扩展且保留原白名单类型
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='vouchers'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            sql.contains("fund_document"),
+            "vouchers CHECK 应包含 fund_document：{sql}"
+        );
+        assert!(sql.contains("period_close"), "原类型应保留：{sql}");
+
+        // 原 id 与分录外键关系不变（分录可经 voucher_id 关联到重建后的表）
+        let voucher_no: String = conn
+            .query_row("SELECT voucher_no FROM vouchers WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(voucher_no, "V20260801001");
+        let joined: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM vouchers v JOIN voucher_lines vl ON vl.voucher_id = v.id
+                 WHERE v.id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(joined, 2, "原凭证 id=1 的两条分录应完整保留");
+
+        // 三条索引（含同源 active 部分唯一索引）在重建后齐全
+        for idx in [
+            "idx_vouchers_month",
+            "idx_vouchers_source",
+            "idx_vouchers_source_active",
+        ] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?1",
+                    params![idx],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "索引 {idx} 应在重建后存在");
+        }
+
+        // 新白名单可写入；非法 source_type 与非法 status 仍被 CHECK 拦截（旧查询语义不变）
+        conn.execute(
+            "INSERT INTO vouchers
+                (voucher_no, voucher_date, belong_month, source_type, source_id, total_amount, status)
+             VALUES ('V20260901001', '2026-09-01', '2026-09', 'fund_document', 7, 100, 'active')",
+            [],
+        )
+        .unwrap();
+        let bad = conn.execute(
+            "INSERT INTO vouchers
+                (voucher_no, voucher_date, belong_month, source_type, source_id, total_amount, status)
+             VALUES ('V20260901002', '2026-09-01', '2026-09', 'bogus_type', 7, 100, 'active')",
+            [],
+        );
+        assert!(bad.is_err(), "非法 source_type 仍应被 CHECK 拦截");
+        let bad_status = conn.execute(
+            "INSERT INTO vouchers
+                (voucher_no, voucher_date, belong_month, source_type, source_id, total_amount, status)
+             VALUES ('V20260901003', '2026-09-01', '2026-09', 'fund_document', 7, 100, 'posted')",
+            [],
+        );
+        assert!(bad_status.is_err(), "非法 status 仍应被 CHECK 拦截");
+
+        // 幂等：重跑迁移不重复复制、不丢数据
+        migrate_stage7_schema(&conn).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM vouchers", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+
+        // 重建前后连接的外键开关状态保持一致（重建期间临时关闭应被恢复）
+        let fk_after: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fk_after, fk_before);
+        assert_eq!(stage7_fk_violation_count(&conn), 0);
     }
 
     #[test]

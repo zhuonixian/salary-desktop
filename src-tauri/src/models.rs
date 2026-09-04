@@ -886,12 +886,15 @@ pub struct AccountMappingInput {
 // ==================== Accounting（第五阶段 凭证核心） ====================
 
 /// 凭证分录草稿（生成凭证入参的行）。
+/// `fund_account_id`：资金辅助核算账户（第七阶段）；资金科目（1001/1002/1012）分录必填，
+/// 对方科目分录必须为空（spec 4.7）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VoucherLineDraft {
     pub account_code: String,
     pub debit_amount: f64,
     pub credit_amount: f64,
     pub summary: Option<String>,
+    pub fund_account_id: Option<i64>,
 }
 
 /// 凭证草稿（生成凭证入参）。借贷必须平衡，科目必须存在。
@@ -906,6 +909,7 @@ pub struct VoucherDraft {
 }
 
 /// 凭证分录（voucher_lines 表行，按 line_order 排序）。
+/// `fund_account_id`：资金辅助核算账户，仅资金科目分录携带（第七阶段，spec 4.7）。
 #[derive(Debug, Clone, Serialize)]
 pub struct VoucherLine {
     pub id: i64,
@@ -913,6 +917,7 @@ pub struct VoucherLine {
     pub debit_amount: f64,
     pub credit_amount: f64,
     pub summary: Option<String>,
+    pub fund_account_id: Option<i64>,
     pub line_order: i64,
 }
 

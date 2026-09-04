@@ -2,7 +2,7 @@ use crate::db;
 use crate::errors::{AppError, AppResult};
 use crate::models::*;
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 
 /// 查询全部会计科目（按编码排序）。
@@ -321,9 +321,9 @@ fn insert_voucher_rows(
     let id = conn.last_insert_rowid();
     for (i, line) in draft.lines.iter().enumerate() {
         conn.execute(
-            "INSERT INTO voucher_lines (voucher_id, account_code, debit_amount, credit_amount, summary, line_order)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![id, line.account_code, line.debit_amount, line.credit_amount, line.summary, i as i64],
+            "INSERT INTO voucher_lines (voucher_id, account_code, debit_amount, credit_amount, summary, fund_account_id, line_order)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![id, line.account_code, line.debit_amount, line.credit_amount, line.summary, line.fund_account_id, i as i64],
         )?;
     }
     Ok(id)
@@ -345,7 +345,7 @@ pub fn get_voucher(conn: &Connection, id: i64) -> AppResult<Voucher> {
         },
     )?;
     let mut stmt = conn.prepare(
-        "SELECT id, account_code, debit_amount, credit_amount, summary, line_order
+        "SELECT id, account_code, debit_amount, credit_amount, summary, fund_account_id, line_order
          FROM voucher_lines WHERE voucher_id = ?1 ORDER BY line_order",
     )?;
     voucher.lines = stmt
@@ -356,11 +356,32 @@ pub fn get_voucher(conn: &Connection, id: i64) -> AppResult<Voucher> {
                 debit_amount: r.get(2)?,
                 credit_amount: r.get(3)?,
                 summary: r.get(4)?,
-                line_order: r.get(5)?,
+                fund_account_id: r.get(5)?,
+                line_order: r.get(6)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(voucher)
+}
+
+/// 查询某业务源当前唯一生效（active）凭证，无则返回 None。
+/// 供冲正等需要复制原凭证的场景使用。
+pub fn get_active_voucher_for_source(
+    conn: &Connection,
+    source_type: &str,
+    source_id: i64,
+) -> AppResult<Option<Voucher>> {
+    let id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM vouchers WHERE source_type = ?1 AND source_id = ?2 AND status = 'active'",
+            params![source_type, source_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match id {
+        Some(id) => Ok(Some(get_voucher(conn, id)?)),
+        None => Ok(None),
+    }
 }
 
 /// 生成下一凭证号：记-YYYYMM-NNN（NNN 为该月已有凭证数 + 1）。
@@ -438,6 +459,7 @@ pub fn generate_period_close_vouchers(conn: &Connection, month: &str) -> AppResu
                     debit_amount: -*net,
                     credit_amount: 0.0,
                     summary: Some(format!("{month} 年末结转损益（{code}）")),
+                    fund_account_id: None,
                 });
             } else if *net > 0.0 {
                 lines.push(VoucherLineDraft {
@@ -445,6 +467,7 @@ pub fn generate_period_close_vouchers(conn: &Connection, month: &str) -> AppResu
                     debit_amount: 0.0,
                     credit_amount: *net,
                     summary: Some(format!("{month} 年末结转损益（{code}）")),
+                    fund_account_id: None,
                 });
             }
         }
@@ -454,6 +477,7 @@ pub fn generate_period_close_vouchers(conn: &Connection, month: &str) -> AppResu
                 debit_amount: 0.0,
                 credit_amount: -net_total,
                 summary: Some(format!("{month} 结转本年利润")),
+                fund_account_id: None,
             });
         } else {
             lines.push(VoucherLineDraft {
@@ -461,6 +485,7 @@ pub fn generate_period_close_vouchers(conn: &Connection, month: &str) -> AppResu
                 debit_amount: net_total,
                 credit_amount: 0.0,
                 summary: Some(format!("{month} 结转本年亏损")),
+                fund_account_id: None,
             });
         }
         insert_voucher(
@@ -498,12 +523,14 @@ pub fn generate_period_close_vouchers(conn: &Connection, month: &str) -> AppResu
                         debit_amount: amount,
                         credit_amount: 0.0,
                         summary: Some(format!("{month} 结转未分配利润")),
+                        fund_account_id: None,
                     },
                     VoucherLineDraft {
                         account_code: credit_code.into(),
                         debit_amount: 0.0,
                         credit_amount: amount,
                         summary: Some(format!("{month} 结转未分配利润")),
+                        fund_account_id: None,
                     },
                 ],
             },
@@ -590,12 +617,14 @@ pub fn generate_salary_accrual_vouchers(conn: &Connection, month: &str) -> AppRe
                 debit_amount: cost_amount,
                 credit_amount: 0.0,
                 summary: Some(format!("{month} 工资费用（{emp}）")),
+                fund_account_id: None,
             },
             VoucherLineDraft {
                 account_code: "2211".into(),
                 debit_amount: 0.0,
                 credit_amount: cost_amount,
                 summary: Some(format!("{month} 应付职工薪酬（{emp}）")),
+                fund_account_id: None,
             },
         ];
         if withholding_ss + tax > 0.005 {
@@ -604,6 +633,7 @@ pub fn generate_salary_accrual_vouchers(conn: &Connection, month: &str) -> AppRe
                 debit_amount: withholding_ss + tax,
                 credit_amount: 0.0,
                 summary: Some(format!("{month} 代扣款项（{emp}）")),
+                fund_account_id: None,
             });
             if withholding_ss > 0.005 {
                 lines.push(VoucherLineDraft {
@@ -611,6 +641,7 @@ pub fn generate_salary_accrual_vouchers(conn: &Connection, month: &str) -> AppRe
                     debit_amount: 0.0,
                     credit_amount: withholding_ss,
                     summary: Some(format!("{month} 代扣社保公积金（{emp}）")),
+                    fund_account_id: None,
                 });
             }
             if tax > 0.005 {
@@ -619,6 +650,7 @@ pub fn generate_salary_accrual_vouchers(conn: &Connection, month: &str) -> AppRe
                     debit_amount: 0.0,
                     credit_amount: tax,
                     summary: Some(format!("{month} 代扣个税（{emp}）")),
+                    fund_account_id: None,
                 });
             }
         }
@@ -707,12 +739,14 @@ pub fn generate_payment_voucher(conn: &Connection, batch_id: i64) -> AppResult<V
                     debit_amount: total,
                     credit_amount: 0.0,
                     summary: Some(format!("{remark}（{batch_no}）")),
+                    fund_account_id: None,
                 },
                 VoucherLineDraft {
                     account_code: "1002".into(),
                     debit_amount: 0.0,
                     credit_amount: total,
                     summary: Some(format!("{batch_no} 银行支出")),
+                    fund_account_id: None,
                 },
             ],
         },
@@ -781,12 +815,14 @@ pub fn create_bank_manual_voucher(
                     debit_amount: expense,
                     credit_amount: 0.0,
                     summary: summary.clone(),
+                    fund_account_id: None,
                 },
                 VoucherLineDraft {
                     account_code: "1002".into(),
                     debit_amount: 0.0,
                     credit_amount: expense,
                     summary,
+                    fund_account_id: None,
                 },
             ],
         )
@@ -799,12 +835,14 @@ pub fn create_bank_manual_voucher(
                     debit_amount: income,
                     credit_amount: 0.0,
                     summary: summary.clone(),
+                    fund_account_id: None,
                 },
                 VoucherLineDraft {
                     account_code: account_code.into(),
                     debit_amount: 0.0,
                     credit_amount: income,
                     summary,
+                    fund_account_id: None,
                 },
             ],
         )
@@ -866,6 +904,7 @@ fn invoice_expense_lines(
                 debit_amount: amt,
                 credit_amount: 0.0,
                 summary: Some(format!("{month} 报销费用")),
+                fund_account_id: None,
             });
         }
     }
@@ -875,6 +914,7 @@ fn invoice_expense_lines(
             debit_amount: tax_total,
             credit_amount: 0.0,
             summary: Some(format!("{month} 报销进项税额")),
+            fund_account_id: None,
         });
     }
     lines.push(VoucherLineDraft {
@@ -882,6 +922,7 @@ fn invoice_expense_lines(
         debit_amount: 0.0,
         credit_amount: total,
         summary: Some(format!("{month} 应付报销款")),
+        fund_account_id: None,
     });
     Ok(lines)
 }
@@ -924,12 +965,14 @@ pub fn generate_reimbursement_accrual_voucher(
                 debit_amount: total,
                 credit_amount: 0.0,
                 summary: Some(format!("{belong_month} 报销费用（无票部分）")),
+                fund_account_id: None,
             },
             VoucherLineDraft {
                 account_code: "2241".into(),
                 debit_amount: 0.0,
                 credit_amount: total,
                 summary: Some(format!("{belong_month} 应付报销款")),
+                fund_account_id: None,
             },
         ];
     } else {
@@ -944,6 +987,7 @@ pub fn generate_reimbursement_accrual_voucher(
                     debit_amount: credit - debit,
                     credit_amount: 0.0,
                     summary: Some(format!("{belong_month} 报销费用（无票部分）")),
+                    fund_account_id: None,
                 },
             );
         }
@@ -1027,6 +1071,7 @@ pub fn maybe_generate_invoice_expense_voucher(
         debit_amount: amount,
         credit_amount: 0.0,
         summary: Some(format!("{belong_month} 费用（无报销关联发票）")),
+        fund_account_id: None,
     }];
     if tax > 0.0 {
         lines.push(VoucherLineDraft {
@@ -1034,6 +1079,7 @@ pub fn maybe_generate_invoice_expense_voucher(
             debit_amount: tax,
             credit_amount: 0.0,
             summary: Some("进项税额".into()),
+            fund_account_id: None,
         });
     }
     lines.push(VoucherLineDraft {
@@ -1041,6 +1087,7 @@ pub fn maybe_generate_invoice_expense_voucher(
         debit_amount: 0.0,
         credit_amount: total,
         summary: Some(format!("{belong_month} 应付费用")),
+        fund_account_id: None,
     });
     let voucher = insert_voucher(
         conn,
@@ -2087,6 +2134,59 @@ mod tests {
         conn
     }
 
+    /// 第七阶段资金辅助核算：分录 fund_account_id 落库并可回读（spec 4.7）；
+    /// get_active_voucher_for_source 按 (source_type, source_id) 命中唯一 active 凭证。
+    #[test]
+    fn test_insert_voucher_persists_fund_account_id() {
+        let conn = setup();
+        conn.execute(
+            "INSERT INTO fund_accounts (account_code, name, account_type, gl_account_code)
+             VALUES ('BANK-T8', '测试户', 'bank', '1002')",
+            [],
+        )
+        .unwrap();
+        let fund_id = conn.last_insert_rowid();
+        let draft = VoucherDraft {
+            belong_month: "2026-08".into(),
+            voucher_date: "2026-08-05".into(),
+            source_type: "fund_document".into(),
+            source_id: 1,
+            remark: Some("资金单 T8".into()),
+            lines: vec![
+                VoucherLineDraft {
+                    account_code: "1002".into(),
+                    debit_amount: 300.0,
+                    credit_amount: 0.0,
+                    summary: None,
+                    fund_account_id: Some(fund_id),
+                },
+                VoucherLineDraft {
+                    account_code: "6602".into(),
+                    debit_amount: 0.0,
+                    credit_amount: 300.0,
+                    summary: None,
+                    fund_account_id: None,
+                },
+            ],
+        };
+        let v = insert_voucher(&conn, &draft).unwrap();
+        assert_eq!(v.lines.len(), 2);
+        assert_eq!(v.lines[0].fund_account_id, Some(fund_id));
+        assert_eq!(v.lines[1].fund_account_id, None);
+
+        // 回读：get_voucher 与按源查询都带出辅助账户
+        let reread = get_voucher(&conn, v.id).unwrap();
+        assert_eq!(reread.lines[0].fund_account_id, Some(fund_id));
+        let found = get_active_voucher_for_source(&conn, "fund_document", 1)
+            .unwrap()
+            .expect("应命中 active 凭证");
+        assert_eq!(found.id, v.id);
+        assert_eq!(found.lines[1].fund_account_id, None);
+        assert!(get_active_voucher_for_source(&conn, "fund_document", 99)
+            .unwrap()
+            .is_none());
+    }
+
     #[test]
     fn test_account_crud() {
         let conn = setup();
@@ -2313,12 +2413,14 @@ mod tests {
                     debit_amount: 30.0,
                     credit_amount: 0.0,
                     summary: Some("手续费".into()),
+                    fund_account_id: None,
                 },
                 VoucherLineDraft {
                     account_code: "1002".into(),
                     debit_amount: 0.0,
                     credit_amount: 30.0,
                     summary: Some("手续费".into()),
+                    fund_account_id: None,
                 },
             ],
         };
@@ -2332,6 +2434,7 @@ mod tests {
                 debit_amount: 30.0,
                 credit_amount: 0.0,
                 summary: None,
+                fund_account_id: None,
             }],
             ..draft.clone()
         };
@@ -2706,18 +2809,21 @@ mod tests {
                     debit_amount: 50.0,
                     credit_amount: 0.0,
                     summary: None,
+                    fund_account_id: None,
                 },
                 VoucherLineDraft {
                     account_code: "6603".into(),
                     debit_amount: -20.0,
                     credit_amount: 0.0,
                     summary: None,
+                    fund_account_id: None,
                 },
                 VoucherLineDraft {
                     account_code: "1002".into(),
                     debit_amount: 0.0,
                     credit_amount: 30.0,
                     summary: None,
+                    fund_account_id: None,
                 },
             ],
         };
@@ -3494,12 +3600,14 @@ mod tests {
                     debit_amount: 30.0,
                     credit_amount: 0.0,
                     summary: None,
+                    fund_account_id: None,
                 },
                 VoucherLineDraft {
                     account_code: "1002".into(),
                     debit_amount: 0.0,
                     credit_amount: 30.0,
                     summary: None,
+                    fund_account_id: None,
                 },
             ],
         };
@@ -3613,6 +3721,7 @@ mod tests {
             debit_amount: debit,
             credit_amount: credit,
             summary: Some(format!("{code} 摘要")),
+            fund_account_id: None,
         }
     }
 
@@ -4041,12 +4150,14 @@ mod tests {
                         debit_amount: 800.0,
                         credit_amount: 0.0,
                         summary: Some("结转损益".into()),
+                        fund_account_id: None,
                     },
                     VoucherLineDraft {
                         account_code: "1002".into(),
                         debit_amount: 0.0,
                         credit_amount: 800.0,
                         summary: Some("银行支出".into()),
+                        fund_account_id: None,
                     },
                 ],
             },

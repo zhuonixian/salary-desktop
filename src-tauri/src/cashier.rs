@@ -4,17 +4,19 @@
 //! 模块边界（spec 第 10 节）：
 //! - 本模块负责出纳主数据、资金单据（fund_documents）命令驱动状态机与审批轨迹；
 //!   后续批次在此追加资金日记账、银行对账与借款核销。
-//! - `db.rs` 只保留 schema/迁移与低层通用 helper；凭证生成、冲正凭证与报表归 `accounting.rs`；
+//! - `db.rs` 只保留 schema/迁移与低层通用 helper；凭证引擎与报表归 `accounting.rs`，
+//!   资金单分录规则（结算/冲正凭证生成，spec 4.7）在本模块于状态机事务内调用；
 //! - `commands.rs` 负责 State 管理、文件对话框参数与日志编排。
 //!
 //! 基础资料为主数据：不受 `ensure_month_open` 月结保护（spec 4.4 仅资金单据受月结限制）。
 //! 金额一律正数存储，比较容差 0.005；更新入参 `Option` 字段为 patch 语义（None=保留原值，
 //! `Some("")`=清空）；错误信息统一中文。
 //! 资金单据状态只能经命令流转（submit/approve/reject/withdraw/void/mark_batched/settle/reverse），
-//! 状态更新与 approval_events 追加同事务；前端不得直接编辑状态字段。
+//! 状态更新、凭证生成与 approval_events 追加同事务；前端不得直接编辑状态字段。
 
 use std::sync::Mutex;
 
+use crate::accounting;
 use crate::db;
 use crate::db::ensure_month_open;
 use crate::errors::{AppError, AppResult};
@@ -1759,6 +1761,8 @@ pub fn mark_document_batched(
 
 /// 结算（spec 5.1）：收款/内部转账/借款核销单审批后直接结算；
 /// 付款/借款单须经付款批次标记付款后从 batched 结算。
+/// 结算同时生成资金辅助凭证（source_type='fund_document'，spec 4.7），
+/// 状态、凭证与审批事件同事务提交，任何失败整体回滚。
 pub fn settle_fund_document(
     conn: &Connection,
     current: &CurrentOperatorState,
@@ -1790,6 +1794,9 @@ pub fn settle_fund_document(
                 "UPDATE fund_documents SET settled_by = ?2, settled_at = ?3 WHERE id = ?1",
                 params![doc.id, operator_id, now],
             )?;
+            // 结算凭证同事务生成（spec 4.7）：任一分录失败整体回滚，
+            // 结算状态、凭证、审批事件保持原子
+            generate_fund_document_voucher(tx, doc)?;
             Ok(())
         },
     )
@@ -1797,7 +1804,8 @@ pub fn settle_fund_document(
 
 /// 冲正（settled → reversed，spec 5.1）：在开放月份创建相反方向冲正单（立即结算生效），
 /// 原单置为已冲正；原单月份与冲正月份均须未月结。
-/// 凭证联动（反向凭证 + 原凭证保留 active 建立追溯）由 Task 8 挂接，见函数尾 TODO。
+/// 冲正凭证同事务生成：复制原单生效凭证并交换借贷方向（source_id 指向冲正单），
+/// 原凭证保留 active，经冲正单 `reversal_of_id` 与凭证备注建立追溯（spec 4.7/5.1）。
 pub fn reverse_fund_document(
     conn: &Connection,
     current: &CurrentOperatorState,
@@ -1879,11 +1887,248 @@ pub fn reverse_fund_document(
         Some(operator_id),
         Some(comment),
     )?;
+    // 冲正凭证同事务生成（spec 4.7）：复制原单凭证交换借贷、原凭证保留 active；
+    // 任何一步失败（含凭证生成）整体回滚，不留"已冲正但无凭证"的半成品
+    let reversal_doc = get_fund_document(&tx, reversal_id)?;
+    generate_reversal_document_voucher(&tx, &reversal_doc, &original)?;
     tx.commit()?;
 
-    // TODO(Task 8): 冲正凭证联动——在冲正事务中生成反向凭证（写 fund_account_id 辅助核算），
-    // 原凭证保留 active 并建立追溯关系（spec 4.7/5.1，Task 8 验收项）。
     get_fund_document(conn, reversal_id)
+}
+
+// ==================== 资金单凭证联动（spec 4.7） ====================
+
+/// 资金单凭证 source_type（vouchers 表 CHECK 白名单第七阶段新增）
+const FUND_VOUCHER_SOURCE_TYPE: &str = "fund_document";
+
+/// 借款/借款核销单未指定对方科目时的默认科目（1221 其他应收款，spec 4.7）
+const ADVANCE_DEFAULT_GL: &str = "1221";
+
+/// 读取资金账户挂接的总账科目（建账户时已限 1001/1002/1012，见 `STAGE7_FUND_GL_CODES`）
+fn fund_account_gl_code(conn: &Connection, account_id: i64) -> AppResult<String> {
+    conn.query_row(
+        "SELECT gl_account_code FROM fund_accounts WHERE id = ?1",
+        params![account_id],
+        |r| r.get(0),
+    )
+    .optional()?
+    .ok_or_else(|| AppError::NotFound(format!("资金账户不存在：id={account_id}")))
+}
+
+/// 单据对方科目（去空格；空串视同未填）
+fn doc_counter_account(doc: &FundDocument) -> Option<&str> {
+    doc.counter_account_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+/// 构造一条凭证分录（金额方向为正数，资金行带 fund_account_id、对方行必须为空）
+fn fund_voucher_line(
+    account_code: String,
+    debit: f64,
+    credit: f64,
+    fund_account_id: Option<i64>,
+    summary: &str,
+) -> VoucherLineDraft {
+    VoucherLineDraft {
+        account_code,
+        debit_amount: debit,
+        credit_amount: credit,
+        summary: Some(summary.to_string()),
+        fund_account_id,
+    }
+}
+
+/// 资金分录辅助核算校验（spec 4.7）：资金科目（1001/1002/1012）分录必须带 `fund_account_id`，
+/// 对方科目分录必须为空——漏写辅助核算直接报错回滚，不允许生成"无主"资金分录。
+fn ensure_fund_voucher_lines(lines: &[VoucherLineDraft]) -> AppResult<()> {
+    for line in lines {
+        let is_fund = db::STAGE7_FUND_GL_CODES.contains(&line.account_code.as_str());
+        if is_fund && line.fund_account_id.is_none() {
+            return Err(AppError::General(format!(
+                "科目 {} 为资金科目，分录必须携带资金账户",
+                line.account_code
+            )));
+        }
+        if !is_fund && line.fund_account_id.is_some() {
+            return Err(AppError::General(format!(
+                "科目 {} 非资金科目，分录不允许携带资金账户",
+                line.account_code
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// 生成资金单结算凭证（spec 4.7 分录方向规则；source_type='fund_document'，source_id=单据 id）：
+/// - 收款：借目标资金账户 / 贷对方科目；
+/// - 付款：借对方科目 / 贷来源资金账户；
+/// - 内部转账：借目标账户 / 贷来源账户（两行各带对应 `fund_account_id`）；
+/// - 员工借款：借对方科目（默认 1221 其他应收款）/ 贷来源资金账户；
+/// - 借款核销：借目标资金账户 / 贷对方科目（默认 1221 其他应收款）。
+/// 资金行 `fund_account_id` 必填、对方行必须为空；凭证归属月/日期取单据归属月/单据日期。
+/// 必须在状态机事务内调用（settle），凭证与结算状态、审批事件同事务提交。
+pub(crate) fn generate_fund_document_voucher(
+    conn: &Connection,
+    doc: &FundDocument,
+) -> AppResult<Voucher> {
+    let amount = doc.amount;
+    let summary = doc.summary.as_str();
+    let require_counter = |label: &str| -> AppResult<String> {
+        doc_counter_account(doc)
+            .map(str::to_string)
+            .ok_or_else(|| AppError::General(format!("单据 {} 缺少对方科目，无法生成凭证", label)))
+    };
+    let require_account = |id: Option<i64>, label: &str| -> AppResult<i64> {
+        id.ok_or_else(|| {
+            AppError::General(format!(
+                "单据 {} 缺少{}资金账户，无法生成凭证",
+                doc.document_no, label
+            ))
+        })
+    };
+    let lines: Vec<VoucherLineDraft> = match doc.document_type.as_str() {
+        "receipt" => {
+            let target = require_account(doc.target_account_id, "目标")?;
+            let counter = require_counter("收款单")?;
+            vec![
+                fund_voucher_line(
+                    fund_account_gl_code(conn, target)?,
+                    amount,
+                    0.0,
+                    Some(target),
+                    summary,
+                ),
+                fund_voucher_line(counter, 0.0, amount, None, summary),
+            ]
+        }
+        "payment" => {
+            let source = require_account(doc.source_account_id, "来源")?;
+            let counter = require_counter("付款单")?;
+            vec![
+                fund_voucher_line(counter, amount, 0.0, None, summary),
+                fund_voucher_line(
+                    fund_account_gl_code(conn, source)?,
+                    0.0,
+                    amount,
+                    Some(source),
+                    summary,
+                ),
+            ]
+        }
+        "transfer" => {
+            let source = require_account(doc.source_account_id, "来源")?;
+            let target = require_account(doc.target_account_id, "目标")?;
+            vec![
+                fund_voucher_line(
+                    fund_account_gl_code(conn, target)?,
+                    amount,
+                    0.0,
+                    Some(target),
+                    summary,
+                ),
+                fund_voucher_line(
+                    fund_account_gl_code(conn, source)?,
+                    0.0,
+                    amount,
+                    Some(source),
+                    summary,
+                ),
+            ]
+        }
+        "advance" => {
+            let source = require_account(doc.source_account_id, "来源")?;
+            let counter = doc_counter_account(doc)
+                .map(str::to_string)
+                .unwrap_or_else(|| ADVANCE_DEFAULT_GL.to_string());
+            vec![
+                fund_voucher_line(counter, amount, 0.0, None, summary),
+                fund_voucher_line(
+                    fund_account_gl_code(conn, source)?,
+                    0.0,
+                    amount,
+                    Some(source),
+                    summary,
+                ),
+            ]
+        }
+        "advance_settlement" => {
+            let target = require_account(doc.target_account_id, "目标")?;
+            let counter = doc_counter_account(doc)
+                .map(str::to_string)
+                .unwrap_or_else(|| ADVANCE_DEFAULT_GL.to_string());
+            vec![
+                fund_voucher_line(
+                    fund_account_gl_code(conn, target)?,
+                    amount,
+                    0.0,
+                    Some(target),
+                    summary,
+                ),
+                fund_voucher_line(counter, 0.0, amount, None, summary),
+            ]
+        }
+        other => {
+            return Err(AppError::General(format!(
+                "单据类型「{other}」不支持生成结算凭证"
+            )))
+        }
+    };
+    ensure_fund_voucher_lines(&lines)?;
+    accounting::insert_voucher(
+        conn,
+        &VoucherDraft {
+            belong_month: doc.belong_month.clone(),
+            voucher_date: doc.document_date.clone(),
+            source_type: FUND_VOUCHER_SOURCE_TYPE.into(),
+            source_id: doc.id,
+            remark: Some(format!("资金单 {}", doc.document_no)),
+            lines,
+        },
+    )
+}
+
+/// 生成冲正凭证（spec 4.7）：复制原单生效凭证并交换借贷方向
+/// （资金行的 `fund_account_id` 随科目保留），source_id 指向冲正单；
+/// 原凭证保留 active，经冲正单 `reversal_of_id` 与凭证备注建立追溯。
+/// 必须在冲正事务内调用。
+pub(crate) fn generate_reversal_document_voucher(
+    conn: &Connection,
+    reversal: &FundDocument,
+    original: &FundDocument,
+) -> AppResult<Voucher> {
+    let source_voucher =
+        accounting::get_active_voucher_for_source(conn, FUND_VOUCHER_SOURCE_TYPE, original.id)?
+            .ok_or_else(|| {
+                AppError::General(format!(
+                    "原单 {} 没有生效凭证，无法生成冲正凭证",
+                    original.document_no
+                ))
+            })?;
+    let lines: Vec<VoucherLineDraft> = source_voucher
+        .lines
+        .iter()
+        .map(|l| VoucherLineDraft {
+            account_code: l.account_code.clone(),
+            debit_amount: l.credit_amount,
+            credit_amount: l.debit_amount,
+            summary: l.summary.clone(),
+            fund_account_id: l.fund_account_id,
+        })
+        .collect();
+    ensure_fund_voucher_lines(&lines)?;
+    accounting::insert_voucher(
+        conn,
+        &VoucherDraft {
+            belong_month: reversal.belong_month.clone(),
+            voucher_date: reversal.document_date.clone(),
+            source_type: FUND_VOUCHER_SOURCE_TYPE.into(),
+            source_id: reversal.id,
+            remark: Some(format!("冲正原单 {}", original.document_no)),
+            lines,
+        },
+    )
 }
 
 // ==================== 通用校验 helper ====================
@@ -4100,6 +4345,295 @@ mod tests {
         assert_eq!(reversal2.reversal_of_id, Some(reversal.id));
         assert_eq!(reversal2.source_account_id, reversal.target_account_id);
         assert_eq!(reversal2.target_account_id, reversal.source_account_id);
+    }
+
+    // ---------- 资金单凭证联动（Task 8，spec 4.7） ----------
+
+    /// 走完 创建→提交→审批→结算 全流程。
+    /// 付款/借款单按 spec 5.1/5.3 经付款批次流转（直插批次行 + 状态机标记 batched）。
+    fn settled_document(
+        conn: &Connection,
+        current: &CurrentOperatorState,
+        input: &FundDocumentInput,
+    ) -> FundDocument {
+        let doc = create_fund_document(conn, current, input).unwrap();
+        submit_fund_document(conn, current, doc.id, None).unwrap();
+        approve_fund_document(conn, current, doc.id, "ok").unwrap();
+        if BATCHABLE_TYPES.contains(&doc.document_type.as_str()) {
+            let batch_no = format!("PAY-T8-{}", doc.id);
+            conn.execute(
+                "INSERT INTO payment_batches
+                    (batch_no, belong_month, batch_type, status, created_at, updated_at)
+                 VALUES (?1, ?2, 'general', 'approved', '2026-08-05', '2026-08-05')",
+                params![batch_no, doc.belong_month],
+            )
+            .unwrap();
+            let batch_id = conn.last_insert_rowid();
+            mark_document_batched(conn, current, doc.id, batch_id).unwrap();
+        }
+        settle_fund_document(conn, current, doc.id).unwrap()
+    }
+
+    /// 取某资金单当前生效凭证（无则 panic）
+    fn active_fund_voucher(conn: &Connection, doc_id: i64) -> Voucher {
+        accounting::get_active_voucher_for_source(conn, "fund_document", doc_id)
+            .unwrap()
+            .unwrap_or_else(|| panic!("单据 {doc_id} 应有生效凭证"))
+    }
+
+    /// fund_document 源凭证总数
+    fn fund_voucher_count(conn: &Connection) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM vouchers WHERE source_type = 'fund_document'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// 五类单据结算凭证：分录方向、资金行 fund_account_id、对方行为空、借贷平衡（spec 4.7）。
+    #[test]
+    fn test_settle_generates_vouchers_for_all_document_types() {
+        let (conn, current) = fund_doc_env();
+        let fx = setup_doc_fixtures(&conn);
+
+        // 收款：借 1002 目标账户（带辅助）/ 贷 1122 对方科目
+        let receipt = settled_document(&conn, &current, &receipt_input(&fx));
+        let v = active_fund_voucher(&conn, receipt.id);
+        assert_eq!(v.source_type, "fund_document");
+        assert_eq!(v.source_id, receipt.id);
+        assert_eq!(v.belong_month, "2026-08");
+        assert_eq!(v.voucher_date, "2026-08-05");
+        assert_eq!(v.lines.len(), 2);
+        assert_eq!(v.lines[0].account_code, "1002");
+        assert_eq!(
+            (v.lines[0].debit_amount, v.lines[0].credit_amount),
+            (500.0, 0.0)
+        );
+        assert_eq!(v.lines[0].fund_account_id, Some(fx.bank.id));
+        assert_eq!(v.lines[1].account_code, "1122");
+        assert_eq!(
+            (v.lines[1].debit_amount, v.lines[1].credit_amount),
+            (0.0, 500.0)
+        );
+        assert_eq!(v.lines[1].fund_account_id, None);
+
+        // 付款：借 2202 对方科目 / 贷 1002 来源账户（带辅助）
+        let payment = settled_document(&conn, &current, &payment_input(&fx));
+        let v = active_fund_voucher(&conn, payment.id);
+        assert_eq!(v.lines[0].account_code, "2202");
+        assert_eq!(v.lines[0].fund_account_id, None);
+        assert_eq!(v.lines[1].account_code, "1002");
+        assert_eq!(v.lines[1].credit_amount, payment.amount);
+        assert_eq!(v.lines[1].fund_account_id, Some(fx.bank.id));
+
+        // 内部转账：借目标(1001 现金) / 贷来源(1002 银行)，两行各带对应账户
+        let transfer = settled_document(&conn, &current, &transfer_input(&fx));
+        let v = active_fund_voucher(&conn, transfer.id);
+        assert_eq!(v.lines[0].account_code, "1001");
+        assert_eq!(v.lines[0].fund_account_id, Some(fx.cash.id));
+        assert_eq!(v.lines[1].account_code, "1002");
+        assert_eq!(v.lines[1].fund_account_id, Some(fx.bank.id));
+
+        // 员工借款：借 1221 其他应收款（默认对方科目）/ 贷 1002 来源账户
+        let advance = settled_document(&conn, &current, &advance_input(&fx));
+        let v = active_fund_voucher(&conn, advance.id);
+        assert_eq!(v.lines[0].account_code, "1221");
+        assert_eq!(v.lines[0].fund_account_id, None);
+        assert_eq!(v.lines[1].account_code, "1002");
+        assert_eq!(v.lines[1].fund_account_id, Some(fx.bank.id));
+
+        // 借款核销：借 1001 目标账户（资金回流）/ 贷 1221
+        let settlement = settled_document(&conn, &current, &settlement_input(&fx));
+        let v = active_fund_voucher(&conn, settlement.id);
+        assert_eq!(v.lines[0].account_code, "1001");
+        assert_eq!(v.lines[0].fund_account_id, Some(fx.cash.id));
+        assert_eq!(v.lines[1].account_code, "1221");
+        assert_eq!(v.lines[1].fund_account_id, None);
+
+        // 全部凭证借贷平衡且金额等于单据金额
+        for doc_id in [
+            receipt.id,
+            payment.id,
+            transfer.id,
+            advance.id,
+            settlement.id,
+        ] {
+            let v = active_fund_voucher(&conn, doc_id);
+            let debit: f64 = v.lines.iter().map(|l| l.debit_amount).sum();
+            let credit: f64 = v.lines.iter().map(|l| l.credit_amount).sum();
+            assert!((debit - credit).abs() < AMOUNT_TOLERANCE, "凭证应借贷平衡");
+            assert_eq!(v.total_amount, 500.0);
+        }
+    }
+
+    /// 冲正凭证（spec 4.7）：复制原凭证交换借贷、source_id 指向冲正单；
+    /// 原凭证保留 active（红字冲销口径，两单并存账面净影响归零）；冲正的冲正回到原方向。
+    #[test]
+    fn test_reverse_generates_swapped_voucher_and_keeps_original_active() {
+        let (conn, current) = fund_doc_env();
+        let fx = setup_doc_fixtures(&conn);
+        let receipt = settled_document(&conn, &current, &receipt_input(&fx));
+        let original_voucher = active_fund_voucher(&conn, receipt.id);
+
+        let reversal = reverse_fund_document(
+            &conn,
+            &current,
+            &reverse_input(receipt.id, "2026-08", "2026-08-20"),
+        )
+        .unwrap();
+        let rev_voucher = active_fund_voucher(&conn, reversal.id);
+
+        // 冲正凭证：借贷互换（行序随原凭证）、资金行辅助账户随科目保留、备注追溯原单
+        // 原凭证 [1002 借, 1122 贷] → 冲正凭证 [1002 贷, 1122 借]
+        assert_eq!(rev_voucher.lines.len(), 2);
+        assert_eq!(rev_voucher.lines[0].account_code, "1002");
+        assert_eq!(
+            (
+                rev_voucher.lines[0].debit_amount,
+                rev_voucher.lines[0].credit_amount
+            ),
+            (0.0, 500.0)
+        );
+        assert_eq!(rev_voucher.lines[0].fund_account_id, Some(fx.bank.id));
+        assert_eq!(rev_voucher.lines[1].account_code, "1122");
+        assert_eq!(
+            (
+                rev_voucher.lines[1].debit_amount,
+                rev_voucher.lines[1].credit_amount
+            ),
+            (500.0, 0.0)
+        );
+        assert_eq!(rev_voucher.lines[1].fund_account_id, None);
+        assert!(rev_voucher
+            .remark
+            .as_deref()
+            .unwrap_or("")
+            .contains(&receipt.document_no));
+
+        // 原凭证保留 active 且未被改动
+        let still = accounting::get_active_voucher_for_source(&conn, "fund_document", receipt.id)
+            .unwrap()
+            .expect("原凭证应保留 active");
+        assert_eq!(still.id, original_voucher.id);
+        assert_eq!(still.status, "active");
+
+        // 原凭证 + 冲正凭证并存：借方合计 = 贷方合计（账面净影响归零）
+        let (mut debit, mut credit) = (0.0, 0.0);
+        for v in [&still, &rev_voucher] {
+            for l in &v.lines {
+                debit += l.debit_amount;
+                credit += l.credit_amount;
+            }
+        }
+        assert!((debit - credit).abs() < AMOUNT_TOLERANCE);
+
+        // 冲正的冲正：生成回冲凭证回到原方向（借 1002 带辅助账户 / 贷 1122）
+        let reversal2 = reverse_fund_document(
+            &conn,
+            &current,
+            &reverse_input(reversal.id, "2026-08", "2026-08-25"),
+        )
+        .unwrap();
+        let v2 = active_fund_voucher(&conn, reversal2.id);
+        assert_eq!(v2.lines[0].account_code, "1002");
+        assert_eq!(
+            (v2.lines[0].debit_amount, v2.lines[0].credit_amount),
+            (500.0, 0.0)
+        );
+        assert_eq!(v2.lines[0].fund_account_id, Some(fx.bank.id));
+        assert_eq!(v2.lines[1].account_code, "1122");
+        assert_eq!(
+            (v2.lines[1].debit_amount, v2.lines[1].credit_amount),
+            (0.0, 500.0)
+        );
+    }
+
+    /// 防重复：结算前撤回不产生凭证；结算/撤回重走/重复结算各路径后同源凭证唯一，
+    /// 部分唯一索引兜底拦截同源 active 重复凭证。
+    #[test]
+    fn test_settle_voucher_not_duplicated_on_retry_or_resettle() {
+        let (conn, current) = fund_doc_env();
+        let fx = setup_doc_fixtures(&conn);
+        let doc = create_fund_document(&conn, &current, &receipt_input(&fx)).unwrap();
+        submit_fund_document(&conn, &current, doc.id, None).unwrap();
+        // 撤回（结算前）：不产生凭证
+        withdraw_fund_document(&conn, &current, doc.id, None).unwrap();
+        assert_eq!(fund_voucher_count(&conn), 0);
+
+        // 重走 提交→审批→结算：恰好一张凭证
+        submit_fund_document(&conn, &current, doc.id, None).unwrap();
+        approve_fund_document(&conn, &current, doc.id, "ok").unwrap();
+        settle_fund_document(&conn, &current, doc.id).unwrap();
+        assert_eq!(fund_voucher_count(&conn), 1);
+
+        // 重复结算被状态机拦截，不产生第二张凭证
+        assert!(settle_fund_document(&conn, &current, doc.id).is_err());
+        assert_eq!(fund_voucher_count(&conn), 1);
+
+        // 兜底：同源（source_type, source_id）active 凭证被部分唯一索引拦截
+        let dup = conn.execute(
+            "INSERT INTO vouchers
+                (voucher_no, voucher_date, belong_month, source_type, source_id, total_amount, status)
+             VALUES ('V-DUP-001', '2026-08-05', '2026-08', 'fund_document', ?1, 500, 'active')",
+            params![doc.id],
+        );
+        assert!(dup.is_err(), "同源 active 凭证应被部分唯一索引拦截");
+    }
+
+    /// 未结算作废（draft/approved → void）不产生任何凭证。
+    #[test]
+    fn test_void_unsettled_document_generates_no_voucher() {
+        let (conn, current) = fund_doc_env();
+        let fx = setup_doc_fixtures(&conn);
+        let draft = create_fund_document(&conn, &current, &receipt_input(&fx)).unwrap();
+        void_fund_document(&conn, &current, draft.id, "不需要了").unwrap();
+        assert_eq!(fund_voucher_count(&conn), 0);
+
+        let approved = create_fund_document(&conn, &current, &receipt_input(&fx)).unwrap();
+        submit_fund_document(&conn, &current, approved.id, None).unwrap();
+        approve_fund_document(&conn, &current, approved.id, "ok").unwrap();
+        void_fund_document(&conn, &current, approved.id, "审批后作废").unwrap();
+        assert_eq!(fund_voucher_count(&conn), 0);
+    }
+
+    /// 事务原子性：结算中凭证生成失败（对方科目缺失）时，
+    /// 结算状态、凭证、审批事件整体回滚，单据停留在 approved。
+    #[test]
+    fn test_settle_rolls_back_voucher_and_status_on_failure() {
+        let (conn, current) = fund_doc_env();
+        let fx = setup_doc_fixtures(&conn);
+        let doc = create_fund_document(&conn, &current, &receipt_input(&fx)).unwrap();
+        submit_fund_document(&conn, &current, doc.id, None).unwrap();
+        approve_fund_document(&conn, &current, doc.id, "ok").unwrap();
+
+        // 模拟数据漂移：对方科目被外部直改 SQL 清空 → 凭证生成失败
+        conn.execute(
+            "UPDATE fund_documents SET counter_account_code = NULL WHERE id = ?1",
+            params![doc.id],
+        )
+        .unwrap();
+        let err = settle_fund_document(&conn, &current, doc.id)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("对方科目"), "应因缺少对方科目失败：{err}");
+
+        // 状态、凭证、审批事件均无残留（同事务回滚）
+        assert_eq!(get_fund_document(&conn, doc.id).unwrap().status, "approved");
+        assert_eq!(fund_voucher_count(&conn), 0);
+        let detail = get_fund_document_detail(&conn, doc.id).unwrap();
+        let actions: Vec<&str> = detail.events.iter().map(|e| e.action.as_str()).collect();
+        assert_eq!(actions, vec!["submit", "approve"]);
+
+        // 修复数据后重试结算成功：一张凭证，状态 settled
+        conn.execute(
+            "UPDATE fund_documents SET counter_account_code = '1122' WHERE id = ?1",
+            params![doc.id],
+        )
+        .unwrap();
+        settle_fund_document(&conn, &current, doc.id).unwrap();
+        assert_eq!(fund_voucher_count(&conn), 1);
+        assert_eq!(get_fund_document(&conn, doc.id).unwrap().status, "settled");
     }
 
     /// 查询过滤与详情：月份/类型/状态/关键字/往来对象；详情=单据+轨迹；不存在报错。
