@@ -1,4 +1,5 @@
 mod accounting;
+mod cashier;
 mod commands;
 mod data_safety;
 mod db;
@@ -105,6 +106,8 @@ pub fn run() {
 
         app.manage(Mutex::new(conn));
         app.manage(security::SecurityState::new());
+        // 当前操作人会话：不随锁屏清空，重启后为空须重新选择（见 cashier.rs）
+        app.manage(cashier::CurrentOperatorState::new());
         diag("setup() complete, all OK");
         Ok(())
     });
@@ -223,6 +226,18 @@ pub fn run() {
         commands::copy_social_profiles,
         commands::get_social_base_limits,
         commands::set_social_base_limits,
+        // ===== Cashier（第七阶段 7A 资金账户/往来单位/操作人） =====
+        commands::get_fund_accounts,
+        commands::save_fund_account,
+        commands::set_active_fund_account,
+        commands::get_business_partners,
+        commands::save_business_partner,
+        commands::set_active_business_partner,
+        commands::get_operator_profiles,
+        commands::save_operator_profile,
+        commands::set_active_operator_profile,
+        commands::set_current_operator,
+        commands::get_current_operator,
         // ===== Security（Task 6） =====
         security_commands::is_security_initialized,
         security_commands::setup_security,

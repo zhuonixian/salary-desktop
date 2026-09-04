@@ -1077,10 +1077,10 @@ pub struct SocialInsuranceProfileInput {
 }
 
 // ==================== 第七阶段：资金账户 / 往来单位 / 操作人 / 审批事件 / 业务附件 ====================
-// 以下模型由 Task 3+（cashier.rs 领域模块）接入，接入前临时 allow(dead_code)。
+// 基础资料模型已由 Task 3（cashier.rs 领域模块）接入；审批事件/业务附件模型
+// 由 Task 5/6 接入，接入前临时 allow(dead_code)。
 
 /// 资金账户（银行 / 现金 / 第三方支付）
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FundAccount {
     pub id: i64,
@@ -1101,7 +1101,6 @@ pub struct FundAccount {
 }
 
 /// 资金账户录入/更新入参（id=Some 时更新已有账户）
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FundAccountInput {
     pub id: Option<i64>,
@@ -1119,7 +1118,6 @@ pub struct FundAccountInput {
 }
 
 /// 资金账户查询条件
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FundAccountQuery {
     pub account_type: Option<String>,
@@ -1128,7 +1126,6 @@ pub struct FundAccountQuery {
 }
 
 /// 往来单位（供应商 / 客户 / 其他；员工继续引用 employees，不在本表维护）
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BusinessPartner {
     pub id: i64,
@@ -1148,7 +1145,6 @@ pub struct BusinessPartner {
 }
 
 /// 往来单位录入/更新入参（id=Some 时更新已有单位）
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BusinessPartnerInput {
     pub id: Option<i64>,
@@ -1166,7 +1162,6 @@ pub struct BusinessPartnerInput {
 }
 
 /// 往来单位查询条件
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BusinessPartnerQuery {
     pub partner_type: Option<String>,
@@ -1175,7 +1170,6 @@ pub struct BusinessPartnerQuery {
 }
 
 /// 本地操作人档案（署名与审计用，不构成账号体系/RBAC）
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperatorProfile {
     pub id: i64,
@@ -1188,7 +1182,6 @@ pub struct OperatorProfile {
 }
 
 /// 操作人录入/更新入参（id=Some 时更新已有操作人）
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperatorProfileInput {
     pub id: Option<i64>,

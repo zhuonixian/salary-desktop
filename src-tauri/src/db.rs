@@ -617,7 +617,7 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, column_type: &str
 // ==================== 第七阶段（出纳运营闭环）schema 迁移 ====================
 
 /// 资金账户允许挂接的总账科目（库存现金 / 银行存款 / 其他货币资金）
-const STAGE7_FUND_GL_CODES: &[&str] = &["1001", "1002", "1012"];
+pub(crate) const STAGE7_FUND_GL_CODES: &[&str] = &["1001", "1002", "1012"];
 
 /// 第七阶段资金领域新表清单（迁移后自检用）
 const STAGE7_NEW_TABLES: &[&str] = &[

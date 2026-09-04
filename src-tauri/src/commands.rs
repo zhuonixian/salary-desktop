@@ -7,6 +7,7 @@ use rusqlite::Connection;
 use tauri::Manager;
 
 use crate::accounting;
+use crate::cashier;
 use crate::data_safety;
 use crate::db;
 use crate::errors::{AppError, AppResult};
@@ -1927,6 +1928,179 @@ pub fn set_social_base_limits(
         None,
     )?;
     Ok(())
+}
+
+// ==================== Cashier Commands（第七阶段 资金账户/往来单位/操作人） ====================
+//
+// 基础资料为主数据，不受月结保护；写日志署名用当前操作人（未选择时回退 system，
+// 见 cashier::current_operator_name）。当前操作人会话由 CurrentOperatorState 管理。
+
+#[tauri::command]
+pub fn get_fund_accounts(
+    query: FundAccountQuery,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<FundAccount>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(cashier::get_fund_accounts(&conn, &query)?)
+}
+
+#[tauri::command]
+pub fn save_fund_account(
+    data: FundAccountInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<FundAccount, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let account = cashier::save_fund_account(&conn, &data)?;
+    db::log_operation(
+        &conn,
+        "save_fund_account",
+        &format!("保存资金账户 {} {}", account.account_code, account.name),
+        &cashier::current_operator_name(&conn, &current),
+        None,
+    )?;
+    Ok(account)
+}
+
+#[tauri::command]
+pub fn set_active_fund_account(
+    id: i64,
+    active: bool,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<FundAccount, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let account = cashier::set_active_fund_account(&conn, id, active)?;
+    let action = if active { "启用" } else { "停用" };
+    db::log_operation(
+        &conn,
+        "set_active_fund_account",
+        &format!("{action}资金账户 {} {}", account.account_code, account.name),
+        &cashier::current_operator_name(&conn, &current),
+        None,
+    )?;
+    Ok(account)
+}
+
+#[tauri::command]
+pub fn get_business_partners(
+    query: BusinessPartnerQuery,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<BusinessPartner>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(cashier::get_business_partners(&conn, &query)?)
+}
+
+#[tauri::command]
+pub fn save_business_partner(
+    data: BusinessPartnerInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<BusinessPartner, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let partner = cashier::save_business_partner(&conn, &data)?;
+    db::log_operation(
+        &conn,
+        "save_business_partner",
+        &format!("保存往来单位 {} {}", partner.partner_code, partner.name),
+        &cashier::current_operator_name(&conn, &current),
+        None,
+    )?;
+    Ok(partner)
+}
+
+#[tauri::command]
+pub fn set_active_business_partner(
+    id: i64,
+    active: bool,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<BusinessPartner, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let partner = cashier::set_active_business_partner(&conn, id, active)?;
+    let action = if active { "启用" } else { "停用" };
+    db::log_operation(
+        &conn,
+        "set_active_business_partner",
+        &format!("{action}往来单位 {} {}", partner.partner_code, partner.name),
+        &cashier::current_operator_name(&conn, &current),
+        None,
+    )?;
+    Ok(partner)
+}
+
+#[tauri::command]
+pub fn get_operator_profiles(
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<OperatorProfile>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(cashier::get_operator_profiles(&conn)?)
+}
+
+#[tauri::command]
+pub fn save_operator_profile(
+    data: OperatorProfileInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<OperatorProfile, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let profile = cashier::save_operator_profile(&conn, &current, &data)?;
+    db::log_operation(
+        &conn,
+        "save_operator_profile",
+        &format!("保存操作人 {}（{}）", profile.name, profile.role),
+        &cashier::current_operator_name(&conn, &current),
+        None,
+    )?;
+    Ok(profile)
+}
+
+#[tauri::command]
+pub fn set_active_operator_profile(
+    id: i64,
+    active: bool,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<OperatorProfile, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let profile = cashier::set_active_operator_profile(&conn, &current, id, active)?;
+    let action = if active { "启用" } else { "停用" };
+    db::log_operation(
+        &conn,
+        "set_active_operator_profile",
+        &format!("{action}操作人 {}", profile.name),
+        &cashier::current_operator_name(&conn, &current),
+        None,
+    )?;
+    Ok(profile)
+}
+
+/// 切换当前操作人（选择操作人自身署名，避免首次选择时无署名可用）
+#[tauri::command]
+pub fn set_current_operator(
+    operator_id: i64,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<OperatorProfile, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let profile = cashier::set_current_operator(&conn, &current, operator_id)?;
+    db::log_operation(
+        &conn,
+        "set_current_operator",
+        &format!("切换当前操作人为 {}", profile.name),
+        &profile.name,
+        None,
+    )?;
+    Ok(profile)
+}
+
+#[tauri::command]
+pub fn get_current_operator(
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<Option<OperatorProfile>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(cashier::get_current_operator(&conn, &current)?)
 }
 
 #[cfg(test)]
