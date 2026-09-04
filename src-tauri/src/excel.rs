@@ -1413,16 +1413,29 @@ pub fn export_payment_batch(detail: &PaymentBatchDetail, path: &str) -> AppResul
 
     let header_fmt = report_header_format();
     let money_fmt = report_money_format();
-    let batch_type_text = if detail.batch.batch_type == "salary" {
-        "工资"
-    } else {
-        "报销"
+    let batch_type_text = match detail.batch.batch_type.as_str() {
+        "salary" => "工资",
+        "reimbursement" => "报销",
+        "general" => "通用",
+        _ => "未知",
     };
 
     worksheet.write_string(0, 0, format!("付款批次：{}", detail.batch.batch_no))?;
     worksheet.write_string(1, 0, format!("类型：{batch_type_text}"))?;
     worksheet.write_string(1, 2, format!("月份：{}", detail.batch.belong_month))?;
     worksheet.write_number_with_format(1, 4, detail.batch.total_amount, &money_fmt)?;
+    worksheet.write_string(
+        2,
+        0,
+        format!(
+            "付款账户：{}",
+            detail
+                .batch
+                .fund_account_name
+                .as_deref()
+                .unwrap_or("历史批次未指定")
+        ),
+    )?;
 
     let headers = [
         "序号",
@@ -2041,6 +2054,7 @@ fn payment_source_text(source_type: &str) -> &str {
     match source_type {
         "salary_result" => "工资",
         "reimbursement_claim" => "报销",
+        "fund_document" => "资金单",
         _ => source_type,
     }
 }

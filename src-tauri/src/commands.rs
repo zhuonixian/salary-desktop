@@ -887,24 +887,25 @@ pub fn get_payment_batch_detail(
 pub fn create_payment_batch(
     data: PaymentBatchInput,
     state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, crate::cashier::CurrentOperatorState>,
 ) -> Result<PaymentBatchDetail, AppError> {
     let mut conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
-    let detail = db::create_payment_batch(&mut conn, &data)?;
+    let detail = db::create_payment_batch(&mut conn, &data, &current)?;
     db::log_operation(
         &conn,
         "create_payment_batch",
         &format!(
             "生成{}付款批次{}，{}笔，金额{:.2}",
-            if detail.batch.batch_type == "salary" {
-                "工资"
-            } else {
-                "报销"
+            match detail.batch.batch_type.as_str() {
+                "salary" => "工资",
+                "reimbursement" => "报销",
+                _ => "通用",
             },
             detail.batch.batch_no,
             detail.batch.item_count,
             detail.batch.total_amount
         ),
-        "system",
+        &crate::cashier::current_operator_name(&conn, &current),
         data.remark.as_deref(),
     )?;
     Ok(detail)
@@ -935,14 +936,15 @@ pub fn export_payment_batch_file(
 pub fn mark_payment_batch_paid(
     data: PaymentBatchPaidInput,
     state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, crate::cashier::CurrentOperatorState>,
 ) -> Result<PaymentBatch, AppError> {
     let mut conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
-    let batch = db::mark_payment_batch_paid(&mut conn, &data)?;
+    let batch = db::mark_payment_batch_paid(&mut conn, &data, &current)?;
     db::log_operation(
         &conn,
         "mark_payment_batch_paid",
         &format!("标记付款批次{}已付款", batch.batch_no),
-        "system",
+        &crate::cashier::current_operator_name(&conn, &current),
         Some(&data.payment_date),
     )?;
     Ok(batch)
@@ -952,14 +954,15 @@ pub fn mark_payment_batch_paid(
 pub fn void_payment_batch(
     data: PaymentBatchVoidInput,
     state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, crate::cashier::CurrentOperatorState>,
 ) -> Result<PaymentBatch, AppError> {
     let mut conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
-    let batch = db::void_payment_batch(&mut conn, &data)?;
+    let batch = db::void_payment_batch(&mut conn, &data, &current)?;
     db::log_operation(
         &conn,
         "void_payment_batch",
         &format!("作废付款批次{}", batch.batch_no),
-        "system",
+        &crate::cashier::current_operator_name(&conn, &current),
         Some(&data.reason),
     )?;
     Ok(batch)
@@ -1657,15 +1660,23 @@ pub fn delete_account_mapping(
 }
 
 /// 未匹配银行流水手工指定科目生成凭证（bank_manual）。
+/// fund_account_id 为资金账户（spec 4.7：手工凭证资金行必须带资金辅助核算）。
 #[tauri::command]
 pub fn create_bank_manual_voucher(
     transaction_id: i64,
     account_code: String,
+    fund_account_id: i64,
     summary: Option<String>,
     state: tauri::State<'_, Mutex<Connection>>,
 ) -> Result<Voucher, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
-    let v = accounting::create_bank_manual_voucher(&conn, transaction_id, &account_code, summary)?;
+    let v = accounting::create_bank_manual_voucher(
+        &conn,
+        transaction_id,
+        &account_code,
+        fund_account_id,
+        summary,
+    )?;
     db::log_operation(
         &conn,
         "create_bank_manual_voucher",

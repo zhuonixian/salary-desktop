@@ -341,6 +341,10 @@ pub struct PaymentBatch {
     pub item_count: i32,
     pub payment_date: Option<String>,
     pub remark: Option<String>,
+    /// 付款资金账户（第七阶段起创建必选；历史批次允许 NULL 且只读）
+    pub fund_account_id: Option<i64>,
+    /// 资金账户名称（查询联表带出，仅展示用）
+    pub fund_account_name: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
 }
@@ -379,6 +383,9 @@ pub struct PaymentBatchQuery {
 pub struct PaymentBatchInput {
     pub belong_month: String,
     pub batch_type: String,
+    /// 付款资金账户（三种批次类型创建时均必选，spec 5.3）
+    pub fund_account_id: Option<i64>,
+    /// general 批次勾选的已审批资金单 id；salary/reimbursement 传 None 时自动纳入全部待付明细
     pub source_ids: Option<Vec<i64>>,
     pub remark: Option<String>,
 }

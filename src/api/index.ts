@@ -32,6 +32,7 @@ import type {
   PaymentBatchQuery,
   PaymentBatchRemarkInput,
   PaymentBatchVoidInput,
+  PaymentItem,
   BankAutoMatchResult,
   BankTransaction,
   BankTransactionIgnoreInput,
@@ -414,6 +415,32 @@ const mockApprovalEvents: ApprovalEvent[] = [
 
 let mockMakerChecker = false;
 
+// ==================== 付款批次预览数据（第七阶段 Task 9） ====================
+// 内存态模拟 payment_batches / payment_items 与批次-资金单状态机联动（演示用，
+// 完整校验以后端为准）。general 批次与 mock 资金单联动：勾选单据 batched，付款后 settled。
+const mockPaymentBatches: PaymentBatch[] = [];
+const mockPaymentItems: PaymentItem[] = [];
+
+const mockNextBatchId = (): number =>
+  mockPaymentBatches.reduce((max, b) => Math.max(max, b.id), 0) + 1;
+const mockNextItemId = (): number =>
+  mockPaymentItems.reduce((max, i) => Math.max(max, i.id), 0) + 1;
+
+const MOCK_BATCH_TYPE_PREFIX: Record<string, string> = {
+  salary: 'GZ',
+  reimbursement: 'BX',
+  general: 'TY',
+};
+
+const mockFindBatch = (id: number): PaymentBatch => {
+  const batch = mockPaymentBatches.find((b) => b.id === id);
+  if (!batch) throw new Error(`付款批次ID=${id}未找到`);
+  return batch;
+};
+
+const mockBatchItems = (batchId: number): PaymentItem[] =>
+  mockPaymentItems.filter((i) => i.batch_id === batchId);
+
 const mockNextFundDocId = (): number =>
   mockFundDocuments.reduce((max, d) => Math.max(max, d.id), 0) + 1;
 
@@ -613,6 +640,157 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
     case 'get_decrypted_attachment_url':
       // 浏览器预览无本地文件系统：返回空串，页面按"预览不可用"处理
       return '';
+    // 付款批次 mock：内存态批次 + 与 mock 资金单的状态机联动（spec 5.3 同规则）
+    case 'query_payment_batches': {
+      const query = (args?.query ?? {}) as PaymentBatchQuery;
+      return mockPaymentBatches
+        .filter((b) => {
+          if (query.belong_month && b.belong_month !== query.belong_month) return false;
+          if (query.batch_type && b.batch_type !== query.batch_type) return false;
+          if (query.status && b.status !== query.status) return false;
+          return true;
+        })
+        .sort((a, b) => (a.created_at ?? '').localeCompare(b.created_at ?? '') || b.id - a.id);
+    }
+    case 'get_payment_batch_detail': {
+      const batch = mockFindBatch(Number(args?.id ?? 0));
+      return { batch, items: mockBatchItems(batch.id) };
+    }
+    case 'create_payment_batch': {
+      const data = args?.data as PaymentBatchInput | undefined;
+      if (!data?.belong_month || !['salary', 'reimbursement', 'general'].includes(data.batch_type)) {
+        throw new Error('付款批次类型无效');
+      }
+      if (!data.fund_account_id) throw new Error('请选择付款资金账户');
+      const account = mockFundAccounts.find((a) => a.id === data.fund_account_id && a.is_active);
+      if (!account) throw new Error('资金账户不存在或已停用');
+
+      // 候选明细：general 从 mock 已审批付款/借款单勾选（同账户同月）；
+      // salary/reimbursement 生成两条员工示例明细
+      let candidates: PaymentItem[];
+      const now = new Date().toISOString();
+      if (data.batch_type === 'general') {
+        const picked = mockFundDocuments.filter((d) => {
+          if (d.status !== 'approved' || !['payment', 'advance'].includes(d.document_type)) return false;
+          if (d.belong_month !== data.belong_month) return false;
+          if (d.source_account_id !== data.fund_account_id) return false;
+          if (data.source_ids && !data.source_ids.includes(d.id)) return false;
+          return !mockPaymentItems.some(
+            (i) => i.source_type === 'fund_document' && i.source_id === d.id && i.status !== 'void',
+          );
+        });
+        if (!picked.length) throw new Error('没有可生成付款批次的明细');
+        candidates = picked.map((d) => ({
+          id: mockNextItemId(),
+          batch_id: 0,
+          source_type: 'fund_document' as const,
+          source_id: d.id,
+          employee_id: d.employee_id ?? undefined,
+          employee_no: d.employee_id != null ? `E${d.employee_id}` : d.partner_id != null ? `P${d.partner_id}` : undefined,
+          employee_name:
+            d.employee_id != null
+              ? `员工${d.employee_id}`
+              : mockBusinessPartners.find((p) => p.id === d.partner_id)?.name ?? '往来单位',
+          bank_name: '工商银行',
+          bank_account: '6222021234567890',
+          amount: d.amount,
+          status: 'pending',
+          remark: d.document_no,
+          created_at: now,
+        }));
+      } else {
+        candidates = [1, 2].map((n) => ({
+          id: mockNextItemId(),
+          batch_id: 0,
+          source_type: (data.batch_type === 'salary' ? 'salary_result' : 'reimbursement_claim') as PaymentItem['source_type'],
+          source_id: n,
+          employee_id: n,
+          employee_no: `E00${n}`,
+          employee_name: n === 1 ? '张三' : '李四',
+          bank_name: '工商银行',
+          bank_account: n === 1 ? '6222021234567891' : '6222021234567892',
+          amount: data.batch_type === 'salary' ? 7800 : 500,
+          status: 'pending',
+          remark: undefined,
+          created_at: now,
+        }));
+      }
+      if (data.batch_type === 'general') {
+        for (const item of candidates) {
+          mockTransitionFundDocument(item.source_id, ['approved'], 'batched', 'batch');
+        }
+      }
+      const batch: PaymentBatch = {
+        id: mockNextBatchId(),
+        batch_no: `${MOCK_BATCH_TYPE_PREFIX[data.batch_type]}${data.belong_month.replace('-', '')}${String(Date.now()).slice(-6)}`,
+        belong_month: data.belong_month,
+        batch_type: data.batch_type,
+        status: 'draft',
+        total_amount: candidates.reduce((s, i) => s + i.amount, 0),
+        item_count: candidates.length,
+        payment_date: undefined,
+        remark: data.remark,
+        fund_account_id: account.id,
+        fund_account_name: account.name,
+        created_at: now,
+        updated_at: now,
+      };
+      mockPaymentBatches.unshift(batch);
+      for (const item of candidates) {
+        mockPaymentItems.push({ ...item, batch_id: batch.id });
+      }
+      return { batch, items: mockBatchItems(batch.id) };
+    }
+    case 'export_payment_batch_file': {
+      const batch = mockFindBatch(Number(args?.id ?? 0));
+      if (batch.status === 'void') throw new Error('已作废付款批次不能导出');
+      if (batch.status !== 'paid') batch.status = 'exported';
+      return batch;
+    }
+    case 'mark_payment_batch_paid': {
+      const data = args?.data as PaymentBatchPaidInput | undefined;
+      const batch = mockFindBatch(Number(data?.id ?? 0));
+      if (batch.status === 'void') throw new Error('已作废付款批次不能标记付款');
+      if (batch.status !== 'exported') throw new Error('付款批次必须先导出后才能标记已付款');
+      if (batch.batch_type === 'general') {
+        for (const item of mockBatchItems(batch.id)) {
+          if (item.source_type === 'fund_document') {
+            mockTransitionFundDocument(item.source_id, ['batched'], 'settled', 'settle');
+          }
+        }
+      }
+      batch.status = 'paid';
+      batch.payment_date = data?.payment_date;
+      batch.updated_at = new Date().toISOString();
+      return batch;
+    }
+    case 'void_payment_batch': {
+      const data = args?.data as PaymentBatchVoidInput | undefined;
+      const batch = mockFindBatch(Number(data?.id ?? 0));
+      if (batch.status === 'void') return batch;
+      if (batch.batch_type === 'general' && batch.status === 'paid') {
+        throw new Error('已付款的通用付款批次不可作废，付款错误请通过资金单冲正处理');
+      }
+      if (batch.batch_type === 'general') {
+        for (const item of mockBatchItems(batch.id)) {
+          if (item.source_type === 'fund_document') {
+            mockTransitionFundDocument(item.source_id, ['batched'], 'approved', 'unbatch');
+          }
+        }
+      }
+      batch.status = 'void';
+      batch.remark = data?.reason ?? batch.remark;
+      batch.updated_at = new Date().toISOString();
+      for (const item of mockBatchItems(batch.id)) item.status = 'void';
+      return batch;
+    }
+    case 'update_payment_batch_remark': {
+      const data = args?.data as PaymentBatchRemarkInput | undefined;
+      const batch = mockFindBatch(Number(data?.id ?? 0));
+      if (batch.status === 'void') throw new Error('已作废付款批次不能修改备注');
+      batch.remark = data?.remark ?? batch.remark;
+      return batch;
+    }
     // 资金单据 mock：内存态轻量状态机，字段结构与后端 FundDocument/ApprovalEvent 一致
     case 'get_fund_documents': {
       const query = (args?.query ?? {}) as FundDocumentQuery;
@@ -794,48 +972,8 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
       };
     case 'export_month_close_package':
       return { success: true, output_dir: String(args?.dir ?? ''), files: [] };
-    case 'query_payment_batches':
-      return [];
     case 'get_vouchers':
       return [];
-    case 'get_payment_batch_detail':
-      return {
-        batch: {
-          id: Number(args?.id ?? 0),
-          batch_no: 'MOCK',
-          belong_month: '',
-          batch_type: 'salary',
-          status: 'draft',
-          total_amount: 0,
-          item_count: 0,
-        },
-        items: [],
-      };
-    case 'create_payment_batch': {
-      const data = args?.data as PaymentBatchInput | undefined;
-      return {
-        batch: {
-          id: Date.now(),
-          batch_no: `MOCK${Date.now()}`,
-          belong_month: data?.belong_month ?? '',
-          batch_type: data?.batch_type ?? 'salary',
-          status: 'draft',
-          total_amount: 0,
-          item_count: 0,
-          remark: data?.remark,
-          created_at: new Date().toISOString(),
-        },
-        items: [],
-      };
-    }
-    case 'export_payment_batch_file':
-      return { id: Number(args?.id ?? 0), batch_no: 'MOCK', belong_month: '', batch_type: 'salary', status: 'exported', total_amount: 0, item_count: 0 };
-    case 'mark_payment_batch_paid':
-      return { id: Number((args?.data as { id?: number } | undefined)?.id ?? 0), batch_no: 'MOCK', belong_month: '', batch_type: 'salary', status: 'paid', total_amount: 0, item_count: 0 };
-    case 'void_payment_batch':
-      return { id: Number((args?.data as { id?: number } | undefined)?.id ?? 0), batch_no: 'MOCK', belong_month: '', batch_type: 'salary', status: 'void', total_amount: 0, item_count: 0 };
-    case 'update_payment_batch_remark':
-      return { id: Number((args?.data as { id?: number } | undefined)?.id ?? 0), batch_no: 'MOCK', belong_month: '', batch_type: 'salary', status: 'draft', total_amount: 0, item_count: 0 };
     case 'import_bank_transactions_file':
       return { success: true, total: 0, imported: 0, skipped: 0, errors: [] };
     case 'query_bank_transactions':
@@ -1246,9 +1384,15 @@ export async function ignoreBankTransaction(data: BankTransactionIgnoreInput): P
 export async function createBankManualVoucher(
   transactionId: number,
   accountCode: string,
+  fundAccountId: number,
   summary?: string,
 ): Promise<Voucher> {
-  return invoke<Voucher>('create_bank_manual_voucher', { transactionId, accountCode, summary });
+  return invoke<Voucher>('create_bank_manual_voucher', {
+    transactionId,
+    accountCode,
+    fundAccountId,
+    summary,
+  });
 }
 
 export async function queryBudgets(query: BudgetQuery): Promise<Budget[]> {

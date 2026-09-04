@@ -350,9 +350,9 @@ export interface MonthCloseWorkbench {
 
 // ==================== 付款批次 ====================
 
-export type PaymentBatchType = 'salary' | 'reimbursement';
+export type PaymentBatchType = 'salary' | 'reimbursement' | 'general';
 export type PaymentBatchStatus = 'draft' | 'exported' | 'paid' | 'void';
-export type PaymentSourceType = 'salary_result' | 'reimbursement_claim';
+export type PaymentSourceType = 'salary_result' | 'reimbursement_claim' | 'fund_document';
 export type PaymentItemStatus = 'pending' | 'paid' | 'void';
 
 export interface PaymentBatch {
@@ -365,6 +365,9 @@ export interface PaymentBatch {
   item_count: number;
   payment_date?: string;
   remark?: string;
+  /** 付款资金账户（第七阶段起创建必选；历史批次为 null 且只读） */
+  fund_account_id?: number | null;
+  fund_account_name?: string | null;
   created_at?: string;
   updated_at?: string;
 }
@@ -399,6 +402,9 @@ export interface PaymentBatchQuery {
 export interface PaymentBatchInput {
   belong_month: string;
   batch_type: PaymentBatchType;
+  /** 付款资金账户（三种批次类型创建时均必选，spec 5.3） */
+  fund_account_id: number;
+  /** general 批次勾选的已审批资金单 id；salary/reimbursement 缺省时后端自动纳入全部待付明细 */
   source_ids?: number[];
   remark?: string;
 }
@@ -1235,6 +1241,7 @@ export const APPROVAL_ACTION_LABEL: Record<string, string> = {
   withdraw: '撤回',
   void: '作废',
   batch: '进入付款批次',
+  unbatch: '移出付款批次',
   settle: '结算',
   reverse: '冲正',
 };

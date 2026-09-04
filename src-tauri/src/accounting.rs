@@ -690,17 +690,21 @@ pub fn void_salary_accrual_vouchers(conn: &Connection, month: &str) -> AppResult
     )?)
 }
 
-/// 生成付款凭证：批次已标记 paid 后调用。salary：借 2211/贷 1002；reimbursement：借 2241/贷 1002。
+/// 生成付款凭证：批次已标记 paid 后调用。salary：借 2211；reimbursement：借 2241；
+/// 贷方为批次资金账户的总账科目（spec 4.7 "贷来源资金账户总账科目"），资金行带
+/// `fund_account_id` 辅助核算（第七阶段 Task 9 补齐存量批次账户维度）。
 pub fn generate_payment_voucher(conn: &Connection, batch_id: i64) -> AppResult<Voucher> {
-    let (batch_no, belong_month, batch_type, payment_date, total, status): (
+    let (batch_no, belong_month, batch_type, payment_date, total, status, fund_account_id): (
         String,
         String,
         String,
         Option<String>,
         f64,
         String,
+        Option<i64>,
     ) = conn.query_row(
-        "SELECT batch_no, belong_month, batch_type, payment_date, total_amount, status
+        "SELECT batch_no, belong_month, batch_type, payment_date, total_amount, status,
+                fund_account_id
          FROM payment_batches WHERE id = ?1",
         params![batch_id],
         |r| {
@@ -711,6 +715,7 @@ pub fn generate_payment_voucher(conn: &Connection, batch_id: i64) -> AppResult<V
                 r.get(3)?,
                 r.get(4)?,
                 r.get(5)?,
+                r.get(6)?,
             ))
         },
     )?;
@@ -719,12 +724,37 @@ pub fn generate_payment_voucher(conn: &Connection, batch_id: i64) -> AppResult<V
             "批次 {batch_no} 未标记已付款，不能生成付款凭证"
         )));
     }
+    let account_id = fund_account_id.ok_or_else(|| {
+        AppError::General(format!(
+            "批次 {batch_no} 缺少付款资金账户，不能生成付款凭证"
+        ))
+    })?;
     let (source_type, debit_account, remark) = match batch_type.as_str() {
         "salary" => ("salary_payment", "2211", "工资代发"),
         "reimbursement" => ("reimbursement_payment", "2241", "报销付款"),
         other => return Err(AppError::General(format!("未知批次类型 {other}"))),
     };
+    // 贷方科目取资金账户挂接的总账科目（1001/1002/1012，建账户时已限定）
+    let credit_account = crate::cashier::fund_account_gl_code(conn, account_id)?;
     let date = payment_date.unwrap_or_else(|| format!("{belong_month}-28"));
+    let lines = vec![
+        VoucherLineDraft {
+            account_code: debit_account.into(),
+            debit_amount: total,
+            credit_amount: 0.0,
+            summary: Some(format!("{remark}（{batch_no}）")),
+            fund_account_id: None,
+        },
+        VoucherLineDraft {
+            account_code: credit_account,
+            debit_amount: 0.0,
+            credit_amount: total,
+            summary: Some(format!("{batch_no} 银行支出")),
+            fund_account_id: Some(account_id),
+        },
+    ];
+    // 资金行辅助核算校验（spec 4.7）：资金科目必须带账户、对方科目必须为空
+    crate::cashier::ensure_fund_voucher_lines(&lines)?;
     insert_voucher(
         conn,
         &VoucherDraft {
@@ -733,22 +763,7 @@ pub fn generate_payment_voucher(conn: &Connection, batch_id: i64) -> AppResult<V
             source_type: source_type.into(),
             source_id: batch_id,
             remark: Some(format!("{remark}（{batch_no}）")),
-            lines: vec![
-                VoucherLineDraft {
-                    account_code: debit_account.into(),
-                    debit_amount: total,
-                    credit_amount: 0.0,
-                    summary: Some(format!("{remark}（{batch_no}）")),
-                    fund_account_id: None,
-                },
-                VoucherLineDraft {
-                    account_code: "1002".into(),
-                    debit_amount: 0.0,
-                    credit_amount: total,
-                    summary: Some(format!("{batch_no} 银行支出")),
-                    fund_account_id: None,
-                },
-            ],
+            lines,
         },
     )
 }
@@ -761,11 +776,14 @@ pub fn void_payment_voucher(conn: &Connection, batch_id: i64) -> AppResult<usize
 }
 
 /// 未匹配银行流水手工指定科目生成凭证（bank_manual）。
-/// 流水必须 unmatched 且未忽略；支出流水：借所选科目/贷 1002；收入流水：借 1002/贷所选科目。
+/// 流水必须 unmatched 且未忽略；支出流水：借所选科目/贷资金账户科目；收入流水：借资金账户科目/贷所选科目。
+/// `fund_account_id` 为用户所选资金账户（spec 4.7：银行流水手工凭证必须在资金行写入
+/// `fund_account_id`），资金行科目取该账户挂接的总账科目。
 pub fn create_bank_manual_voucher(
     conn: &Connection,
     transaction_id: i64,
     account_code: &str,
+    fund_account_id: i64,
     summary: Option<String>,
 ) -> AppResult<Voucher> {
     let (belong_month, transaction_date, income, expense, status, ignore_reason): (
@@ -806,6 +824,20 @@ pub fn create_bank_manual_voucher(
         ));
     }
     db::ensure_month_open(conn, &belong_month)?;
+    // 资金账户必须存在且启用；资金行科目取账户挂接的总账科目（1001/1002/1012）
+    let (fund_gl_code, is_active): (String, i64) = conn
+        .query_row(
+            "SELECT gl_account_code, is_active FROM fund_accounts WHERE id = ?1",
+            params![fund_account_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+        .ok_or_else(|| AppError::NotFound(format!("资金账户不存在：id={fund_account_id}")))?;
+    if is_active == 0 {
+        return Err(AppError::InvalidParam(
+            "资金账户已停用，不能生成凭证".into(),
+        ));
+    }
     let (amount, lines) = if expense > 0.0 {
         (
             expense,
@@ -818,11 +850,11 @@ pub fn create_bank_manual_voucher(
                     fund_account_id: None,
                 },
                 VoucherLineDraft {
-                    account_code: "1002".into(),
+                    account_code: fund_gl_code,
                     debit_amount: 0.0,
                     credit_amount: expense,
                     summary,
-                    fund_account_id: None,
+                    fund_account_id: Some(fund_account_id),
                 },
             ],
         )
@@ -831,11 +863,11 @@ pub fn create_bank_manual_voucher(
             income,
             vec![
                 VoucherLineDraft {
-                    account_code: "1002".into(),
+                    account_code: fund_gl_code,
                     debit_amount: income,
                     credit_amount: 0.0,
                     summary: summary.clone(),
-                    fund_account_id: None,
+                    fund_account_id: Some(fund_account_id),
                 },
                 VoucherLineDraft {
                     account_code: account_code.into(),
@@ -852,6 +884,8 @@ pub fn create_bank_manual_voucher(
             "流水收入支出金额均为 0，不能生成凭证".into(),
         ));
     }
+    // 资金行辅助核算校验（spec 4.7）
+    crate::cashier::ensure_fund_voucher_lines(&lines)?;
     insert_voucher(
         conn,
         &VoucherDraft {
@@ -2592,15 +2626,19 @@ mod tests {
         let mut conn = db::tests::setup_financial_db();
         db::tests::fill_employee_bank_info(&conn);
         db::lock_salary_results(&conn, "2026-08").unwrap();
+        let acc = db::tests::make_batch_fund_account(&conn, "BANK-T1");
+        let operator = db::tests::batch_operator();
         // 2026-08 两个员工 net 合计 = 7800 + 6600 = 14400，只用 E001 构造 total=7800
         let detail = db::create_payment_batch(
             &mut conn,
             &crate::models::PaymentBatchInput {
                 belong_month: "2026-08".into(),
                 batch_type: "salary".into(),
+                fund_account_id: Some(acc),
                 source_ids: None,
                 remark: None,
             },
+            &operator,
         )
         .unwrap();
         assert_eq!(detail.batch.total_amount, 14400.0);
@@ -2612,6 +2650,7 @@ mod tests {
                 id: detail.batch.id,
                 payment_date: "2026-08-31".into(),
             },
+            &operator,
         )
         .unwrap();
         let vouchers = get_vouchers(
@@ -2628,13 +2667,15 @@ mod tests {
         assert_eq!(v.total_amount, 14400.0);
         assert_eq!(v.voucher_date, "2026-08-31");
         assert_eq!(v.source_id, detail.batch.id);
-        // 借 2211 14400，贷 1002 14400
+        // 借 2211 14400，贷 1002（账户科目）14400，资金行带 fund_account_id
         let debit_line = v.lines.iter().find(|l| l.debit_amount > 0.0).unwrap();
         assert_eq!(debit_line.account_code, "2211");
         assert_eq!(debit_line.debit_amount, 14400.0);
+        assert!(debit_line.fund_account_id.is_none());
         let credit_line = v.lines.iter().find(|l| l.credit_amount > 0.0).unwrap();
         assert_eq!(credit_line.account_code, "1002");
         assert_eq!(credit_line.credit_amount, 14400.0);
+        assert_eq!(credit_line.fund_account_id, Some(acc));
         // 作废批次后凭证 void：
         db::void_payment_batch(
             &mut conn,
@@ -2642,6 +2683,7 @@ mod tests {
                 id: detail.batch.id,
                 reason: "测试作废".into(),
             },
+            &operator,
         )
         .unwrap();
         let active = get_vouchers(
@@ -2680,15 +2722,19 @@ mod tests {
     fn test_reimbursement_payment_voucher_accounts() {
         let mut conn = db::tests::setup_financial_db();
         db::tests::fill_employee_bank_info(&conn);
+        let acc = db::tests::make_batch_fund_account(&conn, "BANK-T1");
+        let operator = db::tests::batch_operator();
         // 报销批次：借 2241，贷 1002（claim 2 未付，500 元）
         let detail = db::create_payment_batch(
             &mut conn,
             &crate::models::PaymentBatchInput {
                 belong_month: "2026-08".into(),
                 batch_type: "reimbursement".into(),
+                fund_account_id: Some(acc),
                 source_ids: None,
                 remark: None,
             },
+            &operator,
         )
         .unwrap();
         assert_eq!(detail.batch.total_amount, 500.0);
@@ -2699,6 +2745,7 @@ mod tests {
                 id: detail.batch.id,
                 payment_date: "2026-08-31".into(),
             },
+            &operator,
         )
         .unwrap();
         let vouchers = get_vouchers(
@@ -2723,6 +2770,7 @@ mod tests {
             .find(|l| l.credit_amount > 0.0)
             .unwrap();
         assert_eq!(credit_line.account_code, "1002");
+        assert_eq!(credit_line.fund_account_id, Some(acc));
         // 作废已付批次，报销单付款状态重置后重建 draft 批次，draft 状态直接生成凭证应被拒绝
         db::void_payment_batch(
             &mut conn,
@@ -2730,6 +2778,7 @@ mod tests {
                 id: detail.batch.id,
                 reason: "重建测试".into(),
             },
+            &operator,
         )
         .unwrap();
         conn.execute(
@@ -2742,9 +2791,11 @@ mod tests {
             &crate::models::PaymentBatchInput {
                 belong_month: "2026-08".into(),
                 batch_type: "reimbursement".into(),
+                fund_account_id: Some(acc),
                 source_ids: None,
                 remark: None,
             },
+            &operator,
         )
         .unwrap();
         let err = generate_payment_voucher(&conn, detail2.batch.id).unwrap_err();
@@ -3497,6 +3548,7 @@ mod tests {
     #[test]
     fn test_bank_manual_voucher() {
         let conn = setup();
+        let acc = db::tests::make_batch_fund_account(&conn, "BANK-T1");
         // 插入 1 条 unmatched 支出流水 expense=30 belong_month=2026-08（参考现有流水测试构造）
         conn.execute(
             "INSERT INTO bank_transactions (transaction_date, belong_month, summary, income_amount, expense_amount, balance, status, ignore_reason)
@@ -3507,21 +3559,24 @@ mod tests {
         let tx_id: i64 = conn
             .query_row("SELECT MAX(id) FROM bank_transactions", [], |r| r.get(0))
             .unwrap();
-        let v = create_bank_manual_voucher(&conn, tx_id, "6603", Some("手续费".into())).unwrap();
+        let v =
+            create_bank_manual_voucher(&conn, tx_id, "6603", acc, Some("手续费".into())).unwrap();
         assert_eq!(v.total_amount, 30.0);
         assert_eq!(v.source_type, "bank_manual");
         assert_eq!(v.source_id, tx_id);
         assert_eq!(v.belong_month, "2026-08");
         assert_eq!(v.voucher_date, "2026-08-05");
-        // 借 6603 贷 1002
+        // 借 6603 贷 1002（账户科目），资金行带 fund_account_id
         let debit_line = v.lines.iter().find(|l| l.debit_amount > 0.0).unwrap();
         assert_eq!(debit_line.account_code, "6603");
         assert_eq!(debit_line.debit_amount, 30.0);
+        assert!(debit_line.fund_account_id.is_none());
         let credit_line = v.lines.iter().find(|l| l.credit_amount > 0.0).unwrap();
         assert_eq!(credit_line.account_code, "1002");
         assert_eq!(credit_line.credit_amount, 30.0);
+        assert_eq!(credit_line.fund_account_id, Some(acc));
         // 重复生成报错：入口拦截返回友好中文提示，而非裸 UNIQUE 索引错误（F2）
-        let err = create_bank_manual_voucher(&conn, tx_id, "6603", None).unwrap_err();
+        let err = create_bank_manual_voucher(&conn, tx_id, "6603", acc, None).unwrap_err();
         assert!(err.to_string().contains("不能重复生成"), "got: {err:?}");
         // 忽略流水后凭证 void：
         // db::ignore_bank_transaction(...) 后 active bank_manual 数为 0
@@ -3554,7 +3609,7 @@ mod tests {
         let tx_id2: i64 = conn
             .query_row("SELECT MAX(id) FROM bank_transactions", [], |r| r.get(0))
             .unwrap();
-        let v2 = create_bank_manual_voucher(&conn, tx_id2, "6603", None).unwrap();
+        let v2 = create_bank_manual_voucher(&conn, tx_id2, "6603", acc, None).unwrap();
         assert_eq!(v2.total_amount, 12.0);
         let debit2 = v2.lines.iter().find(|l| l.debit_amount > 0.0).unwrap();
         assert_eq!(debit2.account_code, "1002");
@@ -3573,7 +3628,7 @@ mod tests {
         .unwrap();
         assert_eq!(active2.len(), 0);
         // 已忽略流水不能再生成凭证
-        assert!(create_bank_manual_voucher(&conn, tx_id, "6603", None).is_err());
+        assert!(create_bank_manual_voucher(&conn, tx_id, "6603", acc, None).is_err());
     }
 
     #[test]

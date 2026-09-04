@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  Alert,
   Button,
   Card,
   Col,
   DatePicker,
   Drawer,
+  Empty,
   Form,
   Input,
   Modal,
@@ -16,14 +18,15 @@ import {
   Statistic,
   Table,
   Tag,
+  Tooltip,
   message,
 } from 'antd';
+import type { ColumnsType } from 'antd/es/table';
 import {
   CheckCircleOutlined,
   DeleteOutlined,
   DownloadOutlined,
   EyeOutlined,
-  FileDoneOutlined,
   PlusOutlined,
   ReloadOutlined,
 } from '@ant-design/icons';
@@ -33,6 +36,8 @@ import type { Dayjs } from 'dayjs';
 import {
   createPaymentBatch,
   exportPaymentBatchFile,
+  getFundAccounts,
+  getFundDocuments,
   getPaymentBatchDetail,
   markPaymentBatchPaid,
   queryPaymentBatches,
@@ -40,12 +45,15 @@ import {
   voidPaymentBatch,
 } from '@/api';
 import type {
+  FundAccount,
+  FundDocument,
   PaymentBatch,
   PaymentBatchDetail,
   PaymentBatchStatus,
   PaymentBatchType,
   PaymentItem,
 } from '@/types';
+import { FUND_DOCUMENT_TYPE_LABEL } from '@/types';
 import { SensitiveText } from '@/components/SensitiveText';
 import { SensitiveStatistic } from '@/components/SensitiveStatistic';
 import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
@@ -55,6 +63,7 @@ const { TextArea } = Input;
 const typeMeta: Record<PaymentBatchType, { text: string; color: string }> = {
   salary: { text: '工资', color: 'blue' },
   reimbursement: { text: '报销', color: 'cyan' },
+  general: { text: '通用', color: 'purple' },
 };
 
 const statusMeta: Record<PaymentBatchStatus, { text: string; color: string }> = {
@@ -64,7 +73,14 @@ const statusMeta: Record<PaymentBatchStatus, { text: string; color: string }> = 
   void: { text: '已作废', color: 'red' },
 };
 
-const sourceText = (sourceType: string) => (sourceType === 'salary_result' ? '工资' : '报销');
+const sourceText = (sourceType: string) =>
+  sourceType === 'salary_result' ? '工资' : sourceType === 'reimbursement_claim' ? '报销' : '资金单';
+
+interface CreateFormValues {
+  batch_type: PaymentBatchType;
+  fund_account_id: number;
+  remark?: string;
+}
 
 const Payments: React.FC = () => {
   const { month, setMonth } = useBusinessMonth();
@@ -76,6 +92,17 @@ const Payments: React.FC = () => {
   const [detail, setDetail] = useState<PaymentBatchDetail | null>(null);
   const [paidForm] = Form.useForm<{ payment_date: Dayjs }>();
   const [remarkForm] = Form.useForm<{ remark?: string }>();
+
+  // 生成批次向导：类型 + 付款账户（三种批次一致，spec 5.3）；general 需勾选已审批资金单
+  const [createOpen, setCreateOpen] = useState(false);
+  const [createForm] = Form.useForm<CreateFormValues>();
+  const [accounts, setAccounts] = useState<FundAccount[]>([]);
+  const [createType, setCreateType] = useState<PaymentBatchType>('salary');
+  const [createAccount, setCreateAccount] = useState<number | undefined>(undefined);
+  const [fundDocs, setFundDocs] = useState<FundDocument[]>([]);
+  const [selectedDocIds, setSelectedDocIds] = useState<number[]>([]);
+  const [docsLoading, setDocsLoading] = useState(false);
+  const [creating, setCreating] = useState(false);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -96,15 +123,6 @@ const Payments: React.FC = () => {
     fetchData();
   }, [fetchData]);
 
-  const summary = useMemo(() => ({
-    total: batches.length,
-    draft: batches.filter((item) => item.status === 'draft').length,
-    exported: batches.filter((item) => item.status === 'exported').length,
-    paidAmount: batches
-      .filter((item) => item.status === 'paid')
-      .reduce((sum, item) => sum + item.total_amount, 0),
-  }), [batches]);
-
   const openDetail = async (id: number) => {
     setAction(`detail-${id}`);
     try {
@@ -116,20 +134,80 @@ const Payments: React.FC = () => {
     }
   };
 
-  const handleCreate = async (batchType: PaymentBatchType) => {
-    setAction(`create-${batchType}`);
+  const openCreateModal = async () => {
+    setCreateType('salary');
+    setCreateAccount(undefined);
+    setSelectedDocIds([]);
+    setFundDocs([]);
+    createForm.resetFields();
+    createForm.setFieldsValue({ batch_type: 'salary' });
+    setCreateOpen(true);
     try {
+      setAccounts(await getFundAccounts({ is_active: true }));
+    } catch (e: unknown) {
+      message.error('查询资金账户失败: ' + (e instanceof Error ? e.message : String(e)));
+    }
+  };
+
+  // general 批次：加载当月已审批（未入批次）的付款单/借款单，按所选账户过滤
+  useEffect(() => {
+    if (!createOpen || createType !== 'general' || !createAccount) {
+      setFundDocs([]);
+      setSelectedDocIds([]);
+      return;
+    }
+    let cancelled = false;
+    setDocsLoading(true);
+    getFundDocuments({ belong_month: month.format('YYYY-MM'), status: 'approved' })
+      .then((docs) => {
+        if (cancelled) return;
+        setFundDocs(
+          docs.filter(
+            (d) =>
+              ['payment', 'advance'].includes(d.document_type) &&
+              d.source_account_id === createAccount,
+          ),
+        );
+        setSelectedDocIds([]);
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) {
+          message.error('查询待批资金单失败: ' + (e instanceof Error ? e.message : String(e)));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setDocsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [createOpen, createType, createAccount, month]);
+
+  const handleCreate = async () => {
+    try {
+      const values = await createForm.validateFields();
+      if (values.batch_type === 'general' && selectedDocIds.length === 0) {
+        message.error('请勾选要纳入批次的付款单/借款单');
+        return;
+      }
+      setCreating(true);
       const result = await createPaymentBatch({
         belong_month: month.format('YYYY-MM'),
-        batch_type: batchType,
+        batch_type: values.batch_type,
+        fund_account_id: values.fund_account_id,
+        source_ids: values.batch_type === 'general' ? selectedDocIds : undefined,
+        remark: values.remark,
       });
       message.success(`已生成付款批次 ${result.batch.batch_no}`);
+      setCreateOpen(false);
       await fetchData();
       setDetail(result);
     } catch (e: unknown) {
-      message.error('生成付款批次失败: ' + (e instanceof Error ? e.message : String(e)));
+      if (e instanceof Error) {
+        message.error('生成付款批次失败: ' + e.message);
+      }
     } finally {
-      setAction(null);
+      setCreating(false);
     }
   };
 
@@ -158,6 +236,14 @@ const Payments: React.FC = () => {
       title: `确认标记付款 ${batch.batch_no}?`,
       content: (
         <Form form={paidForm} layout="vertical">
+          {batch.batch_type === 'general' && (
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 12 }}
+              message="标记付款后批次内付款单/借款单将自动结算并生成凭证，已付款批次不可作废（错误请通过冲正处理）。"
+            />
+          )}
           <Form.Item
             label="付款日期"
             name="payment_date"
@@ -232,6 +318,9 @@ const Payments: React.FC = () => {
     }
   };
 
+  // 历史批次未指定资金账户：只读（仅可查看/作废）
+  const legacyReadonly = (batch: PaymentBatch) => !batch.fund_account_id;
+
   const columns = [
     { title: '批次号', dataIndex: 'batch_no', key: 'batch_no', width: 180, fixed: 'left' as const },
     {
@@ -239,9 +328,18 @@ const Payments: React.FC = () => {
       dataIndex: 'batch_type',
       key: 'batch_type',
       width: 90,
-      render: (type: PaymentBatchType) => <Tag color={typeMeta[type].color}>{typeMeta[type].text}</Tag>,
+      render: (type: PaymentBatchType) => (
+        <Tag color={typeMeta[type]?.color ?? 'default'}>{typeMeta[type]?.text ?? type}</Tag>
+      ),
     },
     { title: '月份', dataIndex: 'belong_month', key: 'belong_month', width: 100 },
+    {
+      title: '付款账户',
+      dataIndex: 'fund_account_name',
+      key: 'fund_account_name',
+      width: 150,
+      render: (value: string | null | undefined) => value ?? <Tag>历史批次</Tag>,
+    },
     {
       title: '状态',
       dataIndex: 'status',
@@ -275,25 +373,33 @@ const Payments: React.FC = () => {
           >
             明细
           </Button>
+          <Tooltip title={legacyReadonly(batch) ? '历史批次未指定资金账户（只读）' : ''}>
+            <Button
+              size="small"
+              icon={<DownloadOutlined />}
+              disabled={batch.status === 'void' || legacyReadonly(batch)}
+              loading={action === `export-${batch.id}`}
+              onClick={() => handleExport(batch)}
+            >
+              导出
+            </Button>
+          </Tooltip>
+          <Tooltip title={legacyReadonly(batch) ? '历史批次未指定资金账户（只读）' : ''}>
+            <Button
+              size="small"
+              icon={<CheckCircleOutlined />}
+              disabled={batch.status !== 'exported' || legacyReadonly(batch)}
+              loading={action === `paid-${batch.id}`}
+              onClick={() => openPaidModal(batch)}
+            >
+              付款
+            </Button>
+          </Tooltip>
           <Button
             size="small"
-            icon={<DownloadOutlined />}
-            disabled={batch.status === 'void'}
-            loading={action === `export-${batch.id}`}
-            onClick={() => handleExport(batch)}
+            disabled={legacyReadonly(batch)}
+            onClick={() => openRemarkModal(batch)}
           >
-            导出
-          </Button>
-          <Button
-            size="small"
-            icon={<CheckCircleOutlined />}
-            disabled={batch.status !== 'exported'}
-            loading={action === `paid-${batch.id}`}
-            onClick={() => openPaidModal(batch)}
-          >
-            付款
-          </Button>
-          <Button size="small" onClick={() => openRemarkModal(batch)}>
             备注
           </Button>
           <Popconfirm
@@ -306,7 +412,7 @@ const Payments: React.FC = () => {
               size="small"
               danger
               icon={<DeleteOutlined />}
-              disabled={batch.status === 'void'}
+              disabled={batch.status === 'void' || (batch.batch_type === 'general' && batch.status === 'paid')}
               loading={action === `void-${batch.id}`}
             >
               作废
@@ -319,9 +425,15 @@ const Payments: React.FC = () => {
 
   const detailColumns = [
     { title: '收款人', dataIndex: 'employee_name', key: 'employee_name', width: 110 },
-    { title: '来源', dataIndex: 'source_type', key: 'source_type', width: 80, render: sourceText },
+    {
+      title: '来源',
+      dataIndex: 'source_type',
+      key: 'source_type',
+      width: 80,
+      render: sourceText,
+    },
     { title: '来源ID', dataIndex: 'source_id', key: 'source_id', width: 80 },
-    { title: '工号', dataIndex: 'employee_no', key: 'employee_no', width: 100 },
+    { title: '工号/编码', dataIndex: 'employee_no', key: 'employee_no', width: 100 },
     {
       title: '银行账号',
       dataIndex: 'bank_account',
@@ -344,8 +456,37 @@ const Payments: React.FC = () => {
       align: 'right' as const,
       render: (value: number) => <SensitiveText type="amount" value={value} />,
     },
-    { title: '备注', dataIndex: 'remark', key: 'remark', width: 160 },
+    { title: '备注', dataIndex: 'remark', key: 'remark', width: 160, ellipsis: true },
   ];
+
+  const docColumns: ColumnsType<FundDocument> = [
+    {
+      title: '类型',
+      dataIndex: 'document_type',
+      key: 'document_type',
+      width: 100,
+      render: (type: string) => FUND_DOCUMENT_TYPE_LABEL[type] ?? type,
+    },
+    { title: '单号', dataIndex: 'document_no', key: 'document_no', width: 130 },
+    { title: '摘要', dataIndex: 'summary', key: 'summary', ellipsis: true },
+    {
+      title: '金额',
+      dataIndex: 'amount',
+      key: 'amount',
+      width: 110,
+      align: 'right' as const,
+      render: (value: number) => <SensitiveText type="amount" value={value} />,
+    },
+  ];
+
+  const summary = useMemo(() => ({
+    total: batches.length,
+    draft: batches.filter((item) => item.status === 'draft').length,
+    exported: batches.filter((item) => item.status === 'exported').length,
+    paidAmount: batches
+      .filter((item) => item.status === 'paid')
+      .reduce((sum, item) => sum + item.total_amount, 0),
+  }), [batches]);
 
   return (
     <div>
@@ -368,6 +509,7 @@ const Payments: React.FC = () => {
             options={[
               { value: 'salary', label: '工资' },
               { value: 'reimbursement', label: '报销' },
+              { value: 'general', label: '通用' },
             ]}
           />
           <Select
@@ -386,20 +528,8 @@ const Payments: React.FC = () => {
           <Button icon={<ReloadOutlined />} loading={loading} onClick={fetchData}>
             刷新
           </Button>
-          <Button
-            type="primary"
-            icon={<PlusOutlined />}
-            loading={action === 'create-salary'}
-            onClick={() => handleCreate('salary')}
-          >
-            生成工资批次
-          </Button>
-          <Button
-            icon={<FileDoneOutlined />}
-            loading={action === 'create-reimbursement'}
-            onClick={() => handleCreate('reimbursement')}
-          >
-            生成报销批次
+          <Button type="primary" icon={<PlusOutlined />} onClick={openCreateModal}>
+            生成批次
           </Button>
         </div>
       </div>
@@ -426,7 +556,7 @@ const Payments: React.FC = () => {
             columns={columns}
             dataSource={batches}
             pagination={{ pageSize: 10 }}
-            scroll={{ x: 1180 }}
+            scroll={{ x: 1280 }}
           />
         </Card>
       </Spin>
@@ -440,11 +570,15 @@ const Payments: React.FC = () => {
         {detail && (
           <Space direction="vertical" style={{ width: '100%' }} size={16}>
             <Row gutter={[16, 16]}>
-              <Col span={6}><Statistic title="类型" value={typeMeta[detail.batch.batch_type].text} /></Col>
+              <Col span={6}><Statistic title="类型" value={typeMeta[detail.batch.batch_type]?.text ?? detail.batch.batch_type} /></Col>
               <Col span={6}><Statistic title="状态" value={statusMeta[detail.batch.status].text} /></Col>
               <Col span={6}><Statistic title="笔数" value={detail.batch.item_count} /></Col>
               <Col span={6}><SensitiveStatistic title="总金额" value={detail.batch.total_amount} /></Col>
             </Row>
+            <Statistic
+              title="付款账户"
+              value={detail.batch.fund_account_name ?? '历史批次未指定'}
+            />
             <Table<PaymentItem>
               rowKey="id"
               columns={detailColumns}
@@ -456,6 +590,89 @@ const Payments: React.FC = () => {
           </Space>
         )}
       </Drawer>
+
+      <Modal
+        title="生成付款批次"
+        open={createOpen}
+        onOk={handleCreate}
+        onCancel={() => setCreateOpen(false)}
+        confirmLoading={creating}
+        okText="生成"
+        cancelText="取消"
+        width={720}
+        destroyOnClose
+      >
+        <Form form={createForm} layout="vertical" initialValues={{ batch_type: 'salary' }}>
+          <Row gutter={16}>
+            <Col span={8}>
+              <Form.Item
+                label="批次类型"
+                name="batch_type"
+                rules={[{ required: true, message: '请选择批次类型' }]}
+              >
+                <Select
+                  onChange={(value: PaymentBatchType) => setCreateType(value)}
+                  options={[
+                    { value: 'salary', label: '工资批次（自动纳入当月待付）' },
+                    { value: 'reimbursement', label: '报销批次（自动纳入当月待付）' },
+                    { value: 'general', label: '通用批次（勾选已审批付款单）' },
+                  ]}
+                />
+              </Form.Item>
+            </Col>
+            <Col span={10}>
+              <Form.Item
+                label="付款资金账户"
+                name="fund_account_id"
+                rules={[{ required: true, message: '请选择付款资金账户' }]}
+              >
+                <Select
+                  placeholder="请选择付款资金账户"
+                  onChange={(value: number) => setCreateAccount(value)}
+                  options={accounts.map((a) => ({
+                    value: a.id,
+                    label: `${a.name}（${a.account_code}）`,
+                  }))}
+                />
+              </Form.Item>
+            </Col>
+            <Col span={6}>
+              <Form.Item label="备注" name="remark">
+                <Input placeholder="选填" />
+              </Form.Item>
+            </Col>
+          </Row>
+        </Form>
+
+        {createType === 'general' && (
+          <>
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 8 }}
+              message={`勾选 ${month.format('YYYY-MM')} 已审批且来源账户为所选账户的付款单/借款单；批次内项目使用同一账户。`}
+            />
+            <Table<FundDocument>
+              rowKey="id"
+              size="small"
+              loading={docsLoading}
+              columns={docColumns}
+              dataSource={fundDocs}
+              pagination={false}
+              scroll={{ y: 280 }}
+              rowSelection={{
+                selectedRowKeys: selectedDocIds,
+                onChange: (keys) => setSelectedDocIds(keys as number[]),
+              }}
+              locale={{
+                emptyText: createAccount
+                  ? <Empty description="当月该账户下没有待批的付款单/借款单" />
+                  : <Empty description="请先选择付款资金账户" />,
+              }}
+            />
+          </>
+        )}
+      </Modal>
     </div>
   );
 };

@@ -31,6 +31,7 @@ import {
   cancelBankTransactionMatch,
   confirmBankTransactionMatch,
   createBankManualVoucher,
+  getFundAccounts,
   getGlAccounts,
   ignoreBankTransaction,
   importBankTransactionsFile,
@@ -43,6 +44,7 @@ import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
 import type {
   BankTransaction,
   BankTransactionStatus,
+  FundAccount,
   GlAccount,
   PaymentBatch,
   PaymentBatchType,
@@ -57,6 +59,7 @@ const statusMeta: Record<BankTransactionStatus, { text: string; color: string }>
 const typeText: Record<PaymentBatchType, string> = {
   salary: '工资',
   reimbursement: '报销',
+  general: '通用',
 };
 
 const fmtMoney = (value?: number | null) =>
@@ -78,6 +81,8 @@ const BankTransactions: React.FC = () => {
   const [voucherTx, setVoucherTx] = useState<BankTransaction | null>(null);
   const [voucherAccounts, setVoucherAccounts] = useState<GlAccount[]>([]);
   const [voucherAccountCode, setVoucherAccountCode] = useState<string | undefined>(undefined);
+  const [fundAccountOptions, setFundAccountOptions] = useState<FundAccount[]>([]);
+  const [fundAccountId, setFundAccountId] = useState<number | undefined>(undefined);
   const [voucherSummary, setVoucherSummary] = useState('');
 
   const fetchData = useCallback(async () => {
@@ -224,11 +229,13 @@ const BankTransactions: React.FC = () => {
   };
 
   // 生成凭证弹窗：仅未匹配且未忽略的流水（后端同口径校验）。
-  // 支出流水选借方科目（贷方固定 1002），收入流水选贷方科目（借方固定 1002）。
+  // 支出流水选借方科目（贷方为所选资金账户科目），收入流水选贷方科目（借方为资金账户科目）。
+  // 资金账户必选（spec 4.7：手工凭证资金行必须带 fund_account_id 辅助核算）。
   const isExpenseTx = (tx: BankTransaction | null): boolean => (tx?.expense_amount ?? 0) > 0;
 
   const openVoucherModal = async (tx: BankTransaction) => {
     setVoucherAccountCode(undefined);
+    setFundAccountId(undefined);
     setVoucherSummary(tx.summary || '');
     setVoucherTx(tx);
     if (voucherAccounts.length === 0) {
@@ -238,6 +245,18 @@ const BankTransactions: React.FC = () => {
         message.error('获取科目列表失败: ' + (e instanceof Error ? e.message : String(e)));
       }
     }
+    if (fundAccountOptions.length === 0) {
+      try {
+        // 银行流水对应的资金账户：银行/第三方支付账户（现金账户不来自流水）
+        setFundAccountOptions(
+          (await getFundAccounts({ is_active: true })).filter((a) =>
+            ['bank', 'third_party'].includes(a.account_type),
+          ),
+        );
+      } catch (e: unknown) {
+        message.error('获取资金账户失败: ' + (e instanceof Error ? e.message : String(e)));
+      }
+    }
   };
 
   const handleCreateVoucher = async () => {
@@ -245,11 +264,16 @@ const BankTransactions: React.FC = () => {
       message.warning('请选择科目');
       return;
     }
+    if (!fundAccountId) {
+      message.warning('请选择资金账户');
+      return;
+    }
     setAction(`voucher-${voucherTx.id}`);
     try {
       const voucher = await createBankManualVoucher(
         voucherTx.id,
         voucherAccountCode,
+        fundAccountId,
         voucherSummary.trim() || undefined,
       );
       message.success(`凭证已生成：${voucher.voucher_no}`);
@@ -516,9 +540,21 @@ const BankTransactions: React.FC = () => {
             </div>
             <div style={{ color: '#8c8c8c' }}>
               {isExpenseTx(voucherTx)
-                ? '支出流水：借所选科目，贷 1002 银行存款（如手续费选 6603 财务费用）'
-                : '收入流水：借 1002 银行存款，贷所选科目（如利息收入选 6603 财务费用）'}
+                ? '支出流水：借所选科目，贷所选资金账户科目（如手续费选 6603 财务费用）'
+                : '收入流水：借所选资金账户科目，贷所选科目（如利息收入选 6603 财务费用）'}
             </div>
+            <Select
+              showSearch
+              optionFilterProp="label"
+              placeholder="选择资金账户（资金行辅助核算）"
+              value={fundAccountId}
+              onChange={setFundAccountId}
+              style={{ width: '100%' }}
+              options={fundAccountOptions.map((a) => ({
+                value: a.id,
+                label: `${a.name}（${a.account_code}）`,
+              }))}
+            />
             <Select
               showSearch
               optionFilterProp="label"

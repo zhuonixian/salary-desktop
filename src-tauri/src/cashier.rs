@@ -949,6 +949,7 @@ fn fund_action_label(action: &str) -> &'static str {
         "withdraw" => "撤回",
         "void" => "作废",
         "batch" => "进入付款批次",
+        "unbatch" => "移出付款批次",
         "settle" => "结算",
         "reverse" => "冲正",
         _ => "状态变更",
@@ -1526,8 +1527,11 @@ pub fn update_fund_document(
 /// `extra` 在状态更新前执行（maker_checker 校验、署名字段/批次回写等），
 /// 任一步失败整体回滚，不留半成品。
 #[allow(clippy::too_many_arguments)]
-fn transition_fund_document<F>(
-    conn: &Connection,
+/// 状态机事务内核：在调用方事务（`&Connection`）内完成来源状态校验、月结保护、
+/// 附加动作与审批事件落库。供独立命令（自包事务）与批次事务（外部事务）共用，
+/// 保证"入批次/释放/结算"与批次状态变更同事务提交（spec 5.3）。
+fn transition_fund_document_in_tx<F>(
+    tx: &Connection,
     current: &CurrentOperatorState,
     document_id: i64,
     action: &str,
@@ -1540,7 +1544,7 @@ fn transition_fund_document<F>(
 where
     F: FnOnce(&Connection, &FundDocument, i64, &str) -> AppResult<()>,
 {
-    let (operator_id, _) = require_current_operator(conn, current)?;
+    let (operator_id, _) = require_current_operator(tx, current)?;
     let trimmed = comment.map(str::trim).unwrap_or("");
     if require_comment && trimmed.is_empty() {
         return Err(AppError::InvalidParam(format!(
@@ -1549,8 +1553,7 @@ where
         )));
     }
     let now = Utc::now().to_rfc3339();
-    let tx = conn.unchecked_transaction()?;
-    let doc = get_fund_document(&tx, document_id)?;
+    let doc = get_fund_document(tx, document_id)?;
     if !from_statuses.contains(&doc.status.as_str()) {
         return Err(AppError::General(format!(
             "单据 {} 当前状态「{}」，不允许{}（仅允许来源状态：{}）",
@@ -1565,14 +1568,14 @@ where
         )));
     }
     // 所有资金写操作均受月结保护（spec 4.4）
-    ensure_month_open(&tx, &doc.belong_month)?;
-    extra(&tx, &doc, operator_id, &now)?;
+    ensure_month_open(tx, &doc.belong_month)?;
+    extra(tx, &doc, operator_id, &now)?;
     tx.execute(
         "UPDATE fund_documents SET status = ?2, updated_at = ?3 WHERE id = ?1",
         params![document_id, to_status, now],
     )?;
     insert_approval_event(
-        &tx,
+        tx,
         "fund_document",
         document_id,
         action,
@@ -1584,6 +1587,35 @@ where
         } else {
             Some(trimmed)
         },
+    )?;
+    get_fund_document(tx, document_id)
+}
+
+fn transition_fund_document<F>(
+    conn: &Connection,
+    current: &CurrentOperatorState,
+    document_id: i64,
+    action: &str,
+    from_statuses: &[&str],
+    to_status: &str,
+    comment: Option<&str>,
+    require_comment: bool,
+    extra: F,
+) -> AppResult<FundDocument>
+where
+    F: FnOnce(&Connection, &FundDocument, i64, &str) -> AppResult<()>,
+{
+    let tx = conn.unchecked_transaction()?;
+    transition_fund_document_in_tx(
+        &tx,
+        current,
+        document_id,
+        action,
+        from_statuses,
+        to_status,
+        comment,
+        require_comment,
+        extra,
     )?;
     tx.commit()?;
     get_fund_document(conn, document_id)
@@ -1715,16 +1747,16 @@ pub fn void_fund_document(
 }
 
 /// 标记进入付款批次（approved → batched；仅付款/借款单）。
-/// 无独立 Tauri 命令：Task 9 通用批次创建/作废时在自身事务内调用状态机，禁止前端直调绕过批次。
-#[allow(dead_code)] // TODO(Task 9 批次创建挂接后移除)
-pub fn mark_document_batched(
-    conn: &Connection,
+/// 无独立 Tauri 命令：由通用付款批次创建事务内调用（spec 5.3），
+/// 单据 batched 与批次落库同事务提交，禁止前端直调绕过批次。
+pub(crate) fn mark_document_batched_in_tx(
+    tx: &Connection,
     current: &CurrentOperatorState,
     document_id: i64,
     batch_id: i64,
 ) -> AppResult<FundDocument> {
-    transition_fund_document(
-        conn,
+    transition_fund_document_in_tx(
+        tx,
         current,
         document_id,
         "batch",
@@ -1759,6 +1791,77 @@ pub fn mark_document_batched(
     )
 }
 
+/// 批次作废释放资金单（batched → approved，spec 5.3 反向）：清空 `payment_batch_id`
+/// 并追加审批事件，单据可重新进入其他批次。由通用批次作废事务内调用，无独立命令。
+pub(crate) fn release_document_batched_in_tx(
+    tx: &Connection,
+    current: &CurrentOperatorState,
+    document_id: i64,
+) -> AppResult<FundDocument> {
+    transition_fund_document_in_tx(
+        tx,
+        current,
+        document_id,
+        "unbatch",
+        &["batched"],
+        "approved",
+        None,
+        false,
+        |tx, doc, _operator_id, _now| {
+            tx.execute(
+                "UPDATE fund_documents SET payment_batch_id = NULL WHERE id = ?1",
+                params![doc.id],
+            )?;
+            Ok(())
+        },
+    )
+}
+
+/// 批次标记付款时的单据结算内核（batched → settled，spec 5.3）：校验批次类型、
+/// 落结算署名并同事务生成资金单凭证（spec 4.7）。供 settle 命令与批次 paid 事务共用。
+fn settle_batched_document_content(
+    tx: &Connection,
+    doc: &FundDocument,
+    operator_id: i64,
+    now: &str,
+) -> AppResult<()> {
+    if !BATCHABLE_TYPES.contains(&doc.document_type.as_str()) {
+        return Err(AppError::General(format!(
+            "单据 {} 类型为「{}」，只有付款单/员工借款单可经付款批次结算",
+            doc.document_no,
+            fund_document_type_label(&doc.document_type)
+        )));
+    }
+    tx.execute(
+        "UPDATE fund_documents SET settled_by = ?2, settled_at = ?3 WHERE id = ?1",
+        params![doc.id, operator_id, now],
+    )?;
+    // 结算凭证同事务生成（spec 4.7）：任一分录失败整体回滚，
+    // 结算状态、凭证、审批事件保持原子
+    generate_fund_document_voucher(tx, doc)?;
+    Ok(())
+}
+
+/// 批次标记付款事务内的单据结算（batched → settled）：状态机校验 + 结算署名 +
+/// 凭证生成 + 审批事件全部在批次事务内提交（spec 5.3 "付款后……将来源单据置 settled"）。
+pub(crate) fn settle_batched_document_in_tx(
+    tx: &Connection,
+    current: &CurrentOperatorState,
+    document_id: i64,
+) -> AppResult<FundDocument> {
+    transition_fund_document_in_tx(
+        tx,
+        current,
+        document_id,
+        "settle",
+        &["batched"],
+        "settled",
+        None,
+        false,
+        settle_batched_document_content,
+    )
+}
+
 /// 结算（spec 5.1）：收款/内部转账/借款核销单审批后直接结算；
 /// 付款/借款单须经付款批次标记付款后从 batched 结算。
 /// 结算同时生成资金辅助凭证（source_type='fund_document'，spec 4.7），
@@ -1780,7 +1883,9 @@ pub fn settle_fund_document(
         |tx, doc, operator_id, now| {
             match doc.status.as_str() {
                 "approved" if DIRECT_SETTLE_TYPES.contains(&doc.document_type.as_str()) => {}
-                "batched" if BATCHABLE_TYPES.contains(&doc.document_type.as_str()) => {}
+                "batched" if BATCHABLE_TYPES.contains(&doc.document_type.as_str()) => {
+                    return settle_batched_document_content(tx, doc, operator_id, now);
+                }
                 "approved" => {
                     return Err(AppError::General(format!(
                         "单据 {} 类型为「{}」，须经付款批次标记付款后结算",
@@ -1905,7 +2010,7 @@ const FUND_VOUCHER_SOURCE_TYPE: &str = "fund_document";
 const ADVANCE_DEFAULT_GL: &str = "1221";
 
 /// 读取资金账户挂接的总账科目（建账户时已限 1001/1002/1012，见 `STAGE7_FUND_GL_CODES`）
-fn fund_account_gl_code(conn: &Connection, account_id: i64) -> AppResult<String> {
+pub(crate) fn fund_account_gl_code(conn: &Connection, account_id: i64) -> AppResult<String> {
     conn.query_row(
         "SELECT gl_account_code FROM fund_accounts WHERE id = ?1",
         params![account_id],
@@ -1942,7 +2047,8 @@ fn fund_voucher_line(
 
 /// 资金分录辅助核算校验（spec 4.7）：资金科目（1001/1002/1012）分录必须带 `fund_account_id`，
 /// 对方科目分录必须为空——漏写辅助核算直接报错回滚，不允许生成"无主"资金分录。
-fn ensure_fund_voucher_lines(lines: &[VoucherLineDraft]) -> AppResult<()> {
+/// 付款批次凭证与银行流水手工凭证（accounting.rs）同样复用本校验。
+pub(crate) fn ensure_fund_voucher_lines(lines: &[VoucherLineDraft]) -> AppResult<()> {
     for line in lines {
         let is_fund = db::STAGE7_FUND_GL_CODES.contains(&line.account_code.as_str());
         if is_fund && line.fund_account_id.is_none() {
@@ -3517,6 +3623,19 @@ mod tests {
         (conn, current)
     }
 
+    /// 测试专用：独立事务执行 mark_document_batched_in_tx（生产路径在批次事务内调用，语义一致）
+    fn mark_batched_standalone(
+        conn: &Connection,
+        current: &CurrentOperatorState,
+        document_id: i64,
+        batch_id: i64,
+    ) -> AppResult<FundDocument> {
+        let tx = conn.unchecked_transaction()?;
+        let doc = mark_document_batched_in_tx(&tx, current, document_id, batch_id)?;
+        tx.commit()?;
+        Ok(doc)
+    }
+
     struct DocFixtures {
         bank: FundAccount,
         cash: FundAccount,
@@ -3857,7 +3976,7 @@ mod tests {
         )
         .unwrap();
         let batch_id = conn.last_insert_rowid();
-        let batched = mark_document_batched(&conn, &current, payment.id, batch_id).unwrap();
+        let batched = mark_batched_standalone(&conn, &current, payment.id, batch_id).unwrap();
         assert_eq!(batched.status, "batched");
         assert_eq!(batched.payment_batch_id, Some(batch_id));
         let settled = settle_fund_document(&conn, &current, payment.id).unwrap();
@@ -3924,7 +4043,7 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("不允许"));
-        assert!(mark_document_batched(&conn, &current, d.id, 1)
+        assert!(mark_batched_standalone(&conn, &current, d.id, 1)
             .unwrap_err()
             .to_string()
             .contains("不允许"));
@@ -3948,7 +4067,7 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("不允许"));
-        assert!(mark_document_batched(&conn, &current, s.id, 1)
+        assert!(mark_batched_standalone(&conn, &current, s.id, 1)
             .unwrap_err()
             .to_string()
             .contains("不允许"));
@@ -3977,7 +4096,7 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("不允许"));
-        assert!(mark_document_batched(&conn, &current, a.id, 1)
+        assert!(mark_batched_standalone(&conn, &current, a.id, 1)
             .unwrap_err()
             .to_string()
             .contains("收款单"));
@@ -4002,13 +4121,13 @@ mod tests {
         )
         .unwrap();
         let batch_id = conn.last_insert_rowid();
-        let b = mark_document_batched(&conn, &current, p.id, batch_id).unwrap();
+        let b = mark_batched_standalone(&conn, &current, p.id, batch_id).unwrap();
         assert_eq!(b.status, "batched");
         assert!(void_fund_document(&conn, &current, p.id, "x")
             .unwrap_err()
             .to_string()
             .contains("不允许"));
-        assert!(mark_document_batched(&conn, &current, p.id, batch_id)
+        assert!(mark_batched_standalone(&conn, &current, p.id, batch_id)
             .unwrap_err()
             .to_string()
             .contains("不允许"));
@@ -4074,7 +4193,7 @@ mod tests {
         let pb = create_fund_document(&conn, &current, &payment_input(&fx)).unwrap();
         submit_fund_document(&conn, &current, pb.id, None).unwrap();
         approve_fund_document(&conn, &current, pb.id, "ok").unwrap();
-        assert!(mark_document_batched(&conn, &current, pb.id, 999)
+        assert!(mark_batched_standalone(&conn, &current, pb.id, 999)
             .unwrap_err()
             .to_string()
             .contains("不存在"));
@@ -4369,7 +4488,7 @@ mod tests {
             )
             .unwrap();
             let batch_id = conn.last_insert_rowid();
-            mark_document_batched(conn, current, doc.id, batch_id).unwrap();
+            mark_batched_standalone(conn, current, doc.id, batch_id).unwrap();
         }
         settle_fund_document(conn, current, doc.id).unwrap()
     }

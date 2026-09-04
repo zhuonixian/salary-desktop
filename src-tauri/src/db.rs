@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use chrono::{Datelike, NaiveDate, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::errors::{AppError, AppResult};
 use crate::models::*;
@@ -633,6 +633,7 @@ const STAGE7_NEW_TABLES: &[&str] = &[
 /// 第七阶段 schema 迁移入口（幂等，可在新旧库上重复执行）：
 /// 0. 重建 `vouchers` 表扩展 `source_type` 白名单（`'fund_document'`，spec 4.7），保留原 id、
 ///    分录外键关系与全部索引；新库 DDL 已含该类型时跳过；
+/// 0b. 重建 `approval_events` 表扩展 `action` 白名单（`'unbatch'`，批次释放资金单，spec 5.3）；
 /// 1. 建六张资金领域新表（资金账户/往来单位/操作人/资金单据/审批事件/业务附件）；
 /// 2. 为凭证分录、付款批次、银行流水补可空 `fund_account_id`（历史数据保持 NULL 进待归集，不猜测归属）；
 /// 3. 银行流水去重唯一索引重建为含账户维度，避免不同账户同日同金额流水误判重复；
@@ -645,6 +646,8 @@ pub fn migrate_stage7_schema(conn: &Connection) -> AppResult<Stage7MigrationRepo
     // vouchers 表重建必须在外键开关可切换的 autocommit 状态下进行（事务内切换 pragma 无效），
     // 自身仍包在独立事务中，失败整体回滚
     rebuild_vouchers_source_type_check(conn)?;
+    // approval_events 重建放行 'unbatch'（无子表引用，无需切换外键开关）
+    rebuild_approval_events_action_check(conn)?;
     run_migration_in_transaction(conn, |c| {
         create_stage7_tables(c)?;
         // 兼容迁移：三处资金辅助核算列（可空、无默认值），带外键引用
@@ -790,6 +793,74 @@ fn rebuild_vouchers_source_type_check(conn: &Connection) -> AppResult<()> {
     result
 }
 
+/// 重建 `approval_events` 表扩展 `action` CHECK 白名单（`'unbatch'`，批次释放资金单，
+/// spec 5.3）。旧库 CHECK 固化在表定义里，只能重建表放行新动作；新库 DDL 已含该动作时
+/// 跳过（幂等）。按 id 原序复制全部行并重建索引；本表无子表引用（无级联风险），
+/// 全程在单事务中执行，任一步失败整体回滚。
+fn rebuild_approval_events_action_check(conn: &Connection) -> AppResult<()> {
+    let create_sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='approval_events'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(None);
+    // 表不存在（最小测试库）或已是新定义时无需重建
+    let Some(sql) = create_sql else {
+        return Ok(());
+    };
+    if sql.contains("unbatch") {
+        return Ok(());
+    }
+    run_migration_in_transaction(conn, |c| {
+        // 列清单必须与 create_tables 中 approval_events 定义一致；新增列时同步此处
+        c.execute_batch(
+            "
+            CREATE TABLE approval_events_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_type TEXT NOT NULL CHECK (entity_type IN ('reimbursement_claim','fund_document')),
+                entity_id INTEGER NOT NULL,
+                action TEXT NOT NULL CHECK (action IN
+                    ('submit','approve','reject','settle','void','reverse','withdraw','batch',
+                     'unbatch')),
+                from_status TEXT,
+                to_status TEXT,
+                operator_id INTEGER,
+                comment TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (operator_id) REFERENCES operator_profiles(id)
+            );
+            INSERT INTO approval_events_new
+                (id, entity_type, entity_id, action, from_status, to_status,
+                 operator_id, comment, created_at)
+            SELECT id, entity_type, entity_id, action, from_status, to_status,
+                   operator_id, comment, created_at
+            FROM approval_events ORDER BY id;
+            DROP TABLE approval_events;
+            ALTER TABLE approval_events_new RENAME TO approval_events;
+            CREATE INDEX IF NOT EXISTS idx_approval_events_entity
+                ON approval_events(entity_type, entity_id, id);
+            ",
+        )?;
+        // 结构防漂移：重建后列清单必须与预期一致
+        let actual: String = {
+            let mut stmt = c.prepare("PRAGMA table_info(approval_events)")?;
+            let names = stmt
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<Result<Vec<_>, _>>()?;
+            names.join(",")
+        };
+        let expected = "id,entity_type,entity_id,action,from_status,to_status,\
+                        operator_id,comment,created_at";
+        if actual != expected {
+            return Err(AppError::General(format!(
+                "approval_events 表重建异常：列清单与预期不一致（{actual}）"
+            )));
+        }
+        Ok(())
+    })
+}
+
 /// 在单个事务中执行迁移步骤；任一步失败整体回滚，库保持迁移前状态。
 /// SQLite 的 DDL（建表/加列/建索引）同样参与事务回滚，因此失败后无半成品。
 pub(crate) fn run_migration_in_transaction<F, T>(conn: &Connection, steps: F) -> AppResult<T>
@@ -922,7 +993,8 @@ fn create_stage7_tables(conn: &Connection) -> AppResult<()> {
             entity_type TEXT NOT NULL CHECK (entity_type IN ('reimbursement_claim','fund_document')),
             entity_id INTEGER NOT NULL,
             action TEXT NOT NULL CHECK (action IN
-                ('submit','approve','reject','settle','void','reverse','withdraw','batch')),
+                ('submit','approve','reject','settle','void','reverse','withdraw','batch',
+                 'unbatch')),
             from_status TEXT,
             to_status TEXT,
             operator_id INTEGER,
@@ -2903,7 +2975,14 @@ pub fn reopen_month(conn: &Connection, month: &str, reason: &str) -> AppResult<M
 
 // ==================== Payment Batches ====================
 
-const PAYMENT_BATCH_TYPES: [&str; 2] = ["salary", "reimbursement"];
+/// 批次类型：salary 工资代发 / reimbursement 报销付款 / general 通用付款（第七阶段，spec 5.3）
+const PAYMENT_BATCH_TYPES: [&str; 3] = ["salary", "reimbursement", "general"];
+
+/// general 批次可纳入的资金单类型（付款单/员工借款单，与 cashier::BATCHABLE_TYPES 对齐）
+const GENERAL_BATCH_SOURCE_TYPES: [&str; 2] = ["payment", "advance"];
+
+/// payment_items 来源类型：fund_document 对应通用资金单（spec 5.3）
+pub(crate) const PAYMENT_SOURCE_FUND_DOCUMENT: &str = "fund_document";
 
 fn validate_payment_batch_type(batch_type: &str) -> AppResult<()> {
     if PAYMENT_BATCH_TYPES.contains(&batch_type) {
@@ -2915,7 +2994,11 @@ fn validate_payment_batch_type(batch_type: &str) -> AppResult<()> {
 
 /// 生成批次号：前缀 + YYYYMM + 纳秒时间戳 + 随机后缀，避免同毫秒并发撞 UNIQUE。
 fn payment_batch_no(month: &str, batch_type: &str) -> String {
-    let prefix = if batch_type == "salary" { "GZ" } else { "BX" };
+    let prefix = match batch_type {
+        "salary" => "GZ",
+        "reimbursement" => "BX",
+        _ => "TY",
+    };
     let nanos = Utc::now()
         .timestamp_nanos_opt()
         .unwrap_or_else(|| Utc::now().timestamp_millis() as i64);
@@ -2940,8 +3023,10 @@ fn row_to_payment_batch(row: &rusqlite::Row<'_>) -> rusqlite::Result<PaymentBatc
         item_count: row.get(6)?,
         payment_date: row.get(7)?,
         remark: row.get(8)?,
-        created_at: row.get(9)?,
-        updated_at: row.get(10)?,
+        fund_account_id: row.get(9)?,
+        fund_account_name: row.get(10)?,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
     })
 }
 
@@ -2987,11 +3072,13 @@ pub fn query_payment_batches(
     }
 
     let sql = format!(
-        "SELECT id, batch_no, belong_month, batch_type, status, total_amount, item_count,
-                payment_date, remark, created_at, updated_at
-         FROM payment_batches
+        "SELECT b.id, b.batch_no, b.belong_month, b.batch_type, b.status, b.total_amount,
+                b.item_count, b.payment_date, b.remark, b.fund_account_id, fa.name,
+                b.created_at, b.updated_at
+         FROM payment_batches b
+         LEFT JOIN fund_accounts fa ON fa.id = b.fund_account_id
          WHERE {}
-         ORDER BY created_at DESC, id DESC",
+         ORDER BY b.created_at DESC, b.id DESC",
         where_clauses.join(" AND ")
     );
     let params_refs: Vec<&dyn rusqlite::types::ToSql> =
@@ -3003,9 +3090,12 @@ pub fn query_payment_batches(
 
 pub fn get_payment_batch(conn: &Connection, id: i64) -> AppResult<PaymentBatch> {
     conn.query_row(
-        "SELECT id, batch_no, belong_month, batch_type, status, total_amount, item_count,
-                payment_date, remark, created_at, updated_at
-         FROM payment_batches WHERE id = ?1",
+        "SELECT b.id, b.batch_no, b.belong_month, b.batch_type, b.status, b.total_amount,
+                b.item_count, b.payment_date, b.remark, b.fund_account_id, fa.name,
+                b.created_at, b.updated_at
+         FROM payment_batches b
+         LEFT JOIN fund_accounts fa ON fa.id = b.fund_account_id
+         WHERE b.id = ?1",
         params![id],
         row_to_payment_batch,
     )
@@ -3050,9 +3140,41 @@ fn selected_source_filter(source_ids: &Option<Vec<i64>>, id: i64) -> bool {
         .unwrap_or(true)
 }
 
+/// 校验并返回批次付款资金账户（spec 5.3：创建批次必须选择付款资金账户，须存在且启用）。
+fn ensure_batch_fund_account(conn: &Connection, account_id: Option<i64>) -> AppResult<i64> {
+    let account_id =
+        account_id.ok_or_else(|| AppError::InvalidParam("请选择付款资金账户".into()))?;
+    let (name, is_active): (String, i64) = conn
+        .query_row(
+            "SELECT name, is_active FROM fund_accounts WHERE id = ?1",
+            params![account_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+        .ok_or_else(|| AppError::NotFound(format!("资金账户不存在：id={account_id}")))?;
+    if is_active == 0 {
+        return Err(AppError::InvalidParam(format!(
+            "资金账户 {name} 已停用，不能用于付款批次"
+        )));
+    }
+    Ok(account_id)
+}
+
+/// 历史批次只读保护（brief：旧批次允许 NULL 只读）：
+/// 缺少资金账户的存量批次不允许推进付款流程（作废重建是唯一出路）。
+fn ensure_batch_has_fund_account(batch: &PaymentBatch) -> AppResult<()> {
+    if batch.fund_account_id.is_none() {
+        return Err(AppError::InvalidParam(
+            "历史付款批次未指定资金账户（只读），请作废后重新生成批次".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub fn create_payment_batch(
     conn: &mut Connection,
     input: &PaymentBatchInput,
+    current: &crate::cashier::CurrentOperatorState,
 ) -> AppResult<PaymentBatchDetail> {
     let month = input.belong_month.trim();
     if month.is_empty() {
@@ -3062,13 +3184,21 @@ pub fn create_payment_batch(
     ensure_month_open(conn, month)?;
 
     let tx = conn.unchecked_transaction()?;
+    // 资金账户校验在事务内执行（spec 5.3：批次内所有项目使用同一账户）
+    let fund_account_id = ensure_batch_fund_account(&tx, input.fund_account_id)?;
     let now = Utc::now().to_rfc3339();
     let batch_no = payment_batch_no(month, &input.batch_type);
 
-    let candidates = if input.batch_type == "salary" {
-        collect_salary_payment_candidates(&tx, month, &input.source_ids)?
-    } else {
-        collect_reimbursement_payment_candidates(&tx, month, &input.source_ids)?
+    let candidates = match input.batch_type.as_str() {
+        "salary" => collect_salary_payment_candidates(&tx, month, &input.source_ids)?,
+        "reimbursement" => collect_reimbursement_payment_candidates(&tx, month, &input.source_ids)?,
+        // general 批次：从已审批付款/借款单勾选（同账户同月，spec 5.3）
+        _ => collect_fund_document_payment_candidates(
+            &tx,
+            month,
+            fund_account_id,
+            &input.source_ids,
+        )?,
     };
     if candidates.is_empty() {
         return Err(AppError::InvalidParam("没有可生成付款批次的明细".into()));
@@ -3080,6 +3210,7 @@ pub fn create_payment_batch(
         &batch_no,
         month,
         &input.batch_type,
+        fund_account_id,
         total_amount,
         candidates.len() as i32,
         input.remark.as_deref(),
@@ -3109,6 +3240,13 @@ pub fn create_payment_batch(
         )?;
     }
 
+    // general 批次：资金单 approved → batched 走状态机（同事务追加审批事件，spec 5.1/5.3）
+    if input.batch_type == "general" {
+        for item in &candidates {
+            crate::cashier::mark_document_batched_in_tx(&tx, current, item.source_id, batch_id)?;
+        }
+    }
+
     tx.commit()?;
     get_payment_batch_detail(conn, batch_id)
 }
@@ -3118,6 +3256,7 @@ fn conn_insert_payment_batch(
     batch_no: &str,
     month: &str,
     batch_type: &str,
+    fund_account_id: i64,
     total_amount: f64,
     item_count: i32,
     remark: Option<&str>,
@@ -3125,13 +3264,14 @@ fn conn_insert_payment_batch(
 ) -> AppResult<()> {
     conn.execute(
         "INSERT INTO payment_batches
-            (batch_no, belong_month, batch_type, status, total_amount, item_count,
-             payment_date, remark, created_at, updated_at)
-         VALUES (?1, ?2, ?3, 'draft', ?4, ?5, NULL, ?6, ?7, ?8)",
+            (batch_no, belong_month, batch_type, fund_account_id, status, total_amount,
+             item_count, payment_date, remark, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, 'draft', ?5, ?6, NULL, ?7, ?8, ?9)",
         params![
             batch_no,
             month,
             batch_type,
+            fund_account_id,
             total_amount,
             item_count,
             remark,
@@ -3140,6 +3280,132 @@ fn conn_insert_payment_batch(
         ],
     )?;
     Ok(())
+}
+
+/// general 批次候选：同月已审批的付款单/借款单，且来源账户等于批次账户（spec 5.3）。
+/// item 快照往来方（员工或往来单位）编码/名称/开户行/银行账号，备注存单据编号。
+fn collect_fund_document_payment_candidates(
+    conn: &Connection,
+    month: &str,
+    fund_account_id: i64,
+    source_ids: &Option<Vec<i64>>,
+) -> AppResult<Vec<PaymentItem>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, document_type, document_no, amount, partner_id, employee_id
+         FROM fund_documents
+         WHERE belong_month = ?1 AND status = 'approved'
+           AND document_type IN (?2, ?3)
+           AND source_account_id = ?4
+         ORDER BY id",
+    )?;
+    let rows = stmt.query_map(
+        params![
+            month,
+            GENERAL_BATCH_SOURCE_TYPES[0],
+            GENERAL_BATCH_SOURCE_TYPES[1],
+            fund_account_id
+        ],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, f64>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<i64>>(5)?,
+            ))
+        },
+    )?;
+
+    let mut candidates = Vec::new();
+    for row in rows {
+        let (doc_id, doc_type, doc_no, amount, partner_id, employee_id) = row?;
+        if !selected_source_filter(source_ids, doc_id) {
+            continue;
+        }
+        if active_payment_item_exists(conn, PAYMENT_SOURCE_FUND_DOCUMENT, doc_id)? {
+            continue;
+        }
+        if amount <= 0.0 {
+            return Err(AppError::InvalidParam(format!(
+                "单据 {doc_no} 金额必须大于0"
+            )));
+        }
+        // 往来方银行信息快照：员工取员工档案，往来单位取单位档案（spec 5.3）
+        let (code, name, bank_name, bank_account) = if let Some(emp_id) = employee_id {
+            conn.query_row(
+                "SELECT employee_no, name, bank_name, bank_account FROM employees WHERE id = ?1",
+                params![emp_id],
+                |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| AppError::NotFound(format!("单据 {doc_no} 的员工不存在：id={emp_id}")))?
+        } else if let Some(pt_id) = partner_id {
+            conn.query_row(
+                "SELECT partner_code, name, bank_name, bank_account FROM business_partners WHERE id = ?1",
+                params![pt_id],
+                |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| {
+                AppError::NotFound(format!("单据 {doc_no} 的往来单位不存在：id={pt_id}"))
+            })?
+        } else {
+            return Err(AppError::InvalidParam(format!(
+                "单据 {doc_no} 缺少往来对象，不能进入付款批次"
+            )));
+        };
+        let counterparty = name.clone().unwrap_or_else(|| "未命名".into());
+        if bank_account
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
+            || bank_name.as_deref().map(str::trim).unwrap_or("").is_empty()
+        {
+            return Err(AppError::InvalidParam(format!(
+                "{counterparty} 缺少银行账号或开户行，不能生成通用付款批次（单据 {doc_no}）"
+            )));
+        }
+        candidates.push(PaymentItem {
+            id: 0,
+            batch_id: 0,
+            source_type: PAYMENT_SOURCE_FUND_DOCUMENT.into(),
+            source_id: doc_id,
+            employee_id,
+            employee_no: code,
+            employee_name: name,
+            bank_name,
+            bank_account,
+            amount,
+            status: "pending".into(),
+            remark: Some(format!(
+                "{}{}",
+                doc_no,
+                if doc_type == "advance" {
+                    "（借款）"
+                } else {
+                    ""
+                }
+            )),
+            created_at: None,
+        });
+    }
+    Ok(candidates)
 }
 
 fn collect_salary_payment_candidates(
@@ -3283,6 +3549,7 @@ pub fn update_payment_batch_remark(
     if batch.status == "void" {
         return Err(AppError::InvalidParam("已作废付款批次不能修改备注".into()));
     }
+    ensure_batch_has_fund_account(&batch)?;
     ensure_month_open(conn, &batch.belong_month)?;
     conn.execute(
         "UPDATE payment_batches SET remark=?1, updated_at=?2 WHERE id=?3",
@@ -3297,6 +3564,7 @@ pub fn mark_payment_batch_exported(conn: &Connection, id: i64) -> AppResult<Paym
     if batch.status == "void" {
         return Err(AppError::InvalidParam("已作废付款批次不能导出".into()));
     }
+    ensure_batch_has_fund_account(&batch)?;
     if batch.status == "paid" {
         return Ok(batch);
     }
@@ -3310,6 +3578,7 @@ pub fn mark_payment_batch_exported(conn: &Connection, id: i64) -> AppResult<Paym
 pub fn mark_payment_batch_paid(
     conn: &mut Connection,
     input: &PaymentBatchPaidInput,
+    current: &crate::cashier::CurrentOperatorState,
 ) -> AppResult<PaymentBatch> {
     if input.payment_date.trim().is_empty() {
         return Err(AppError::InvalidParam("付款日期必填".into()));
@@ -3319,6 +3588,7 @@ pub fn mark_payment_batch_paid(
     if batch.status == "void" {
         return Err(AppError::InvalidParam("已作废付款批次不能标记付款".into()));
     }
+    ensure_batch_has_fund_account(&batch)?;
     if batch.status == "paid" {
         return Ok(batch);
     }
@@ -3331,21 +3601,32 @@ pub fn mark_payment_batch_paid(
     let tx = conn.unchecked_transaction()?;
     let detail = get_payment_batch_detail(&tx, input.id)?;
     let now = Utc::now().to_rfc3339();
-    for item in &detail.items {
-        if item.source_type == "salary_result" {
-            tx.execute(
-                "UPDATE salary_monthly_results
-                 SET payment_status='paid', payment_date=?1, payment_batch_id=?2, updated_at=?3
-                 WHERE id=?4",
-                params![input.payment_date.trim(), input.id, now, item.source_id],
-            )?;
-        } else if item.source_type == "reimbursement_claim" {
-            tx.execute(
-                "UPDATE reimbursement_claims
-                 SET payment_status='paid', payment_date=?1, payment_batch_id=?2, updated_at=?3
-                 WHERE id=?4",
-                params![input.payment_date.trim(), input.id, now, item.source_id],
-            )?;
+    if batch.batch_type == "general" {
+        // general 批次（spec 5.3）：付款后逐张资金单 batched → settled 走状态机，
+        // 结算署名、资金辅助凭证与审批事件同事务生成；无批次级凭证（避免与
+        // 单据结算凭证重复记账）。凭证失败时整体回滚，付款标记不落库。
+        for item in &detail.items {
+            if item.source_type == PAYMENT_SOURCE_FUND_DOCUMENT {
+                crate::cashier::settle_batched_document_in_tx(&tx, current, item.source_id)?;
+            }
+        }
+    } else {
+        for item in &detail.items {
+            if item.source_type == "salary_result" {
+                tx.execute(
+                    "UPDATE salary_monthly_results
+                     SET payment_status='paid', payment_date=?1, payment_batch_id=?2, updated_at=?3
+                     WHERE id=?4",
+                    params![input.payment_date.trim(), input.id, now, item.source_id],
+                )?;
+            } else if item.source_type == "reimbursement_claim" {
+                tx.execute(
+                    "UPDATE reimbursement_claims
+                     SET payment_status='paid', payment_date=?1, payment_batch_id=?2, updated_at=?3
+                     WHERE id=?4",
+                    params![input.payment_date.trim(), input.id, now, item.source_id],
+                )?;
+            }
         }
     }
     tx.execute(
@@ -3356,8 +3637,11 @@ pub fn mark_payment_batch_paid(
         "UPDATE payment_batches SET status='paid', payment_date=?1, updated_at=?2 WHERE id=?3",
         params![input.payment_date.trim(), now, input.id],
     )?;
-    // 状态置 paid 与付款凭证生成同事务：凭证失败时付款标记一并回滚
-    crate::accounting::generate_payment_voucher(&tx, input.id)?;
+    // salary/reimbursement：状态置 paid 与付款凭证生成同事务（凭证校验 status='paid'，
+    // 必须在批次状态更新之后）；general 无批次级凭证（单据结算凭证已生成）
+    if batch.batch_type != "general" {
+        crate::accounting::generate_payment_voucher(&tx, input.id)?;
+    }
     tx.commit()?;
     get_payment_batch(conn, input.id)
 }
@@ -3365,6 +3649,7 @@ pub fn mark_payment_batch_paid(
 pub fn void_payment_batch(
     conn: &mut Connection,
     input: &PaymentBatchVoidInput,
+    current: &crate::cashier::CurrentOperatorState,
 ) -> AppResult<PaymentBatch> {
     if input.reason.trim().is_empty() {
         return Err(AppError::InvalidParam("作废原因必填".into()));
@@ -3373,6 +3658,13 @@ pub fn void_payment_batch(
     ensure_month_open(conn, &batch.belong_month)?;
     if batch.status == "void" {
         return Ok(batch);
+    }
+    // spec 5.3：已付款批次不可作废，错误通过冲正单处理（general 批次来源单已 settled，
+    // 有冲正状态机兜底；salary/reimbursement 保留原纠错路径不变）
+    if batch.batch_type == "general" && batch.status == "paid" {
+        return Err(AppError::InvalidParam(
+            "已付款的通用付款批次不可作废，付款错误请通过资金单冲正处理".into(),
+        ));
     }
 
     let tx = conn.unchecked_transaction()?;
@@ -3394,6 +3686,10 @@ pub fn void_payment_batch(
                      WHERE id=?1 AND payment_status != 'paid'",
                     params![item.source_id],
                 )?;
+            } else if item.source_type == PAYMENT_SOURCE_FUND_DOCUMENT {
+                // 释放资金单 batched → approved 走状态机（清 payment_batch_id + 审批事件），
+                // 释放后可重新进入其他批次（spec 5.3）
+                crate::cashier::release_document_batched_in_tx(&tx, current, item.source_id)?;
             }
         }
     }
@@ -6280,6 +6576,82 @@ pub mod tests {
         .unwrap();
     }
 
+    /// 批次测试用付款资金账户（银行/1002/启用），返回账户 id
+    pub(crate) fn make_batch_fund_account(conn: &Connection, code: &str) -> i64 {
+        conn.execute(
+            "INSERT INTO fund_accounts
+                (account_code, name, account_type, bank_name, account_no, currency,
+                 gl_account_code, opening_date, opening_balance, is_default, is_active,
+                 created_at, updated_at)
+             VALUES (?1, '测试付款户', 'bank', '测试银行', '6222000099', 'CNY',
+                     '1002', '2026-08-01', 100000, 0, 1, '2026-08-01', '2026-08-01')",
+            params![code],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    /// 批次测试用操作人会话（general 批次状态机署名必须）
+    pub(crate) fn batch_operator() -> crate::cashier::CurrentOperatorState {
+        crate::cashier::CurrentOperatorState::default()
+    }
+
+    /// general 批次测试环境：带银行信息的往来单位 + 已选操作人会话，返回 (partner_id, operator)
+    fn make_general_batch_env(conn: &Connection) -> (i64, crate::cashier::CurrentOperatorState) {
+        conn.execute(
+            "INSERT INTO business_partners
+                (partner_code, name, partner_type, bank_name, bank_account, status,
+                 created_at, updated_at)
+             VALUES ('GYS-T9', '测试供应商', 'supplier', '测试银行', '6222000111',
+                     'active', '2026-08-01', '2026-08-01')",
+            [],
+        )
+        .unwrap();
+        let partner_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO operator_profiles (name, role, is_active, created_at, updated_at)
+             VALUES ('测试出纳', 'cashier', 1, '2026-08-01', '2026-08-01')",
+            [],
+        )
+        .unwrap();
+        let operator_id = conn.last_insert_rowid();
+        let operator = crate::cashier::CurrentOperatorState::default();
+        crate::cashier::set_current_operator(conn, &operator, operator_id).unwrap();
+        (partner_id, operator)
+    }
+
+    /// 创建一张已审批的付款单/借款单（source_account_id 指定来源账户）
+    fn make_approved_fund_doc(
+        conn: &Connection,
+        operator: &crate::cashier::CurrentOperatorState,
+        document_type: &str,
+        account_id: i64,
+        partner_id: Option<i64>,
+        employee_id: Option<i64>,
+        month: &str,
+        amount: f64,
+    ) -> crate::models::FundDocument {
+        let input = crate::models::FundDocumentInput {
+            id: None,
+            document_type: document_type.into(),
+            belong_month: month.into(),
+            document_date: format!("{month}-05"),
+            amount,
+            summary: "测试付款".into(),
+            department: None,
+            expense_type: None,
+            remark: None,
+            partner_id,
+            employee_id,
+            source_account_id: Some(account_id),
+            target_account_id: None,
+            counter_account_code: Some("2202".into()),
+        };
+        let doc = crate::cashier::create_fund_document(conn, operator, &input).unwrap();
+        crate::cashier::submit_fund_document(conn, operator, doc.id, None).unwrap();
+        crate::cashier::approve_fund_document(conn, operator, doc.id, "同意").unwrap()
+    }
+
     fn insert_paid_batch_bank_match(conn: &Connection, batch_id: i64, amount: f64) {
         conn.execute(
             "INSERT INTO bank_transactions
@@ -6567,19 +6939,24 @@ pub mod tests {
         let mut conn = setup_financial_db();
         fill_employee_bank_info(&conn);
         lock_salary_results(&conn, "2026-08").unwrap();
+        let acc = make_batch_fund_account(&conn, "BANK-T1");
+        let operator = batch_operator();
 
         let detail = create_payment_batch(
             &mut conn,
             &PaymentBatchInput {
                 belong_month: "2026-08".into(),
                 batch_type: "salary".into(),
+                fund_account_id: Some(acc),
                 source_ids: None,
                 remark: Some("工资代发".into()),
             },
+            &operator,
         )
         .unwrap();
 
         assert_eq!(detail.batch.batch_type, "salary");
+        assert_eq!(detail.batch.fund_account_id, Some(acc));
         assert_eq!(detail.batch.status, "draft");
         assert_eq!(detail.batch.item_count, 2);
         assert_eq!(detail.batch.total_amount, 14400.0);
@@ -6594,9 +6971,11 @@ pub mod tests {
             &PaymentBatchInput {
                 belong_month: "2026-08".into(),
                 batch_type: "salary".into(),
+                fund_account_id: Some(acc),
                 source_ids: None,
                 remark: None,
             },
+            &operator,
         )
         .unwrap_err();
         assert!(matches!(duplicate, AppError::InvalidParam(_)));
@@ -6607,6 +6986,7 @@ pub mod tests {
                 id: detail.batch.id,
                 reason: "测试作废".into(),
             },
+            &operator,
         )
         .unwrap();
         assert_eq!(voided.status, "void");
@@ -6616,9 +6996,11 @@ pub mod tests {
             &PaymentBatchInput {
                 belong_month: "2026-08".into(),
                 batch_type: "salary".into(),
+                fund_account_id: Some(acc),
                 source_ids: None,
                 remark: None,
             },
+            &operator,
         )
         .unwrap();
         assert_eq!(recreated.batch.item_count, 2);
@@ -6628,15 +7010,19 @@ pub mod tests {
     fn test_reimbursement_payment_batch_paid_syncs_claim_and_blocks_direct_payment() {
         let mut conn = setup_financial_db();
         fill_employee_bank_info(&conn);
+        let acc = make_batch_fund_account(&conn, "BANK-T1");
+        let operator = batch_operator();
 
         let detail = create_payment_batch(
             &mut conn,
             &PaymentBatchInput {
                 belong_month: "2026-08".into(),
                 batch_type: "reimbursement".into(),
+                fund_account_id: Some(acc),
                 source_ids: Some(vec![2]),
                 remark: None,
             },
+            &operator,
         )
         .unwrap();
         assert_eq!(detail.batch.item_count, 1);
@@ -6661,6 +7047,7 @@ pub mod tests {
                 id: detail.batch.id,
                 payment_date: "2026-08-31".into(),
             },
+            &operator,
         )
         .unwrap_err();
         assert!(matches!(draft_paid_err, AppError::InvalidParam(_)));
@@ -6674,6 +7061,7 @@ pub mod tests {
                 id: detail.batch.id,
                 payment_date: "2026-08-31".into(),
             },
+            &operator,
         )
         .unwrap();
         assert_eq!(paid.status, "paid");
@@ -6695,14 +7083,18 @@ pub mod tests {
         let mut conn = setup_financial_db();
         fill_employee_bank_info(&conn);
         make_august_closable(&conn);
+        let acc = make_batch_fund_account(&conn, "BANK-T1");
+        let operator = batch_operator();
         let detail = create_payment_batch(
             &mut conn,
             &PaymentBatchInput {
                 belong_month: "2026-08".into(),
                 batch_type: "salary".into(),
+                fund_account_id: Some(acc),
                 source_ids: None,
                 remark: None,
             },
+            &operator,
         )
         .unwrap();
         mark_payment_batch_exported(&conn, detail.batch.id).unwrap();
@@ -6712,6 +7104,7 @@ pub mod tests {
                 id: detail.batch.id,
                 payment_date: "2026-08-31".into(),
             },
+            &operator,
         )
         .unwrap();
 
@@ -6797,14 +7190,18 @@ pub mod tests {
         let mut conn = setup_financial_db();
         fill_employee_bank_info(&conn);
         make_august_closable(&conn);
+        let acc = make_batch_fund_account(&conn, "BANK-T1");
+        let operator = batch_operator();
         let detail = create_payment_batch(
             &mut conn,
             &PaymentBatchInput {
                 belong_month: "2026-08".into(),
                 batch_type: "salary".into(),
+                fund_account_id: Some(acc),
                 source_ids: None,
                 remark: None,
             },
+            &operator,
         )
         .unwrap();
         mark_payment_batch_exported(&conn, detail.batch.id).unwrap();
@@ -6814,6 +7211,7 @@ pub mod tests {
                 id: detail.batch.id,
                 payment_date: "2026-08-31".into(),
             },
+            &operator,
         )
         .unwrap();
 
@@ -6849,8 +7247,17 @@ pub mod tests {
             .query_row("SELECT MAX(id) FROM bank_transactions", [], |r| r.get(0))
             .unwrap();
         let voucher =
-            crate::accounting::create_bank_manual_voucher(&conn, tx_id, "6603", None).unwrap();
+            crate::accounting::create_bank_manual_voucher(&conn, tx_id, "6603", acc, None).unwrap();
         assert_eq!(voucher.source_type, "bank_manual");
+        // 资金行带 fund_account_id（spec 4.7）
+        let fund_line: Option<i64> = conn
+            .query_row(
+                "SELECT fund_account_id FROM voucher_lines WHERE voucher_id=?1 AND fund_account_id IS NOT NULL LIMIT 1",
+                params![voucher.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(fund_line, Some(acc));
 
         // 人工确认匹配被拦截
         let err = confirm_bank_transaction_match(
@@ -6941,14 +7348,18 @@ pub mod tests {
         let mut conn = setup_financial_db();
         fill_employee_bank_info(&conn);
         lock_salary_results(&conn, "2026-08").unwrap();
+        let acc = make_batch_fund_account(&conn, "BANK-T1");
+        let operator = batch_operator();
         let detail = create_payment_batch(
             &mut conn,
             &PaymentBatchInput {
                 belong_month: "2026-08".into(),
                 batch_type: "salary".into(),
+                fund_account_id: Some(acc),
                 source_ids: None,
                 remark: None,
             },
+            &operator,
         )
         .unwrap();
         make_august_closable(&conn);
@@ -6959,6 +7370,7 @@ pub mod tests {
                 id: detail.batch.id,
                 payment_date: "2026-08-31".into(),
             },
+            &operator,
         )
         .unwrap();
         insert_paid_batch_bank_match(&conn, detail.batch.id, detail.batch.total_amount);
@@ -6969,9 +7381,11 @@ pub mod tests {
             &PaymentBatchInput {
                 belong_month: "2026-08".into(),
                 batch_type: "reimbursement".into(),
+                fund_account_id: Some(acc),
                 source_ids: None,
                 remark: None,
             },
+            &operator,
         )
         .unwrap_err();
         assert!(matches!(create_err, AppError::InvalidParam(_)));
@@ -6982,6 +7396,7 @@ pub mod tests {
                 id: detail.batch.id,
                 reason: "锁账测试".into(),
             },
+            &operator,
         )
         .unwrap_err();
         assert!(matches!(void_err, AppError::InvalidParam(_)));
@@ -6995,6 +7410,443 @@ pub mod tests {
         )
         .unwrap_err();
         assert!(matches!(remark_err, AppError::InvalidParam(_)));
+    }
+
+    // ==================== general 通用付款批次（第七阶段 Task 9，spec 5.3） ====================
+
+    #[test]
+    fn test_general_payment_batch_create_paid_and_settle_flow() {
+        let mut conn = setup_financial_db();
+        fill_employee_bank_info(&conn);
+        let acc = make_batch_fund_account(&conn, "BANK-G1");
+        let (partner_id, operator) = make_general_batch_env(&conn);
+        let payment_doc = make_approved_fund_doc(
+            &conn,
+            &operator,
+            "payment",
+            acc,
+            Some(partner_id),
+            None,
+            "2026-08",
+            800.0,
+        );
+        let advance_doc = make_approved_fund_doc(
+            &conn,
+            &operator,
+            "advance",
+            acc,
+            None,
+            Some(1),
+            "2026-08",
+            300.0,
+        );
+
+        // 创建批次：勾选两张单，账户必选；单据 approved → batched 走状态机
+        let detail = create_payment_batch(
+            &mut conn,
+            &PaymentBatchInput {
+                belong_month: "2026-08".into(),
+                batch_type: "general".into(),
+                fund_account_id: Some(acc),
+                source_ids: Some(vec![payment_doc.id, advance_doc.id]),
+                remark: Some("通用付款".into()),
+            },
+            &operator,
+        )
+        .unwrap();
+        assert_eq!(detail.batch.batch_type, "general");
+        assert_eq!(detail.batch.fund_account_id, Some(acc));
+        assert_eq!(detail.batch.item_count, 2);
+        assert_eq!(detail.batch.total_amount, 1100.0);
+        // item 快照：往来方银行信息 + 单号
+        assert!(detail
+            .items
+            .iter()
+            .all(|item| item.source_type == "fund_document"));
+        let pay_item = detail
+            .items
+            .iter()
+            .find(|i| i.source_id == payment_doc.id)
+            .unwrap();
+        assert_eq!(pay_item.employee_name.as_deref(), Some("测试供应商"));
+        assert_eq!(pay_item.bank_account.as_deref(), Some("6222000111"));
+        assert_eq!(
+            pay_item.remark.as_deref(),
+            Some(payment_doc.document_no.as_str())
+        );
+
+        // 单据已 batched 且回写批次 id；batch 事件落审批轨迹
+        for doc_id in [payment_doc.id, advance_doc.id] {
+            let (status, batch_id): (String, i64) = conn
+                .query_row(
+                    "SELECT status, payment_batch_id FROM fund_documents WHERE id=?1",
+                    params![doc_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(status, "batched");
+            assert_eq!(batch_id, detail.batch.id);
+            let action: String = conn
+                .query_row(
+                    "SELECT action FROM approval_events WHERE entity_type='fund_document' AND entity_id=?1 ORDER BY id DESC LIMIT 1",
+                    params![doc_id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(action, "batch");
+        }
+
+        // 导出后标记付款：单据 batched → settled 走状态机，逐单生成资金凭证
+        mark_payment_batch_exported(&conn, detail.batch.id).unwrap();
+        let paid = mark_payment_batch_paid(
+            &mut conn,
+            &PaymentBatchPaidInput {
+                id: detail.batch.id,
+                payment_date: "2026-08-31".into(),
+            },
+            &operator,
+        )
+        .unwrap();
+        assert_eq!(paid.status, "paid");
+
+        for doc_id in [payment_doc.id, advance_doc.id] {
+            let (status, settled_by): (String, Option<i64>) = conn
+                .query_row(
+                    "SELECT status, settled_by FROM fund_documents WHERE id=?1",
+                    params![doc_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(status, "settled");
+            assert!(settled_by.is_some());
+            // 单据结算凭证 active 且资金行带 fund_account_id（spec 4.7）
+            let (voucher_id, credit_account): (i64, String) = conn
+                .query_row(
+                    "SELECT v.id, vl.account_code
+                     FROM vouchers v JOIN voucher_lines vl ON vl.voucher_id = v.id
+                     WHERE v.source_type='fund_document' AND v.source_id=?1 AND v.status='active'
+                       AND vl.fund_account_id IS NOT NULL",
+                    params![doc_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(credit_account, "1002");
+            let _ = voucher_id;
+        }
+        // 无批次级付款凭证：general 批次以单据结算凭证入账，避免重复记账
+        let batch_voucher_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM vouchers WHERE source_type IN
+                    ('salary_payment','reimbursement_payment') AND source_id=?1",
+                params![detail.batch.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(batch_voucher_count, 0);
+    }
+
+    #[test]
+    fn test_general_payment_batch_void_releases_documents_back_to_approved() {
+        let mut conn = setup_financial_db();
+        let acc = make_batch_fund_account(&conn, "BANK-G1");
+        let (partner_id, operator) = make_general_batch_env(&conn);
+        let doc = make_approved_fund_doc(
+            &conn,
+            &operator,
+            "payment",
+            acc,
+            Some(partner_id),
+            None,
+            "2026-08",
+            500.0,
+        );
+
+        let detail = create_payment_batch(
+            &mut conn,
+            &PaymentBatchInput {
+                belong_month: "2026-08".into(),
+                batch_type: "general".into(),
+                fund_account_id: Some(acc),
+                source_ids: Some(vec![doc.id]),
+                remark: None,
+            },
+            &operator,
+        )
+        .unwrap();
+
+        // 未付款作废：单据 batched → approved 走状态机释放，可重新入批次
+        let voided = void_payment_batch(
+            &mut conn,
+            &PaymentBatchVoidInput {
+                id: detail.batch.id,
+                reason: "勾选错误".into(),
+            },
+            &operator,
+        )
+        .unwrap();
+        assert_eq!(voided.status, "void");
+        let (status, batch_id): (String, Option<i64>) = conn
+            .query_row(
+                "SELECT status, payment_batch_id FROM fund_documents WHERE id=?1",
+                params![doc.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "approved");
+        assert_eq!(batch_id, None);
+        let action: String = conn
+            .query_row(
+                "SELECT action FROM approval_events WHERE entity_type='fund_document' AND entity_id=?1 ORDER BY id DESC LIMIT 1",
+                params![doc.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(action, "unbatch");
+
+        // 释放后可重新进入新批次
+        let recreated = create_payment_batch(
+            &mut conn,
+            &PaymentBatchInput {
+                belong_month: "2026-08".into(),
+                batch_type: "general".into(),
+                fund_account_id: Some(acc),
+                source_ids: Some(vec![doc.id]),
+                remark: None,
+            },
+            &operator,
+        )
+        .unwrap();
+        assert_eq!(recreated.batch.item_count, 1);
+    }
+
+    #[test]
+    fn test_general_payment_batch_same_account_and_paid_void_guard() {
+        let mut conn = setup_financial_db();
+        let acc_a = make_batch_fund_account(&conn, "BANK-GA");
+        let acc_b = make_batch_fund_account(&conn, "BANK-GB");
+        let (partner_id, operator) = make_general_batch_env(&conn);
+        // doc_a 在账户 A；doc_b 在账户 B；doc_last 属于上月
+        let doc_a = make_approved_fund_doc(
+            &conn,
+            &operator,
+            "payment",
+            acc_a,
+            Some(partner_id),
+            None,
+            "2026-08",
+            100.0,
+        );
+        let doc_b = make_approved_fund_doc(
+            &conn,
+            &operator,
+            "payment",
+            acc_b,
+            Some(partner_id),
+            None,
+            "2026-08",
+            200.0,
+        );
+        let doc_other_month = make_approved_fund_doc(
+            &conn,
+            &operator,
+            "payment",
+            acc_a,
+            Some(partner_id),
+            None,
+            "2026-07",
+            400.0,
+        );
+
+        // 账户 A 的批次只纳入 doc_a（同账户 + 同月，spec 5.3）
+        let detail = create_payment_batch(
+            &mut conn,
+            &PaymentBatchInput {
+                belong_month: "2026-08".into(),
+                batch_type: "general".into(),
+                fund_account_id: Some(acc_a),
+                source_ids: Some(vec![doc_a.id, doc_b.id, doc_other_month.id]),
+                remark: None,
+            },
+            &operator,
+        )
+        .unwrap();
+        assert_eq!(detail.batch.item_count, 1);
+        assert_eq!(detail.items[0].source_id, doc_a.id);
+
+        // 勾选空集（候选不在该账户下）→ 报错
+        let empty_err = create_payment_batch(
+            &mut conn,
+            &PaymentBatchInput {
+                belong_month: "2026-08".into(),
+                batch_type: "general".into(),
+                fund_account_id: Some(acc_a),
+                source_ids: Some(vec![doc_b.id]),
+                remark: None,
+            },
+            &operator,
+        )
+        .unwrap_err();
+        assert!(matches!(empty_err, AppError::InvalidParam(_)));
+
+        // 未选资金账户 → 报错（三种批次一致，spec 5.3）
+        let no_account_err = create_payment_batch(
+            &mut conn,
+            &PaymentBatchInput {
+                belong_month: "2026-08".into(),
+                batch_type: "general".into(),
+                fund_account_id: None,
+                source_ids: Some(vec![doc_b.id]),
+                remark: None,
+            },
+            &operator,
+        )
+        .unwrap_err();
+        assert!(matches!(no_account_err, AppError::InvalidParam(_)));
+
+        // 导出并付款后禁止作废（spec 5.3：错误通过冲正单处理）
+        mark_payment_batch_exported(&conn, detail.batch.id).unwrap();
+        mark_payment_batch_paid(
+            &mut conn,
+            &PaymentBatchPaidInput {
+                id: detail.batch.id,
+                payment_date: "2026-08-31".into(),
+            },
+            &operator,
+        )
+        .unwrap();
+        let paid_void_err = void_payment_batch(
+            &mut conn,
+            &PaymentBatchVoidInput {
+                id: detail.batch.id,
+                reason: "不应成功".into(),
+            },
+            &operator,
+        )
+        .unwrap_err();
+        assert!(
+            paid_void_err.to_string().contains("不可作废"),
+            "got: {paid_void_err:?}"
+        );
+    }
+
+    #[test]
+    fn test_general_payment_batch_requires_counterparty_bank_info() {
+        let mut conn = setup_financial_db();
+        let acc = make_batch_fund_account(&conn, "BANK-G1");
+        let (_partner_id, operator) = make_general_batch_env(&conn);
+        // 无银行信息的往来单位
+        conn.execute(
+            "INSERT INTO business_partners
+                (partner_code, name, partner_type, status, created_at, updated_at)
+             VALUES ('GYS-T8', '无银行供应商', 'supplier', 'active', '2026-08-01', '2026-08-01')",
+            [],
+        )
+        .unwrap();
+        let poor_partner: i64 = conn.last_insert_rowid();
+        let doc = make_approved_fund_doc(
+            &conn,
+            &operator,
+            "payment",
+            acc,
+            Some(poor_partner),
+            None,
+            "2026-08",
+            100.0,
+        );
+        let err = create_payment_batch(
+            &mut conn,
+            &PaymentBatchInput {
+                belong_month: "2026-08".into(),
+                batch_type: "general".into(),
+                fund_account_id: Some(acc),
+                source_ids: Some(vec![doc.id]),
+                remark: None,
+            },
+            &operator,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("银行账号"), "got: {err:?}");
+    }
+
+    #[test]
+    fn test_legacy_batch_without_fund_account_is_read_only() {
+        let mut conn = setup_financial_db();
+        fill_employee_bank_info(&conn);
+        lock_salary_results(&conn, "2026-08").unwrap();
+        let operator = batch_operator();
+        // 直插一条历史批次（fund_account_id 为 NULL，模拟第七阶段前的旧数据）
+        conn.execute(
+            "INSERT INTO payment_batches
+                (batch_no, belong_month, batch_type, status, total_amount, item_count,
+                 payment_date, remark, created_at, updated_at)
+             VALUES ('GZ202608LEGACY', '2026-08', 'salary', 'draft', 14400, 2,
+                     NULL, '历史批次', '2026-08-01', '2026-08-01')",
+            [],
+        )
+        .unwrap();
+        let legacy_id: i64 = conn
+            .query_row(
+                "SELECT id FROM payment_batches WHERE batch_no='GZ202608LEGACY'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        // 只读：导出 / 标记付款 / 备注均拒绝
+        let export_err = mark_payment_batch_exported(&conn, legacy_id).unwrap_err();
+        assert!(
+            export_err.to_string().contains("只读"),
+            "got: {export_err:?}"
+        );
+        let paid_err = mark_payment_batch_paid(
+            &mut conn,
+            &PaymentBatchPaidInput {
+                id: legacy_id,
+                payment_date: "2026-08-31".into(),
+            },
+            &operator,
+        )
+        .unwrap_err();
+        assert!(paid_err.to_string().contains("只读"), "got: {paid_err:?}");
+        let remark_err = update_payment_batch_remark(
+            &conn,
+            &PaymentBatchRemarkInput {
+                id: legacy_id,
+                remark: Some("试试备注".into()),
+            },
+        )
+        .unwrap_err();
+        assert!(
+            remark_err.to_string().contains("只读"),
+            "got: {remark_err:?}"
+        );
+
+        // 作废保留为唯一出路（旧批次纠错路径），作废后可重建带账户的新批次
+        let voided = void_payment_batch(
+            &mut conn,
+            &PaymentBatchVoidInput {
+                id: legacy_id,
+                reason: "历史批次重建".into(),
+            },
+            &operator,
+        )
+        .unwrap();
+        assert_eq!(voided.status, "void");
+
+        let acc = make_batch_fund_account(&conn, "BANK-T1");
+        let recreated = create_payment_batch(
+            &mut conn,
+            &PaymentBatchInput {
+                belong_month: "2026-08".into(),
+                batch_type: "salary".into(),
+                fund_account_id: Some(acc),
+                source_ids: None,
+                remark: None,
+            },
+            &operator,
+        )
+        .unwrap();
+        assert_eq!(recreated.batch.item_count, 2);
     }
 
     #[test]
@@ -7801,6 +8653,102 @@ mod stage7_tests {
             [],
         );
         assert!(bad_status.is_err(), "非法 status 仍应被 CHECK 拦截");
+    }
+
+    #[test]
+    fn test_stage7_migration_rebuilds_approval_events_action_whitelist() {
+        // 模拟旧版第七阶段库：approval_events 还是 8 动作白名单（无 unbatch）
+        let conn = setup_financial_db();
+        conn.execute(
+            "INSERT INTO operator_profiles (name, role, is_active, created_at, updated_at)
+             VALUES ('旧操作人', 'cashier', 1, '2026-08-01', '2026-08-01')",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "
+            ALTER TABLE approval_events RENAME TO approval_events_old;
+            CREATE TABLE approval_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_type TEXT NOT NULL CHECK (entity_type IN ('reimbursement_claim','fund_document')),
+                entity_id INTEGER NOT NULL,
+                action TEXT NOT NULL CHECK (action IN
+                    ('submit','approve','reject','settle','void','reverse','withdraw','batch')),
+                from_status TEXT,
+                to_status TEXT,
+                operator_id INTEGER,
+                comment TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (operator_id) REFERENCES operator_profiles(id)
+            );
+            INSERT INTO approval_events
+                (id, entity_type, entity_id, action, from_status, to_status,
+                 operator_id, comment, created_at)
+            SELECT id, entity_type, entity_id, action, from_status, to_status,
+                   operator_id, comment, created_at
+            FROM approval_events_old;
+            DROP TABLE approval_events_old;
+            INSERT INTO approval_events (entity_type, entity_id, action, operator_id, created_at)
+             VALUES ('fund_document', 7, 'batch', 1, '2026-08-01');
+            ",
+        )
+        .unwrap();
+        // 旧白名单下 unbatch 被拒
+        let blocked = conn.execute(
+            "INSERT INTO approval_events (entity_type, entity_id, action, operator_id, created_at)
+             VALUES ('fund_document', 7, 'unbatch', 1, '2026-08-01')",
+            [],
+        );
+        assert!(blocked.is_err(), "旧白名单应拦截 unbatch");
+
+        migrate_stage7_schema(&conn).unwrap();
+
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='approval_events'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            sql.contains("unbatch"),
+            "action CHECK 应包含 unbatch：{sql}"
+        );
+        // 历史轨迹保留，且新动作可写入
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM approval_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 1);
+        conn.execute(
+            "INSERT INTO approval_events (entity_type, entity_id, action, operator_id, created_at)
+             VALUES ('fund_document', 7, 'unbatch', 1, '2026-08-02')",
+            [],
+        )
+        .unwrap();
+        let bad = conn.execute(
+            "INSERT INTO approval_events (entity_type, entity_id, action, operator_id, created_at)
+             VALUES ('fund_document', 7, 'bogus', 1, '2026-08-02')",
+            [],
+        );
+        assert!(bad.is_err(), "非法 action 仍应被 CHECK 拦截");
+    }
+
+    #[test]
+    fn test_stage7_migration_vouchers_rebuild_idempotent_and_fk_restored() {
+        let conn = setup_stage7_legacy_db();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        let fk_before: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fk_before, 1);
+        migrate_stage7_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO vouchers
+                (voucher_no, voucher_date, belong_month, source_type, source_id, total_amount, status)
+             VALUES ('V20260901001', '2026-09-01', '2026-09', 'fund_document', 7, 100, 'active')",
+            [],
+        )
+        .unwrap();
 
         // 幂等：重跑迁移不重复复制、不丢数据
         migrate_stage7_schema(&conn).unwrap();
