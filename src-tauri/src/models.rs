@@ -1077,8 +1077,8 @@ pub struct SocialInsuranceProfileInput {
 }
 
 // ==================== 第七阶段：资金账户 / 往来单位 / 操作人 / 审批事件 / 业务附件 ====================
-// 基础资料与业务附件模型已由 Task 3/5（cashier.rs 领域模块）接入；审批事件模型
-// 由 Task 6 接入，接入前临时 allow(dead_code)。
+// 基础资料与业务附件模型已由 Task 3/5（cashier.rs 领域模块）接入；审批事件与
+// 资金单据模型自 Task 6 起由 cashier.rs 领域模块接入。
 
 /// 资金账户（银行 / 现金 / 第三方支付）
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1191,8 +1191,8 @@ pub struct OperatorProfileInput {
     pub remark: Option<String>,
 }
 
+#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 审批事件（追加式，不允许 UPDATE/DELETE；报销单与资金单据共用）
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApprovalEvent {
     pub id: i64,
@@ -1206,17 +1206,92 @@ pub struct ApprovalEvent {
     pub created_at: String,
 }
 
-/// 审批事件写入入参（approve/reject/void/reverse 须填 comment，由领域层校验）
-#[allow(dead_code)]
+#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
+/// 资金单据（spec 4.4）：收款/付款/内部转账/员工借款/借款核销/冲正。
+/// 状态只能通过领域层命令（submit/approve/reject/withdraw/void/mark_batched/settle/reverse）
+/// 变更，前端不得直接编辑状态字段。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ApprovalEventInput {
-    pub entity_type: String,
-    pub entity_id: i64,
-    pub action: String,
-    pub from_status: Option<String>,
-    pub to_status: Option<String>,
-    pub operator_id: Option<i64>,
-    pub comment: Option<String>,
+pub struct FundDocument {
+    pub id: i64,
+    pub document_no: String,
+    pub document_type: String,
+    pub belong_month: String,
+    pub document_date: String,
+    pub amount: f64,
+    pub summary: String,
+    pub department: Option<String>,
+    pub expense_type: Option<String>,
+    pub remark: Option<String>,
+    pub partner_id: Option<i64>,
+    pub employee_id: Option<i64>,
+    pub source_account_id: Option<i64>,
+    pub target_account_id: Option<i64>,
+    pub counter_account_code: Option<String>,
+    pub status: String,
+    pub payment_batch_id: Option<i64>,
+    pub reversal_of_id: Option<i64>,
+    pub submitted_by: Option<i64>,
+    pub submitted_at: Option<String>,
+    pub approved_by: Option<i64>,
+    pub approved_at: Option<String>,
+    pub settled_by: Option<i64>,
+    pub settled_at: Option<String>,
+    pub voided_by: Option<i64>,
+    pub voided_at: Option<String>,
+    pub created_by: Option<i64>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
+/// 资金单据录入/更新入参（id=Some 时更新已有单据；仅草稿可编辑）。
+/// 不含 status 等状态字段：状态只能经状态机命令流转，无法由字段更新绕过。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FundDocumentInput {
+    pub id: Option<i64>,
+    pub document_type: String,
+    pub belong_month: String,
+    pub document_date: String,
+    pub amount: f64,
+    pub summary: String,
+    pub department: Option<String>,
+    pub expense_type: Option<String>,
+    pub remark: Option<String>,
+    pub partner_id: Option<i64>,
+    pub employee_id: Option<i64>,
+    pub source_account_id: Option<i64>,
+    pub target_account_id: Option<i64>,
+    pub counter_account_code: Option<String>,
+}
+
+#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
+/// 资金单据查询条件
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FundDocumentQuery {
+    pub belong_month: Option<String>,
+    pub document_type: Option<String>,
+    pub status: Option<String>,
+    pub partner_id: Option<i64>,
+    pub employee_id: Option<i64>,
+    pub keyword: Option<String>,
+}
+
+#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
+/// 资金单据详情：单据 + 按时间升序的完整审批轨迹（可重放历史）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FundDocumentDetail {
+    pub document: FundDocument,
+    pub events: Vec<ApprovalEvent>,
+}
+
+#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
+/// 冲正入参：在开放月份创建相反方向冲正单（原单月份与冲正月份均须未月结）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FundDocumentReverseInput {
+    pub document_id: i64,
+    pub belong_month: String,
+    pub document_date: String,
+    pub comment: String,
 }
 
 /// 业务附件（通用挂接：实体类型 + 实体 ID；文件归档 attachments/ 并可 AES-GCM 加密）

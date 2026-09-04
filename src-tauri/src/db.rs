@@ -624,12 +624,13 @@ const STAGE7_NEW_TABLES: &[&str] = &[
     "fund_accounts",
     "business_partners",
     "operator_profiles",
+    "fund_documents",
     "approval_events",
     "business_attachments",
 ];
 
 /// 第七阶段 schema 迁移入口（幂等，可在新旧库上重复执行）：
-/// 1. 建五张资金领域新表（资金账户/往来单位/操作人/审批事件/业务附件）；
+/// 1. 建六张资金领域新表（资金账户/往来单位/操作人/资金单据/审批事件/业务附件）；
 /// 2. 为凭证分录、付款批次、银行流水补可空 `fund_account_id`（历史数据保持 NULL 进待归集，不猜测归属）；
 /// 3. 银行流水去重唯一索引重建为含账户维度，避免不同账户同日同金额流水误判重复；
 /// 4. 迁移结束运行 `PRAGMA foreign_key_check`，发现悬空引用整体回滚；
@@ -711,7 +712,7 @@ where
     }
 }
 
-/// 建第七阶段资金领域五张新表与索引（全部 IF NOT EXISTS，幂等）
+/// 建第七阶段资金领域六张新表与索引（全部 IF NOT EXISTS，幂等）
 fn create_stage7_tables(conn: &Connection) -> AppResult<()> {
     conn.execute_batch(
         "
@@ -770,11 +771,60 @@ fn create_stage7_tables(conn: &Connection) -> AppResult<()> {
             updated_at TEXT
         );
 
+        -- 通用资金单据（spec 4.4）：收款/付款/内部转账/员工借款/借款核销 + 冲正单
+        -- 金额统一正数（方向由 document_type 决定）；状态只允许经领域层命令流转
+        CREATE TABLE IF NOT EXISTS fund_documents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            document_no TEXT NOT NULL UNIQUE,
+            document_type TEXT NOT NULL CHECK (document_type IN
+                ('receipt','payment','transfer','advance','advance_settlement','reversal')),
+            belong_month TEXT NOT NULL,
+            document_date TEXT NOT NULL,
+            amount REAL NOT NULL CHECK (amount > 0),
+            summary TEXT NOT NULL,
+            department TEXT,
+            expense_type TEXT,
+            remark TEXT,
+            partner_id INTEGER REFERENCES business_partners(id),
+            employee_id INTEGER REFERENCES employees(id),
+            source_account_id INTEGER REFERENCES fund_accounts(id),
+            target_account_id INTEGER REFERENCES fund_accounts(id),
+            counter_account_code TEXT REFERENCES gl_accounts(code),
+            status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN
+                ('draft','submitted','approved','rejected','batched','settled','void','reversed')),
+            payment_batch_id INTEGER REFERENCES payment_batches(id),
+            reversal_of_id INTEGER REFERENCES fund_documents(id),
+            submitted_by INTEGER REFERENCES operator_profiles(id),
+            submitted_at TEXT,
+            approved_by INTEGER REFERENCES operator_profiles(id),
+            approved_at TEXT,
+            settled_by INTEGER REFERENCES operator_profiles(id),
+            settled_at TEXT,
+            voided_by INTEGER REFERENCES operator_profiles(id),
+            voided_at TEXT,
+            created_by INTEGER REFERENCES operator_profiles(id),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            -- 内部转账两侧账户不得相同（金额相等于单金额自然成立）
+            CHECK (source_account_id IS NULL OR target_account_id IS NULL
+                   OR source_account_id != target_account_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_fund_documents_month
+            ON fund_documents(belong_month, status);
+        CREATE INDEX IF NOT EXISTS idx_fund_documents_partner ON fund_documents(partner_id);
+        CREATE INDEX IF NOT EXISTS idx_fund_documents_employee ON fund_documents(employee_id);
+        CREATE INDEX IF NOT EXISTS idx_fund_documents_reversal_of
+            ON fund_documents(reversal_of_id);
+        CREATE INDEX IF NOT EXISTS idx_fund_documents_batch ON fund_documents(payment_batch_id);
+
+        -- 追加式审批事件（spec 4.5）：报销单与资金单据共用，不允许 UPDATE/DELETE。
+        -- action 覆盖资金单状态机全部命令（withdraw=撤回、batch=进入付款批次）
         CREATE TABLE IF NOT EXISTS approval_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             entity_type TEXT NOT NULL CHECK (entity_type IN ('reimbursement_claim','fund_document')),
             entity_id INTEGER NOT NULL,
-            action TEXT NOT NULL CHECK (action IN ('submit','approve','reject','settle','void','reverse')),
+            action TEXT NOT NULL CHECK (action IN
+                ('submit','approve','reject','settle','void','reverse','withdraw','batch')),
             from_status TEXT,
             to_status TEXT,
             operator_id INTEGER,

@@ -627,13 +627,16 @@ mod tests {
     #[test]
     fn test_decrypted_attachment_url_roundtrip_tamper_and_locked() {
         use crate::cashier::{
-            add_business_attachment, save_operator_profile, set_current_operator,
-            CurrentOperatorState,
+            add_business_attachment, create_fund_document, save_business_partner,
+            save_fund_account, save_operator_profile, set_current_operator, CurrentOperatorState,
         };
-        use crate::models::BusinessAttachmentInput;
+        use crate::models::{
+            BusinessAttachmentInput, BusinessPartnerInput, FundAccountInput, FundDocumentInput,
+        };
 
         let conn = Connection::open_in_memory().unwrap();
         db::create_tables(&conn).unwrap();
+        db::seed_gl_accounts(&conn).unwrap();
         let sec = SecurityState::new();
         security::setup(&conn, &sec, "Abcd1234", "RC-AAAA", "Q", "A").unwrap();
         let current = CurrentOperatorState::new();
@@ -661,6 +664,65 @@ mod tests {
         let src = app_dir.join("scan.pdf");
         std::fs::write(&src, plain).unwrap();
 
+        // 附件挂载实体门禁（Task 6）：目标资金单必须真实存在（草稿可挂）
+        let bank = save_fund_account(
+            &conn,
+            &FundAccountInput {
+                id: None,
+                account_code: "BANK-001".into(),
+                name: "基本户".into(),
+                account_type: "bank".into(),
+                bank_name: None,
+                account_no: None,
+                gl_account_code: "1002".into(),
+                opening_date: None,
+                opening_balance: None,
+                is_default: None,
+                is_active: None,
+                remark: None,
+            },
+        )
+        .unwrap();
+        let partner = save_business_partner(
+            &conn,
+            &BusinessPartnerInput {
+                id: None,
+                partner_code: "GYS-001".into(),
+                name: "供应商甲".into(),
+                partner_type: "supplier".into(),
+                tax_id: None,
+                contact_person: None,
+                phone: None,
+                bank_name: None,
+                bank_account: None,
+                gl_account_code: None,
+                status: None,
+                remark: None,
+            },
+        )
+        .unwrap();
+        let doc = create_fund_document(
+            &conn,
+            &current,
+            &FundDocumentInput {
+                id: None,
+                document_type: "receipt".into(),
+                belong_month: "2026-08".into(),
+                document_date: "2026-08-05".into(),
+                amount: 500.0,
+                summary: "预览测试收款".into(),
+                department: None,
+                expense_type: None,
+                remark: None,
+                partner_id: Some(partner.id),
+                employee_id: None,
+                source_account_id: None,
+                target_account_id: Some(bank.id),
+                counter_account_code: Some("1122".into()),
+            },
+        )
+        .unwrap();
+
         let att = add_business_attachment(
             &conn,
             &sec,
@@ -668,7 +730,7 @@ mod tests {
             &app_dir,
             &BusinessAttachmentInput {
                 entity_type: "fund_document".into(),
-                entity_id: 1,
+                entity_id: doc.id,
                 file_name: String::new(),
                 file_path: src.to_string_lossy().to_string(),
                 encrypted: None,
