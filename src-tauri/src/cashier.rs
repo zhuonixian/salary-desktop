@@ -184,11 +184,15 @@ fn get_operator_profile(conn: &Connection, id: i64) -> AppResult<OperatorProfile
 /// 保存操作人（id=Some 更新，否则新增）。
 /// 至少保留一名启用操作人：停用最后一名启用操作人时拦截；
 /// 当前操作人被停用时清除会话，要求重新选择。
+/// 返回 (档案, 变更前审计署名)：停用当前操作人会先清空会话，命令层须用该署名写审计，
+/// 否则事后取名会退化为 system。
 pub fn save_operator_profile(
     conn: &Connection,
     current: &CurrentOperatorState,
     input: &OperatorProfileInput,
-) -> AppResult<OperatorProfile> {
+) -> AppResult<(OperatorProfile, String)> {
+    // 审计署名须在变更前捕获（停用当前操作人会清空会话）
+    let actor = current_operator_name(conn, current);
     let name = input.name.trim();
     if name.is_empty() {
         return Err(AppError::InvalidParam("操作人姓名不能为空".into()));
@@ -230,20 +234,23 @@ pub fn save_operator_profile(
         // 停用当前操作人：清空会话，要求重新选择（app_settings 保留最近一次选择作追溯）
         current.set(None);
     }
-    get_operator_profile(conn, id)
+    Ok((get_operator_profile(conn, id)?, actor))
 }
 
 /// 启用/停用操作人。停用最后一名启用操作人时拦截；
 /// 停用当前操作人时清除会话，要求重新选择。
+/// 返回 (档案, 变更前审计署名)：署名在变更前捕获，供命令层写审计（原因同 save_operator_profile）。
 pub fn set_active_operator_profile(
     conn: &Connection,
     current: &CurrentOperatorState,
     id: i64,
     active: bool,
-) -> AppResult<OperatorProfile> {
+) -> AppResult<(OperatorProfile, String)> {
+    // 审计署名须在变更前捕获（停用当前操作人会清空会话）
+    let actor = current_operator_name(conn, current);
     let existing = get_operator_profile(conn, id)?;
     if existing.is_active == active {
-        return Ok(existing);
+        return Ok((existing, actor));
     }
     if !active {
         ensure_other_active_operator(conn, Some(id))?;
@@ -255,7 +262,7 @@ pub fn set_active_operator_profile(
     if !active && current.get() == Some(id) {
         current.set(None);
     }
-    get_operator_profile(conn, id)
+    Ok((get_operator_profile(conn, id)?, actor))
 }
 
 /// 系统至少保留一名启用操作人：排除 exclude_id 后启用数须大于 0
@@ -1265,8 +1272,9 @@ mod tests {
     fn test_operator_last_active_guard() {
         let conn = setup_financial_db();
         let current = CurrentOperatorState::new();
-        let a =
-            save_operator_profile(&conn, &current, &operator_input("张会计", "cashier")).unwrap();
+        let a = save_operator_profile(&conn, &current, &operator_input("张会计", "cashier"))
+            .unwrap()
+            .0;
 
         // 停用唯一启用操作人：拦截
         let err = set_active_operator_profile(&conn, &current, a.id, false)
@@ -1287,13 +1295,16 @@ mod tests {
         let mut rename = operator_input("张会计改", "cashier");
         rename.id = Some(a.id);
         rename.is_active = None;
-        let renamed = save_operator_profile(&conn, &current, &rename).unwrap();
+        let renamed = save_operator_profile(&conn, &current, &rename).unwrap().0;
         assert!(renamed.is_active);
 
         // 新增第二名操作人后可停用第一名
-        let b =
-            save_operator_profile(&conn, &current, &operator_input("李出纳", "approver")).unwrap();
-        let a = set_active_operator_profile(&conn, &current, a.id, false).unwrap();
+        let b = save_operator_profile(&conn, &current, &operator_input("李出纳", "approver"))
+            .unwrap()
+            .0;
+        let a = set_active_operator_profile(&conn, &current, a.id, false)
+            .unwrap()
+            .0;
         assert!(!a.is_active);
 
         // 再停用最后一名（b）被拦截：b 仍处于启用状态
@@ -1329,10 +1340,12 @@ mod tests {
         assert!(get_current_operator(&conn, &current).unwrap().is_none());
         assert_eq!(current_operator_name(&conn, &current), "system");
 
-        let a =
-            save_operator_profile(&conn, &current, &operator_input("张会计", "cashier")).unwrap();
-        let b =
-            save_operator_profile(&conn, &current, &operator_input("李出纳", "approver")).unwrap();
+        let a = save_operator_profile(&conn, &current, &operator_input("张会计", "cashier"))
+            .unwrap()
+            .0;
+        let b = save_operator_profile(&conn, &current, &operator_input("李出纳", "approver"))
+            .unwrap()
+            .0;
 
         // 停用操作人不能设为当前
         set_active_operator_profile(&conn, &current, a.id, false).unwrap();
@@ -1374,10 +1387,66 @@ mod tests {
 
         // 重新启用 b，另选 c 为当前；通过 API 停用当前操作人：会话被清空，要求重新选择
         set_active_operator_profile(&conn, &current, b.id, true).unwrap();
-        let c = save_operator_profile(&conn, &current, &operator_input("王主管", "admin")).unwrap();
+        let c = save_operator_profile(&conn, &current, &operator_input("王主管", "admin"))
+            .unwrap()
+            .0;
         set_current_operator(&conn, &current, c.id).unwrap();
         set_active_operator_profile(&conn, &current, c.id, false).unwrap();
         assert_eq!(current_operator_name(&conn, &current), "system");
         assert!(get_current_operator(&conn, &current).unwrap().is_none());
+    }
+
+    /// 停用当前操作人（命令层时序）：cashier 层在清会话前捕获署名并返回，
+    /// 命令层用返回署名写审计——operation_logs 的 operator 仍是被停用者而非 system。
+    #[test]
+    fn test_deactivate_current_operator_audit_actor_captured_before_session_clear() {
+        let conn = setup_financial_db();
+        let current = CurrentOperatorState::new();
+        let a = save_operator_profile(&conn, &current, &operator_input("张会计", "cashier"))
+            .unwrap()
+            .0;
+        let b = save_operator_profile(&conn, &current, &operator_input("李出纳", "approver"))
+            .unwrap()
+            .0;
+        set_current_operator(&conn, &current, a.id).unwrap();
+
+        // set_active 路径：返回署名 = 被停用的当前操作人本人
+        let (profile, actor) = set_active_operator_profile(&conn, &current, a.id, false).unwrap();
+        assert!(!profile.is_active);
+        assert_eq!(actor, "张会计", "停用前署名应为被停用者本人");
+        // 会话已清空：事后取名退化为 system，不得再用于该条审计
+        assert_eq!(current_operator_name(&conn, &current), "system");
+
+        // 命令层用返回署名写审计：operator 字段为被停用者而非 system
+        db::log_operation(
+            &conn,
+            "set_active_operator_profile",
+            "停用操作人 张会计",
+            &actor,
+            None,
+        )
+        .unwrap();
+        let logged: String = conn
+            .query_row(
+                "SELECT operator FROM operation_logs
+                 WHERE operation_type = 'set_active_operator_profile'
+                 ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(logged, "张会计", "审计署名不应退化为 system");
+
+        // save 路径停用当前操作人同样返回变更前署名（先重新启用 a，满足至少一名启用操作人约束）
+        set_active_operator_profile(&conn, &current, a.id, true).unwrap();
+        set_current_operator(&conn, &current, b.id).unwrap();
+        let mut deactivate = operator_input("李出纳", "approver");
+        deactivate.id = Some(b.id);
+        deactivate.is_active = Some(false);
+        let (_, actor) = save_operator_profile(&conn, &current, &deactivate).unwrap();
+        assert_eq!(
+            actor, "李出纳",
+            "save 路径停用当前操作人署名不应退化为 system"
+        );
     }
 }

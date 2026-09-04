@@ -2044,12 +2044,13 @@ pub fn save_operator_profile(
     current: tauri::State<'_, cashier::CurrentOperatorState>,
 ) -> Result<OperatorProfile, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
-    let profile = cashier::save_operator_profile(&conn, &current, &data)?;
+    // 停用当前操作人时 cashier 层会先清会话，署名由其在变更前捕获返回，避免退化为 system
+    let (profile, operator) = cashier::save_operator_profile(&conn, &current, &data)?;
     db::log_operation(
         &conn,
         "save_operator_profile",
         &format!("保存操作人 {}（{}）", profile.name, profile.role),
-        &cashier::current_operator_name(&conn, &current),
+        &operator,
         None,
     )?;
     Ok(profile)
@@ -2063,13 +2064,14 @@ pub fn set_active_operator_profile(
     current: tauri::State<'_, cashier::CurrentOperatorState>,
 ) -> Result<OperatorProfile, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
-    let profile = cashier::set_active_operator_profile(&conn, &current, id, active)?;
+    // 停用当前操作人时 cashier 层会先清会话，署名由其在变更前捕获返回，避免退化为 system
+    let (profile, operator) = cashier::set_active_operator_profile(&conn, &current, id, active)?;
     let action = if active { "启用" } else { "停用" };
     db::log_operation(
         &conn,
         "set_active_operator_profile",
         &format!("{action}操作人 {}", profile.name),
-        &cashier::current_operator_name(&conn, &current),
+        &operator,
         None,
     )?;
     Ok(profile)
