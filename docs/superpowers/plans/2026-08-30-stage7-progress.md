@@ -100,7 +100,7 @@
 - 完成：cashier.rs/models.rs 全部 TODO(Task 7) dead_code 标记销项（mark_document_batched 改挂 TODO(Task 9)，批次场景内用）；commands.rs 新增 14 命令（get_fund_documents/get_fund_document_detail/list_approval_events/get·set_maker_checker_enabled/create·update·submit·approve·reject·withdraw·void·settle·reverse_fund_document），get 类不记日志、写命令 log_operation 当前操作人署名；前端 FundDocuments.tsx（收款/付款/内部转账/全部单据 Tab + 月份(全局)/状态/往来对象/账户/关键字筛选 + 新建编辑弹窗按类型动态约束账户方向与往来对象（表单无状态字段）+ 行操作按钮完全由后端状态驱动 + 详情 Drawer（Descriptions + 审批时间线 + 附件上传/列表/删除/预览）+ 冲正弹窗原因必填 + 工具栏"审批设置" maker_checker 开关）；App.tsx 资金出纳组新增"收付款单"路由菜单；OperationLogs 补 10 个写命令中文映射（get 类不映射避免死键）。
 - 关键决策：FundDocumentQuery 新增 account_id 筛选（brief 要求账户筛选而后端无此参数，SQL 拼接 source/target OR 命中，同时给非法类型/状态入参加 ensure_in_list 前置校验）；mock 内存态轻量状态机演示完整草稿→提交→审批→结算→冲正；浏览器 headless 实测通过（解锁→四 Tab→审批流→maker_checker 自审批拦截中文提示→冲正单生成+时间线+原因，无 JS 报错）。
 - 修改文件：cashier.rs、models.rs、commands.rs、lib.rs；types/index.ts、api/index.ts（含 mock）、pages/FundDocuments.tsx（新）、App.tsx、pages/OperationLogs.tsx。
-- 测试：cargo 179 passed（与基线持平，无新增测试对象）；cargo check 警告维持基线 5 个；tsc/lint/build 全过。
+- 测试：cargo 180 passed（基线 179 + 新增 1：account_id 筛选与枚举前置校验）；cargo check 警告维持基线 5 个；tsc/lint/build 全过。
 - 未完成/风险：付款类单据审批后仅显示"待付款批次"提示（批次动作归 Task 9）；结算/冲正凭证联动为占位文案（Task 8 落地后补跳转）；附件预览在浏览器 mock 返回空路径走"暂不支持"分支（桌面端走 convertFileSrc）；冲正弹窗月份预填依赖 antd setFieldsValue 先于挂载（实测有效，与 create 弹窗同模式）。
 - 下轮入口：Task 8 资金单自动凭证与事务冲正（必须承接：冲正/结算凭证生成移入事务内）。
-- 提交：6210a7c..HEAD（本任务单提交）。
+- 提交：a797ef7（feat）+ 9a5235d（test）。
