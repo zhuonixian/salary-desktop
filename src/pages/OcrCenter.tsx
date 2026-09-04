@@ -9,12 +9,13 @@ import dayjs from 'dayjs';
 import { open } from '@tauri-apps/plugin-dialog';
 import { useNavigate } from 'react-router-dom';
 import { ocrRecognize, getOcrBatches, confirmOcrResult, getOcrSettings } from '@/api';
+import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
 import type { AttendanceRecordInput, OcrBatch } from '@/types';
 
 const OcrCenter: React.FC = () => {
   const navigate = useNavigate();
+  const { month } = useBusinessMonth();
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
-  const [month] = useState(dayjs());
   const [recognizing, setRecognizing] = useState(false);
   const [rawText, setRawText] = useState('');
   const [structuredData, setStructuredData] = useState<AttendanceRecordInput[]>([]);

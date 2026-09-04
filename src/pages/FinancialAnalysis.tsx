@@ -10,8 +10,6 @@ import {
   TeamOutlined,
 } from '@ant-design/icons';
 import { save } from '@tauri-apps/plugin-dialog';
-import dayjs from 'dayjs';
-import type { Dayjs } from 'dayjs';
 import {
   deleteBudget,
   exportDepartmentCostReport,
@@ -22,6 +20,7 @@ import {
 } from '@/api';
 import { SensitiveText } from '@/components/SensitiveText';
 import { SensitiveStatistic } from '@/components/SensitiveStatistic';
+import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
 import type {
   BudgetExecution,
   BudgetInput,
@@ -56,7 +55,7 @@ const metricLabels: Record<MetricKey, string> = {
 };
 
 const FinancialAnalysis: React.FC = () => {
-  const [month, setMonth] = useState<Dayjs>(dayjs());
+  const { month, monthStr, setMonth } = useBusinessMonth();
   const [months, setMonths] = useState(6);
   const [loading, setLoading] = useState(false);
   const [exporting, setExporting] = useState<string | null>(null);
@@ -66,9 +65,9 @@ const FinancialAnalysis: React.FC = () => {
   const [budgetForm] = Form.useForm<BudgetInput & { scope: 'total' | 'department' | 'expense' }>();
 
   const query = useMemo<FinancialAnalysisQuery>(() => ({
-    month: month.format('YYYY-MM'),
+    month: monthStr,
     months,
-  }), [month, months]);
+  }), [monthStr, months]);
 
   const fetchData = useCallback(async () => {
     setLoading(true);

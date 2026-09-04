@@ -26,8 +26,6 @@ import {
   StopOutlined,
 } from '@ant-design/icons';
 import { open } from '@tauri-apps/plugin-dialog';
-import dayjs from 'dayjs';
-import type { Dayjs } from 'dayjs';
 import {
   autoMatchBankTransactions,
   cancelBankTransactionMatch,
@@ -41,6 +39,7 @@ import {
 } from '@/api';
 import { SensitiveText } from '@/components/SensitiveText';
 import { SensitiveStatistic } from '@/components/SensitiveStatistic';
+import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
 import type {
   BankTransaction,
   BankTransactionStatus,
@@ -64,7 +63,7 @@ const fmtMoney = (value?: number | null) =>
   (value ?? 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 const BankTransactions: React.FC = () => {
-  const [month, setMonth] = useState<Dayjs>(dayjs());
+  const { month, setMonth } = useBusinessMonth();
   const [statusFilter, setStatusFilter] = useState<BankTransactionStatus | undefined>(undefined);
   const [keyword, setKeyword] = useState('');
   const [transactions, setTransactions] = useState<BankTransaction[]>([]);

@@ -17,6 +17,7 @@ import {
 } from '@/api';
 import type { AnnualTaxSummaryRow, SalaryResult, SalaryResultUpdate, SalaryStatus } from '@/types';
 import { SensitiveText } from '@/components/SensitiveText';
+import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
 import { useSecurity } from '@/contexts/SecurityContext';
 
 // 工资条明文金额格式化（发放核对用途，不走 SensitiveText）
@@ -29,7 +30,7 @@ const statusColorMap: Record<SalaryStatus, string> = {
 };
 
 const SalaryCalculate: React.FC = () => {
-  const [month, setMonth] = useState<Dayjs>(dayjs());
+  const { month, setMonth } = useBusinessMonth();
   const [results, setResults] = useState<SalaryResult[]>([]);
   const [loading, setLoading] = useState(false);
   const [calculating, setCalculating] = useState(false);

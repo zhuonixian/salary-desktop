@@ -11,11 +11,10 @@ import {
   WalletOutlined,
   AuditOutlined,
 } from '@ant-design/icons';
-import dayjs from 'dayjs';
-import type { Dayjs } from 'dayjs';
 import { getDashboardSummary, getMonthCloseWorkbench } from '@/api';
 import { SensitiveText } from '@/components/SensitiveText';
 import { SensitiveStatistic } from '@/components/SensitiveStatistic';
+import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
 import type { DashboardSummary, MonthCloseCheckItem, MonthCloseWorkbench } from '@/types';
 
 type ChartDatum = {
@@ -125,7 +124,7 @@ const RingChart: React.FC<{
 };
 
 const Dashboard: React.FC = () => {
-  const [month, setMonth] = useState<Dayjs>(dayjs());
+  const { month, setMonth } = useBusinessMonth();
   const [loading, setLoading] = useState(false);
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [workbench, setWorkbench] = useState<MonthCloseWorkbench | null>(null);

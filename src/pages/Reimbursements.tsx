@@ -52,6 +52,7 @@ import type {
 } from '@/types';
 import { SensitiveText } from '@/components/SensitiveText';
 import { SensitiveStatistic } from '@/components/SensitiveStatistic';
+import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
 
 const { TextArea } = Input;
 
@@ -73,7 +74,7 @@ const Reimbursements: React.FC = () => {
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [expenseTypes, setExpenseTypes] = useState<InvoiceExpenseType[]>([]);
   const [loading, setLoading] = useState(false);
-  const [month, setMonth] = useState<dayjs.Dayjs | null>(dayjs());
+  const { month, setMonth } = useBusinessMonth();
   const [employeeFilter, setEmployeeFilter] = useState<number | undefined>(undefined);
   const [statusFilter, setStatusFilter] = useState<ReimbursementStatus | undefined>(undefined);
   const [paymentFilter, setPaymentFilter] = useState<PaymentStatus | undefined>(undefined);
@@ -104,7 +105,7 @@ const Reimbursements: React.FC = () => {
     setLoading(true);
     try {
       setClaims(await queryReimbursementClaims({
-        belong_month: month ? month.format('YYYY-MM') : undefined,
+        belong_month: month.format('YYYY-MM'),
         employee_id: employeeFilter,
         status: statusFilter,
         payment_status: paymentFilter,
@@ -162,7 +163,7 @@ const Reimbursements: React.FC = () => {
   );
 
   const openCreate = () => {
-    const defaultMonth = month?.format('YYYY-MM') ?? dayjs().format('YYYY-MM');
+    const defaultMonth = month.format('YYYY-MM');
     setForm({
       belong_month: defaultMonth,
       employee_id: employeeFilter,
@@ -378,7 +379,13 @@ const Reimbursements: React.FC = () => {
 
       <Card style={{ marginBottom: 16 }}>
         <Space wrap>
-          <DatePicker picker="month" allowClear value={month} onChange={setMonth} placeholder="归属月份" />
+          <DatePicker
+            picker="month"
+            allowClear={false}
+            value={month}
+            onChange={(value) => value && setMonth(value)}
+            placeholder="归属月份"
+          />
           <Select
             style={{ width: 180 }}
             allowClear

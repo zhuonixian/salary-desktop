@@ -14,10 +14,10 @@ import {
 } from '@ant-design/icons';
 import { open } from '@tauri-apps/plugin-dialog';
 import dayjs from 'dayjs';
-import type { Dayjs } from 'dayjs';
 import { useNavigate } from 'react-router-dom';
 import { closeMonth, exportMonthClosePackage, getMonthCloseWorkbench, reopenMonth } from '@/api';
 import { SensitiveStatistic } from '@/components/SensitiveStatistic';
+import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
 import type { MonthCloseCheckItem, MonthCloseWorkbench } from '@/types';
 
 const { TextArea } = Input;
@@ -38,7 +38,7 @@ const closeStatusMeta = {
 
 const MonthClose: React.FC = () => {
   const navigate = useNavigate();
-  const [month, setMonth] = useState<Dayjs>(dayjs());
+  const { month, monthStr, setMonth } = useBusinessMonth();
   const [loading, setLoading] = useState(false);
   const [action, setAction] = useState<'close' | 'reopen' | 'export' | null>(null);
   const [workbench, setWorkbench] = useState<MonthCloseWorkbench | null>(null);
@@ -48,13 +48,13 @@ const MonthClose: React.FC = () => {
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      setWorkbench(await getMonthCloseWorkbench(month.format('YYYY-MM')));
+      setWorkbench(await getMonthCloseWorkbench(monthStr));
     } catch (e: unknown) {
       message.error('获取月结数据失败: ' + (e instanceof Error ? e.message : String(e)));
     } finally {
       setLoading(false);
     }
-  }, [month]);
+  }, [monthStr]);
 
   useEffect(() => {
     fetchData();
@@ -79,7 +79,7 @@ const MonthClose: React.FC = () => {
     setAction('close');
     try {
       const values = closeForm.getFieldsValue();
-      await closeMonth(month.format('YYYY-MM'), values.remark);
+      await closeMonth(monthStr, values.remark);
       message.success('正式月结完成');
       closeForm.resetFields();
       await fetchData();
@@ -94,7 +94,7 @@ const MonthClose: React.FC = () => {
     const values = await reopenForm.validateFields();
     setAction('reopen');
     try {
-      await reopenMonth(month.format('YYYY-MM'), values.reason);
+      await reopenMonth(monthStr, values.reason);
       message.success('反月结完成');
       reopenForm.resetFields();
       await fetchData();
@@ -110,7 +110,7 @@ const MonthClose: React.FC = () => {
     if (!selected) return;
     setAction('export');
     try {
-      const result = await exportMonthClosePackage(month.format('YYYY-MM'), String(selected));
+      const result = await exportMonthClosePackage(monthStr, String(selected));
       message.success(`月结包已导出: ${result.output_dir}`);
     } catch (e: unknown) {
       message.error('导出月结包失败: ' + (e instanceof Error ? e.message : String(e)));
@@ -171,7 +171,7 @@ const MonthClose: React.FC = () => {
             disabled={!canClose}
             loading={action === 'close'}
             onClick={() => Modal.confirm({
-              title: `确认正式月结 ${month.format('YYYY-MM')}?`,
+              title: `确认正式月结 ${monthStr}?`,
               content: (
                 <Space direction="vertical" style={{ width: '100%' }}>
                   <span>月结后该月工资、考勤、发票和报销将禁止修改。</span>
@@ -196,7 +196,7 @@ const MonthClose: React.FC = () => {
             disabled={!isClosed}
             loading={action === 'reopen'}
             onClick={() => Modal.confirm({
-              title: `确认反月结 ${month.format('YYYY-MM')}?`,
+              title: `确认反月结 ${monthStr}?`,
               content: (
                 <Form form={reopenForm} layout="vertical">
                   <Form.Item

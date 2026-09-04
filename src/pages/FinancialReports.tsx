@@ -25,6 +25,7 @@ import {
 } from '@/api';
 import { SensitiveText } from '@/components/SensitiveText';
 import { SensitiveStatistic } from '@/components/SensitiveStatistic';
+import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
 import type {
   BalanceSheet,
   CashFlowStatement,
@@ -62,7 +63,7 @@ const orderIncomeRows = (rows: ReportRow[]): ReportRow[] => {
 const INCOME_SUMMARY_KEYS = new Set(['operating_profit', 'total_profit', 'net_profit']);
 
 const FinancialReports: React.FC = () => {
-  const [month, setMonth] = useState<Dayjs>(dayjs());
+  const { month, monthStr, setMonth } = useBusinessMonth();
   const [activeTab, setActiveTab] = useState<FinancialReportType>('balance_sheet');
   const [balanceSheet, setBalanceSheet] = useState<BalanceSheet | null>(null);
   const [incomeStatement, setIncomeStatement] = useState<IncomeStatement | null>(null);
@@ -74,8 +75,6 @@ const FinancialReports: React.FC = () => {
   const [tbExporting, setTbExporting] = useState(false);
   const [loading, setLoading] = useState(false);
   const [exporting, setExporting] = useState<FinancialReportType | null>(null);
-
-  const monthStr = month.format('YYYY-MM');
 
   const fetchData = useCallback(async () => {
     setLoading(true);

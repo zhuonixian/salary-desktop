@@ -48,6 +48,7 @@ import type {
 } from '@/types';
 import { SensitiveText } from '@/components/SensitiveText';
 import { SensitiveStatistic } from '@/components/SensitiveStatistic';
+import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
 
 const { TextArea } = Input;
 
@@ -66,7 +67,7 @@ const statusMeta: Record<PaymentBatchStatus, { text: string; color: string }> = 
 const sourceText = (sourceType: string) => (sourceType === 'salary_result' ? '工资' : '报销');
 
 const Payments: React.FC = () => {
-  const [month, setMonth] = useState<Dayjs>(dayjs());
+  const { month, setMonth } = useBusinessMonth();
   const [typeFilter, setTypeFilter] = useState<PaymentBatchType | undefined>(undefined);
   const [statusFilter, setStatusFilter] = useState<PaymentBatchStatus | undefined>(undefined);
   const [batches, setBatches] = useState<PaymentBatch[]>([]);

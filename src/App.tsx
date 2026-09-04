@@ -32,9 +32,6 @@ import {
   MenuUnfoldOutlined,
   SafetyCertificateOutlined,
 } from '@ant-design/icons';
-import dayjs from 'dayjs';
-import type { Dayjs } from 'dayjs';
-
 import Dashboard from '@/pages/Dashboard';
 import Employees from '@/pages/Employees';
 import Attendance from '@/pages/Attendance';
@@ -58,6 +55,7 @@ import FinancialReports from '@/pages/FinancialReports';
 import SecurityCenter from '@/pages/SecurityCenter';
 import LockScreen from '@/components/LockScreen';
 import SetupSecurity from '@/components/SetupSecurity';
+import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
 import { useSecurity } from '@/contexts/SecurityContext';
 
 const { Sider, Header, Content } = Layout;
@@ -143,7 +141,7 @@ const AppLayout: React.FC = () => {
   const [collapsed, setCollapsed] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
-  const [globalMonth, setGlobalMonth] = useState<Dayjs>(dayjs());
+  const { month, setMonth } = useBusinessMonth();
   const [openKeys, setOpenKeys] = useState<string[]>(defaultOpenKeys);
 
   useEffect(() => {
@@ -208,8 +206,8 @@ const AppLayout: React.FC = () => {
             <span style={{ color: '#666', fontSize: 14 }}>当前月份：</span>
             <DatePicker
               picker="month"
-              value={globalMonth}
-              onChange={(d) => d && setGlobalMonth(d)}
+              value={month}
+              onChange={(value) => value && setMonth(value)}
               allowClear={false}
               style={{ width: 160 }}
             />

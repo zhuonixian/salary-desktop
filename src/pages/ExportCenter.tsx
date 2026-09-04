@@ -4,14 +4,13 @@ import {
   FileExcelOutlined, BankOutlined, FileTextOutlined, CalendarOutlined,
 } from '@ant-design/icons';
 import { open, save } from '@tauri-apps/plugin-dialog';
-import dayjs from 'dayjs';
-import type { Dayjs } from 'dayjs';
 import {
   exportSalaryDetail,
   exportBankPaymentFile,
   exportSalarySlips,
   exportAttendanceSummaryFile,
 } from '@/api';
+import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
 
 interface ExportItem {
   key: string;
@@ -63,10 +62,8 @@ const exportItems: ExportItem[] = [
 ];
 
 const ExportCenter: React.FC = () => {
-  const [month, setMonth] = useState<Dayjs>(dayjs());
+  const { month, monthStr, setMonth } = useBusinessMonth();
   const [exporting, setExporting] = useState<string | null>(null);
-
-  const monthStr = month.format('YYYY-MM');
 
   const handleExport = async (item: ExportItem) => {
     setExporting(item.key);

@@ -13,13 +13,12 @@ import {
   message,
 } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
-import dayjs from 'dayjs';
-import type { Dayjs } from 'dayjs';
 import { getVouchers } from '@/api';
 import type { Voucher, VoucherLine } from '@/types';
 import { VOUCHER_SOURCE_LABEL } from '@/types';
 import { SensitiveText } from '@/components/SensitiveText';
 import { SensitiveStatistic } from '@/components/SensitiveStatistic';
+import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
 
 const sourceTagColor: Record<string, string> = {
   salary_accrual: 'blue',
@@ -39,7 +38,7 @@ const voucherStatusMeta: Record<Voucher['status'], { text: string; color: string
 };
 
 const Vouchers: React.FC = () => {
-  const [month, setMonth] = useState<Dayjs>(dayjs());
+  const { month, monthStr, setMonth } = useBusinessMonth();
   const [sourceFilter, setSourceFilter] = useState<string | undefined>(undefined);
   const [statusFilter, setStatusFilter] = useState<string | undefined>(undefined);
   const [vouchers, setVouchers] = useState<Voucher[]>([]);
@@ -49,7 +48,7 @@ const Vouchers: React.FC = () => {
     setLoading(true);
     try {
       setVouchers(await getVouchers({
-        month: month.format('YYYY-MM'),
+        month: monthStr,
         source_type: sourceFilter,
         status: statusFilter,
       }));
@@ -58,7 +57,7 @@ const Vouchers: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [month, sourceFilter, statusFilter]);
+  }, [monthStr, sourceFilter, statusFilter]);
 
   useEffect(() => {
     fetchData();

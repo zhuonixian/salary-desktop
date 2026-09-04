@@ -5,16 +5,16 @@ import {
 import {
   FileExcelOutlined, CameraOutlined, CheckCircleOutlined,
 } from '@ant-design/icons';
-import dayjs from 'dayjs';
 import { save } from '@tauri-apps/plugin-dialog';
 import { open } from '@tauri-apps/plugin-dialog';
 import {
   generatePunchCardTemplate, ocrRecognizePunchCard, confirmOcrResult, getOcrSettings,
 } from '@/api';
+import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
 import type { AttendanceRecordInput } from '@/types';
 
 const PunchCard: React.FC = () => {
-  const [month] = useState(dayjs());
+  const { month } = useBusinessMonth();
   const [department, setDepartment] = useState('');
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [recognizing, setRecognizing] = useState(false);

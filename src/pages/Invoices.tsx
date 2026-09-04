@@ -7,7 +7,6 @@ import {
   UploadOutlined, ExportOutlined, SettingOutlined,
   EditOutlined, DeleteOutlined, EyeOutlined, PlusOutlined,
 } from '@ant-design/icons';
-import dayjs from 'dayjs';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import {
@@ -17,6 +16,7 @@ import {
 } from '@/api';
 import { SensitiveText } from '@/components/SensitiveText';
 import { SensitiveStatistic } from '@/components/SensitiveStatistic';
+import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
 import type {
   Invoice, InvoiceInput, InvoiceOcrPreview, InvoiceQuery,
   InvoiceExpenseType, InvoiceExpenseTypeInput, Employee,
@@ -58,7 +58,7 @@ const Invoices: React.FC = () => {
   const [expenseTypes, setExpenseTypes] = useState<InvoiceExpenseType[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
 
-  const [filterMonth, setFilterMonth] = useState<dayjs.Dayjs | null>(dayjs());
+  const { month: filterMonth, setMonth: setFilterMonth } = useBusinessMonth();
   const [filterEmployee, setFilterEmployee] = useState<number | undefined>(undefined);
   const [filterExpenseType, setFilterExpenseType] = useState<string | undefined>(undefined);
   const [filterInvoiceType, setFilterInvoiceType] = useState<string | undefined>(undefined);
@@ -84,7 +84,7 @@ const Invoices: React.FC = () => {
     setLoading(true);
     try {
       const query: InvoiceQuery = {
-        belong_month: filterMonth ? filterMonth.format('YYYY-MM') : undefined,
+        belong_month: filterMonth.format('YYYY-MM'),
         employee_id: filterEmployee,
         expense_type_code: filterExpenseType,
         invoice_type: filterInvoiceType || undefined,
@@ -149,7 +149,7 @@ const Invoices: React.FC = () => {
             seller_tax_id: preview.seller_tax_id,
             buyer_name: preview.buyer_name,
             buyer_tax_id: preview.buyer_tax_id,
-            belong_month: filterMonth?.format('YYYY-MM'),
+            belong_month: filterMonth.format('YYYY-MM'),
             image_path: filePath,
             raw_ocr_json: preview.raw_ocr_json,
           },
@@ -159,7 +159,7 @@ const Invoices: React.FC = () => {
         message.error('OCR识别失败: ' + msg + '（可手工录入）');
         setUploadModal(prev => ({
           ...prev, ocrLoading: false, preview: null,
-          form: { belong_month: filterMonth?.format('YYYY-MM'), image_path: filePath },
+          form: { belong_month: filterMonth.format('YYYY-MM'), image_path: filePath },
         }));
       }
     } catch (e: unknown) {
@@ -171,7 +171,7 @@ const Invoices: React.FC = () => {
     setUploadModal({
       visible: true, ocrLoading: false, preview: null,
       selectedFilePath: null, editingId: null,
-      form: { belong_month: filterMonth?.format('YYYY-MM') },
+      form: { belong_month: filterMonth.format('YYYY-MM') },
     });
   };
 
@@ -261,12 +261,12 @@ const Invoices: React.FC = () => {
   const handleExport = async () => {
     try {
       const savePath = await save({
-        defaultPath: `发票清单_${filterMonth?.format('YYYY-MM') ?? 'all'}.xlsx`,
+        defaultPath: `发票清单_${filterMonth.format('YYYY-MM')}.xlsx`,
         filters: [{ name: 'Excel', extensions: ['xlsx'] }],
       });
       if (!savePath) return;
       const query: InvoiceQuery = {
-        belong_month: filterMonth ? filterMonth.format('YYYY-MM') : undefined,
+        belong_month: filterMonth.format('YYYY-MM'),
         employee_id: filterEmployee,
         expense_type_code: filterExpenseType,
         invoice_type: filterInvoiceType || undefined,
@@ -397,9 +397,9 @@ const Invoices: React.FC = () => {
       <Card style={{ marginBottom: 16 }}>
         <Space wrap>
           <DatePicker
-            picker="month" allowClear
+            picker="month" allowClear={false}
             value={filterMonth}
-            onChange={(d) => setFilterMonth(d)}
+            onChange={(value) => value && setFilterMonth(value)}
             placeholder="归属月份"
           />
           <Select

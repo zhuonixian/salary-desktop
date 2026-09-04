@@ -4,16 +4,15 @@ import {
 } from 'antd';
 import { ImportOutlined, EditOutlined, DownloadOutlined } from '@ant-design/icons';
 import { open, save } from '@tauri-apps/plugin-dialog';
-import dayjs from 'dayjs';
-import type { Dayjs } from 'dayjs';
 import {
   getAttendanceRecords, updateAttendanceRecord,
   importAttendanceExcel, exportAttendanceImportTemplate,
 } from '@/api';
+import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
 import type { AttendanceRecord, AttendanceRecordInput } from '@/types';
 
 const Attendance: React.FC = () => {
-  const [month, setMonth] = useState<Dayjs>(dayjs());
+  const { month, setMonth } = useBusinessMonth();
   const [records, setRecords] = useState<AttendanceRecord[]>([]);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
