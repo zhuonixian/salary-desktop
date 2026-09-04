@@ -919,7 +919,8 @@ pub fn export_payment_batch_file(
 ) -> Result<PaymentBatch, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     let detail = db::get_payment_batch_detail(&conn, id)?;
-    db::ensure_month_open(&conn, &detail.batch.belong_month)?;
+    // 先跑导出门禁（月份开放/未作废/已指定资金账户），避免门禁拒绝时已写出孤儿文件
+    db::ensure_payment_batch_exportable(&conn, id)?;
     excel::export_payment_batch(&detail, &path)?;
     let batch = db::mark_payment_batch_exported(&conn, id)?;
     db::log_operation(

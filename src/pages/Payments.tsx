@@ -203,9 +203,7 @@ const Payments: React.FC = () => {
       await fetchData();
       setDetail(result);
     } catch (e: unknown) {
-      if (e instanceof Error) {
-        message.error('生成付款批次失败: ' + e.message);
-      }
+      message.error('生成付款批次失败: ' + (e instanceof Error ? e.message : String(e)));
     } finally {
       setCreating(false);
     }

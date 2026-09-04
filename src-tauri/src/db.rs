@@ -3558,13 +3558,19 @@ pub fn update_payment_batch_remark(
     get_payment_batch(conn, input.id)
 }
 
-pub fn mark_payment_batch_exported(conn: &Connection, id: i64) -> AppResult<PaymentBatch> {
+/// 导出门禁只读校验（供命令层在写导出文件前调用，避免门禁拒绝时留下孤儿文件）。
+pub fn ensure_payment_batch_exportable(conn: &Connection, id: i64) -> AppResult<PaymentBatch> {
     let batch = get_payment_batch(conn, id)?;
     ensure_month_open(conn, &batch.belong_month)?;
     if batch.status == "void" {
         return Err(AppError::InvalidParam("已作废付款批次不能导出".into()));
     }
     ensure_batch_has_fund_account(&batch)?;
+    Ok(batch)
+}
+
+pub fn mark_payment_batch_exported(conn: &Connection, id: i64) -> AppResult<PaymentBatch> {
+    let batch = ensure_payment_batch_exportable(conn, id)?;
     if batch.status == "paid" {
         return Ok(batch);
     }
@@ -7543,6 +7549,108 @@ pub mod tests {
             )
             .unwrap();
         assert_eq!(batch_voucher_count, 0);
+    }
+
+    #[test]
+    fn test_general_payment_batch_paid_rolls_back_when_doc_no_longer_batched() {
+        let mut conn = setup_financial_db();
+        let acc = make_batch_fund_account(&conn, "BANK-G4");
+        let (partner_id, operator) = make_general_batch_env(&conn);
+        let doc_a = make_approved_fund_doc(
+            &conn,
+            &operator,
+            "payment",
+            acc,
+            Some(partner_id),
+            None,
+            "2026-08",
+            400.0,
+        );
+        let doc_b = make_approved_fund_doc(
+            &conn,
+            &operator,
+            "payment",
+            acc,
+            Some(partner_id),
+            None,
+            "2026-08",
+            600.0,
+        );
+
+        let detail = create_payment_batch(
+            &mut conn,
+            &PaymentBatchInput {
+                belong_month: "2026-08".into(),
+                batch_type: "general".into(),
+                fund_account_id: Some(acc),
+                source_ids: Some(vec![doc_a.id, doc_b.id]),
+                remark: None,
+            },
+            &operator,
+        )
+        .unwrap();
+        mark_payment_batch_exported(&conn, detail.batch.id).unwrap();
+
+        // 同批一张单被单独结算（batched → settled，非 batched 状态）
+        crate::cashier::settle_fund_document(&conn, &operator, doc_a.id).unwrap();
+
+        // 失败前快照：active 凭证数（doc_a 结算凭证已存在）
+        let count_active_vouchers = |conn: &Connection| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM vouchers WHERE status='active'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let before_vouchers = count_active_vouchers(&conn);
+
+        let err = mark_payment_batch_paid(
+            &mut conn,
+            &PaymentBatchPaidInput {
+                id: detail.batch.id,
+                payment_date: "2026-08-31".into(),
+            },
+            &operator,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains(&doc_a.document_no),
+            "错误应指向已单独结算的单据: {err:?}"
+        );
+
+        // 整体回滚：批次仍 exported 且无付款日期
+        let (batch_status, batch_date): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, payment_date FROM payment_batches WHERE id=?1",
+                params![detail.batch.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(batch_status, "exported");
+        assert_eq!(batch_date, None);
+
+        // 其余单据仍 batched 且挂原批次；批次明细均未置 paid
+        let (doc_b_status, doc_b_batch): (String, Option<i64>) = conn
+            .query_row(
+                "SELECT status, payment_batch_id FROM fund_documents WHERE id=?1",
+                params![doc_b.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(doc_b_status, "batched");
+        assert_eq!(doc_b_batch, Some(detail.batch.id));
+        let paid_items: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM payment_items WHERE batch_id=?1 AND status='paid'",
+                params![detail.batch.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(paid_items, 0);
+
+        // 凭证数不变：无 doc_b 结算凭证，也无批次级凭证
+        assert_eq!(count_active_vouchers(&conn), before_vouchers);
     }
 
     #[test]
