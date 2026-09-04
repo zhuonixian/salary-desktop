@@ -313,9 +313,8 @@ pub fn create_tables(conn: &Connection) -> AppResult<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_bank_transactions_month ON bank_transactions(belong_month, status);
         CREATE INDEX IF NOT EXISTS idx_bank_transactions_date ON bank_transactions(transaction_date);
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_bank_transactions_dedup
-            ON bank_transactions(transaction_date, COALESCE(summary,''), COALESCE(counterparty_name,''),
-                                 COALESCE(counterparty_account,''), income_amount, expense_amount, COALESCE(balance,0));
+        -- 银行流水去重唯一索引由第七阶段迁移统一创建（含 fund_account_id 账户维度），
+        -- 因该索引依赖迁移补列，不能在本批次直接建。
         CREATE UNIQUE INDEX IF NOT EXISTS idx_bank_matches_active_transaction
             ON bank_transaction_matches(transaction_id)
             WHERE status = 'active';
@@ -456,6 +455,7 @@ pub fn create_tables(conn: &Connection) -> AppResult<()> {
         ",
     )?;
     migrate_existing_schema(conn)?;
+    migrate_stage7_schema(conn)?;
 
     Ok(())
 }
@@ -611,6 +611,313 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, column_type: &str
     conn.execute_batch(&format!(
         "ALTER TABLE {table} ADD COLUMN {column} {column_type}"
     ))?;
+    Ok(())
+}
+
+// ==================== 第七阶段（出纳运营闭环）schema 迁移 ====================
+
+/// 资金账户允许挂接的总账科目（库存现金 / 银行存款 / 其他货币资金）
+const STAGE7_FUND_GL_CODES: &[&str] = &["1001", "1002", "1012"];
+
+/// 第七阶段资金领域新表清单（迁移后自检用）
+const STAGE7_NEW_TABLES: &[&str] = &[
+    "fund_accounts",
+    "business_partners",
+    "operator_profiles",
+    "approval_events",
+    "business_attachments",
+];
+
+/// 第七阶段 schema 迁移入口（幂等，可在新旧库上重复执行）：
+/// 1. 建五张资金领域新表（资金账户/往来单位/操作人/审批事件/业务附件）；
+/// 2. 为凭证分录、付款批次、银行流水补可空 `fund_account_id`（历史数据保持 NULL 进待归集，不猜测归属）；
+/// 3. 银行流水去重唯一索引重建为含账户维度，避免不同账户同日同金额流水误判重复；
+/// 4. 迁移结束运行 `PRAGMA foreign_key_check`，发现悬空引用整体回滚；
+/// 5. 迁移状态与待归集数量写入 app_settings（`stage7_migration_*` 键）。
+///
+/// 全程在单事务中执行，任一步失败整体回滚（含建表/加列/重建索引），不留半成品。
+/// 注意：不在迁移中伪造默认资金账户，默认账户由归集向导确认后创建（spec 9.2）。
+pub fn migrate_stage7_schema(conn: &Connection) -> AppResult<Stage7MigrationReport> {
+    run_migration_in_transaction(conn, |c| {
+        create_stage7_tables(c)?;
+        // 兼容迁移：三处资金辅助核算列（可空、无默认值），带外键引用
+        ensure_column(
+            c,
+            "voucher_lines",
+            "fund_account_id",
+            "INTEGER REFERENCES fund_accounts(id)",
+        )?;
+        ensure_column(
+            c,
+            "payment_batches",
+            "fund_account_id",
+            "INTEGER REFERENCES fund_accounts(id)",
+        )?;
+        ensure_column(
+            c,
+            "bank_transactions",
+            "fund_account_id",
+            "INTEGER REFERENCES fund_accounts(id)",
+        )?;
+        rebuild_stage7_indexes(c)?;
+
+        // 新表自检：防止部分建表被静默吞掉
+        for table in STAGE7_NEW_TABLES {
+            let exists: i64 = c.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                params![table],
+                |r| r.get(0),
+            )?;
+            if exists == 0 {
+                return Err(AppError::General(format!(
+                    "第七阶段迁移异常：表 {table} 创建失败"
+                )));
+            }
+        }
+
+        // 外键一致性校验：存量脏数据（悬空引用）视为升级阻断项，整体回滚
+        let fk_errors = count_fk_check_violations(c)?;
+        if fk_errors > 0 {
+            return Err(AppError::General(format!(
+                "第七阶段迁移中止：发现 {fk_errors} 处外键悬空引用（PRAGMA foreign_key_check），请先通过数据安全中心备份数据并修复后重试"
+            )));
+        }
+
+        let mut report = build_stage7_report(c)?;
+        record_stage7_state(c, &report)?;
+        // 回填首次/本次迁移完成时间戳
+        report.completed_at = get_setting(c, "stage7_migration_completed_at")?;
+        Ok(report)
+    })
+}
+
+/// 在单个事务中执行迁移步骤；任一步失败整体回滚，库保持迁移前状态。
+/// SQLite 的 DDL（建表/加列/建索引）同样参与事务回滚，因此失败后无半成品。
+pub(crate) fn run_migration_in_transaction<F, T>(conn: &Connection, steps: F) -> AppResult<T>
+where
+    F: FnOnce(&Connection) -> AppResult<T>,
+{
+    let tx = conn.unchecked_transaction()?;
+    match steps(&tx) {
+        Ok(value) => {
+            tx.commit()?;
+            Ok(value)
+        }
+        Err(err) => {
+            // 显式回滚，保证失败场景不留任何残留
+            let _ = tx.rollback();
+            Err(err)
+        }
+    }
+}
+
+/// 建第七阶段资金领域五张新表与索引（全部 IF NOT EXISTS，幂等）
+fn create_stage7_tables(conn: &Connection) -> AppResult<()> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS fund_accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_code TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            account_type TEXT NOT NULL CHECK (account_type IN ('bank','cash','third_party')),
+            bank_name TEXT,
+            account_no TEXT,
+            currency TEXT NOT NULL DEFAULT 'CNY' CHECK (currency = 'CNY'),
+            gl_account_code TEXT NOT NULL,
+            opening_date TEXT,
+            opening_balance REAL NOT NULL DEFAULT 0,
+            is_default INTEGER NOT NULL DEFAULT 0,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            remark TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            FOREIGN KEY (gl_account_code) REFERENCES gl_accounts(code)
+        );
+        -- 同一账户类型最多一个默认账户
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_fund_accounts_default_per_type
+            ON fund_accounts(account_type) WHERE is_default = 1;
+        CREATE INDEX IF NOT EXISTS idx_fund_accounts_type ON fund_accounts(account_type, is_active);
+
+        CREATE TABLE IF NOT EXISTS business_partners (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            partner_code TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            partner_type TEXT NOT NULL CHECK (partner_type IN ('supplier','customer','other')),
+            tax_id TEXT,
+            contact_person TEXT,
+            phone TEXT,
+            bank_name TEXT,
+            bank_account TEXT,
+            gl_account_code TEXT,
+            status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','inactive')),
+            remark TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            FOREIGN KEY (gl_account_code) REFERENCES gl_accounts(code)
+        );
+        -- 名称 + 税号去重（税号可空，按空串归一化）
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_business_partners_name_tax
+            ON business_partners(name, COALESCE(tax_id, ''));
+        CREATE INDEX IF NOT EXISTS idx_business_partners_type ON business_partners(partner_type, status);
+
+        CREATE TABLE IF NOT EXISTS operator_profiles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            role TEXT NOT NULL CHECK (role IN ('requester','approver','cashier','admin')),
+            is_active INTEGER NOT NULL DEFAULT 1,
+            remark TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS approval_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_type TEXT NOT NULL CHECK (entity_type IN ('reimbursement_claim','fund_document')),
+            entity_id INTEGER NOT NULL,
+            action TEXT NOT NULL CHECK (action IN ('submit','approve','reject','settle','void','reverse')),
+            from_status TEXT,
+            to_status TEXT,
+            operator_id INTEGER,
+            comment TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (operator_id) REFERENCES operator_profiles(id)
+        );
+        -- 实体维度轨迹查询（按 id 升序返回完整轨迹）
+        CREATE INDEX IF NOT EXISTS idx_approval_events_entity
+            ON approval_events(entity_type, entity_id, id);
+
+        CREATE TABLE IF NOT EXISTS business_attachments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_type TEXT NOT NULL,
+            entity_id INTEGER NOT NULL,
+            file_name TEXT NOT NULL,
+            file_path TEXT NOT NULL UNIQUE,
+            encrypted INTEGER NOT NULL DEFAULT 0,
+            file_size INTEGER,
+            belong_month TEXT,
+            uploaded_by TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_business_attachments_entity
+            ON business_attachments(entity_type, entity_id);
+        ",
+    )?;
+    Ok(())
+}
+
+/// 重建涉及 fund_account_id 的索引：
+/// 银行流水去重唯一索引加入账户维度（COALESCE(fund_account_id,0)，历史无账户按 0 归一），
+/// 并为三处资金辅助列补查询索引。 DROP+CREATE 幂等：旧库替换旧定义；
+/// 去重索引已是账户维度定义时跳过重建，避免每次启动都重刷唯一索引。
+fn rebuild_stage7_indexes(conn: &Connection) -> AppResult<()> {
+    let dedup_sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_bank_transactions_dedup'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(None);
+    if dedup_sql
+        .map(|sql| !sql.contains("fund_account_id"))
+        .unwrap_or(true)
+    {
+        conn.execute_batch(
+            "
+            DROP INDEX IF EXISTS idx_bank_transactions_dedup;
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_bank_transactions_dedup
+                ON bank_transactions(transaction_date, COALESCE(summary,''), COALESCE(counterparty_name,''),
+                                     COALESCE(counterparty_account,''), income_amount, expense_amount,
+                                     COALESCE(balance,0), COALESCE(fund_account_id, 0));
+            ",
+        )?;
+    }
+    conn.execute_batch(
+        "
+        CREATE INDEX IF NOT EXISTS idx_voucher_lines_fund_account ON voucher_lines(fund_account_id);
+        CREATE INDEX IF NOT EXISTS idx_payment_batches_fund_account ON payment_batches(fund_account_id);
+        CREATE INDEX IF NOT EXISTS idx_bank_transactions_fund_account ON bank_transactions(fund_account_id);
+        ",
+    )?;
+    Ok(())
+}
+
+/// 统计 PRAGMA foreign_key_check 违规行数（不依赖 foreign_keys pragma 开关）
+fn count_fk_check_violations(conn: &Connection) -> AppResult<i64> {
+    let mut stmt = conn.prepare("PRAGMA foreign_key_check")?;
+    let mut rows = stmt.query([])?;
+    let mut count = 0i64;
+    while rows.next()?.is_some() {
+        count += 1;
+    }
+    Ok(count)
+}
+
+/// 统计待归集数量：无资金账户的银行流水、付款批次与资金科目（1001/1002/1012）凭证分录。
+/// 历史数据不做归属猜测（保持 NULL），仅计数供归集向导展示。
+fn build_stage7_report(conn: &Connection) -> AppResult<Stage7MigrationReport> {
+    let unassigned_bank_transactions: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM bank_transactions WHERE fund_account_id IS NULL",
+        [],
+        |r| r.get(0),
+    )?;
+    let unassigned_payment_batches: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM payment_batches WHERE fund_account_id IS NULL",
+        [],
+        |r| r.get(0),
+    )?;
+    let fund_codes = STAGE7_FUND_GL_CODES.join("','");
+    let unassigned_voucher_lines: i64 = conn.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM voucher_lines
+             WHERE fund_account_id IS NULL
+               AND (debit_amount > 0 OR credit_amount > 0)
+               AND account_code IN ('{fund_codes}')"
+        ),
+        [],
+        |r| r.get(0),
+    )?;
+    let pending_count =
+        unassigned_bank_transactions + unassigned_payment_batches + unassigned_voucher_lines;
+    Ok(Stage7MigrationReport {
+        status: "done".to_string(),
+        pending_count,
+        unassigned_bank_transactions,
+        unassigned_payment_batches,
+        unassigned_voucher_lines,
+        completed_at: None,
+    })
+}
+
+/// 将迁移状态写入 app_settings：状态、待归集数量（总数 + 明细）、首次完成时间戳（重跑不覆盖）
+fn record_stage7_state(conn: &Connection, report: &Stage7MigrationReport) -> AppResult<()> {
+    set_setting(conn, "stage7_migration_status", &report.status)?;
+    set_setting(
+        conn,
+        "stage7_migration_pending_count",
+        &report.pending_count.to_string(),
+    )?;
+    set_setting(
+        conn,
+        "stage7_migration_unassigned_bank_transactions",
+        &report.unassigned_bank_transactions.to_string(),
+    )?;
+    set_setting(
+        conn,
+        "stage7_migration_unassigned_payment_batches",
+        &report.unassigned_payment_batches.to_string(),
+    )?;
+    set_setting(
+        conn,
+        "stage7_migration_unassigned_voucher_lines",
+        &report.unassigned_voucher_lines.to_string(),
+    )?;
+    if get_setting(conn, "stage7_migration_completed_at")?.is_none() {
+        set_setting(
+            conn,
+            "stage7_migration_completed_at",
+            &Utc::now().to_rfc3339(),
+        )?;
+    }
     Ok(())
 }
 
@@ -6959,5 +7266,397 @@ mod social_tests {
 
         // 其他年份无数据
         assert!(get_annual_tax_summary(&conn, 2027).unwrap().is_empty());
+    }
+}
+
+/// 第七阶段（7A）DDL 与迁移测试：独立测试模块，复用 db::tests 的建库 helper
+#[cfg(test)]
+mod stage7_tests {
+    use super::tests::setup_financial_db;
+    use super::*;
+
+    // ==================== 第七阶段（7A）DDL 与迁移测试 ====================
+
+    /// 模拟 v0.6.1 旧库：仅建第七阶段迁移涉及的老表（老结构，无资金账户表/列/账户维度索引），
+    /// 并预置一条资金科目分录、一个付款批次、一条银行流水作为待归集样本。
+    pub(crate) fn setup_stage7_legacy_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT);
+            CREATE TABLE gl_accounts (
+                code TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                category TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                cash_flow_category TEXT NOT NULL,
+                is_system INTEGER DEFAULT 0,
+                is_active INTEGER DEFAULT 1,
+                remark TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            );
+            CREATE TABLE vouchers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                voucher_no TEXT UNIQUE NOT NULL,
+                voucher_date TEXT NOT NULL,
+                belong_month TEXT NOT NULL,
+                source_type TEXT NOT NULL CHECK (source_type IN (
+                    'salary_accrual','salary_payment','reimbursement_accrual',
+                    'reimbursement_payment','invoice_expense','bank_manual','period_close')),
+                source_id INTEGER NOT NULL,
+                total_amount REAL NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','void')),
+                remark TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            );
+            CREATE TABLE voucher_lines (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                voucher_id INTEGER NOT NULL,
+                account_code TEXT NOT NULL,
+                debit_amount REAL NOT NULL DEFAULT 0,
+                credit_amount REAL NOT NULL DEFAULT 0,
+                summary TEXT,
+                line_order INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (voucher_id) REFERENCES vouchers(id) ON DELETE CASCADE,
+                FOREIGN KEY (account_code) REFERENCES gl_accounts(code)
+            );
+            CREATE TABLE payment_batches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_no TEXT UNIQUE NOT NULL,
+                belong_month TEXT NOT NULL,
+                batch_type TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'draft',
+                total_amount REAL DEFAULT 0,
+                item_count INTEGER DEFAULT 0,
+                payment_date TEXT,
+                remark TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            );
+            CREATE TABLE bank_transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                transaction_date TEXT NOT NULL,
+                belong_month TEXT NOT NULL,
+                summary TEXT,
+                counterparty_name TEXT,
+                counterparty_account TEXT,
+                income_amount REAL DEFAULT 0,
+                expense_amount REAL DEFAULT 0,
+                balance REAL,
+                status TEXT NOT NULL DEFAULT 'unmatched',
+                imported_file TEXT,
+                raw_json TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            );
+            CREATE UNIQUE INDEX idx_bank_transactions_dedup
+                ON bank_transactions(transaction_date, COALESCE(summary,''), COALESCE(counterparty_name,''),
+                                     COALESCE(counterparty_account,''), income_amount, expense_amount, COALESCE(balance,0));
+            INSERT INTO gl_accounts (code, name, category, direction, cash_flow_category) VALUES
+                ('1001', '库存现金', 'asset', 'debit', 'none'),
+                ('1002', '银行存款', 'asset', 'debit', 'none'),
+                ('1012', '其他货币资金', 'asset', 'debit', 'none'),
+                ('6602', '管理费用', 'profit_loss', 'debit', 'operating');
+            INSERT INTO vouchers (id, voucher_no, voucher_date, belong_month, source_type, source_id, total_amount, status)
+                VALUES (1, 'V20260801001', '2026-08-01', '2026-08', 'bank_manual', 1, 500, 'active');
+            INSERT INTO voucher_lines (voucher_id, account_code, debit_amount, credit_amount, line_order)
+                VALUES (1, '1002', 500, 0, 1), (1, '6602', 0, 500, 2);
+            INSERT INTO payment_batches (id, batch_no, belong_month, batch_type, status)
+                VALUES (1, 'GZ202608001', '2026-08', 'salary', 'paid');
+            INSERT INTO bank_transactions (id, transaction_date, belong_month, summary, income_amount, expense_amount)
+                VALUES (1, '2026-08-01', '2026-08', '银行付款', 0, 500);
+            ",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn stage7_table_exists(conn: &Connection, name: &str) -> bool {
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+            params![name],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|n| n > 0)
+        .unwrap_or(false)
+    }
+
+    fn stage7_column_exists(conn: &Connection, table: &str, column: &str) -> bool {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap();
+        let names: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .filter_map(|c| c.ok())
+            .collect();
+        names.iter().any(|n| n == column)
+    }
+
+    /// 显式执行 PRAGMA foreign_key_check 并返回违规行数
+    fn stage7_fk_violation_count(conn: &Connection) -> i64 {
+        let mut stmt = conn.prepare("PRAGMA foreign_key_check").unwrap();
+        let mut rows = stmt.query([]).unwrap();
+        let mut count = 0i64;
+        while rows.next().unwrap().is_some() {
+            count += 1;
+        }
+        count
+    }
+
+    fn stage7_setting(conn: &Connection, key: &str) -> Option<String> {
+        get_setting(conn, key).unwrap()
+    }
+
+    const STAGE7_TEST_TABLES: &[&str] = &[
+        "fund_accounts",
+        "business_partners",
+        "operator_profiles",
+        "approval_events",
+        "business_attachments",
+    ];
+
+    #[test]
+    fn test_stage7_fresh_db_initializes_fund_tables() {
+        // 空库初始化：五张新表、三处可空 fund_account_id 列、迁移状态键齐全
+        let conn = setup_financial_db();
+        for table in STAGE7_TEST_TABLES {
+            assert!(stage7_table_exists(&conn, table), "空库初始化缺表 {table}");
+        }
+        assert!(stage7_column_exists(
+            &conn,
+            "voucher_lines",
+            "fund_account_id"
+        ));
+        assert!(stage7_column_exists(
+            &conn,
+            "payment_batches",
+            "fund_account_id"
+        ));
+        assert!(stage7_column_exists(
+            &conn,
+            "bank_transactions",
+            "fund_account_id"
+        ));
+        assert_eq!(
+            stage7_setting(&conn, "stage7_migration_status").as_deref(),
+            Some("done")
+        );
+        assert_eq!(
+            stage7_setting(&conn, "stage7_migration_pending_count").as_deref(),
+            Some("0")
+        );
+        assert!(stage7_setting(&conn, "stage7_migration_completed_at").is_some());
+        // 空库不得伪造默认账户（归集向导确认后再建）
+        let accounts: i64 = conn
+            .query_row("SELECT COUNT(*) FROM fund_accounts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(accounts, 0);
+        assert_eq!(stage7_fk_violation_count(&conn), 0);
+        // 同一类型最多一个默认账户：第二个默认银行账户应被部分唯一索引拒绝
+        conn.execute(
+            "INSERT INTO fund_accounts
+             (account_code, name, account_type, gl_account_code, is_default)
+             VALUES ('BANK-001', '基本户', 'bank', '1002', 1)",
+            [],
+        )
+        .unwrap();
+        let dup = conn.execute(
+            "INSERT INTO fund_accounts
+             (account_code, name, account_type, gl_account_code, is_default)
+             VALUES ('BANK-002', '备用户', 'bank', '1002', 1)",
+            [],
+        );
+        assert!(dup.is_err(), "同类型第二个默认账户应违反部分唯一索引");
+    }
+
+    #[test]
+    fn test_stage7_migration_upgrades_legacy_db() {
+        let conn = setup_stage7_legacy_db();
+        let report = migrate_stage7_schema(&conn).unwrap();
+
+        for table in STAGE7_TEST_TABLES {
+            assert!(stage7_table_exists(&conn, table), "旧库升级缺表 {table}");
+        }
+        assert!(stage7_column_exists(
+            &conn,
+            "voucher_lines",
+            "fund_account_id"
+        ));
+        assert!(stage7_column_exists(
+            &conn,
+            "payment_batches",
+            "fund_account_id"
+        ));
+        assert!(stage7_column_exists(
+            &conn,
+            "bank_transactions",
+            "fund_account_id"
+        ));
+
+        // 待归集：1 条银行流水 + 1 个付款批次 + 1 条资金科目分录（6602 分录不计）
+        assert_eq!(report.pending_count, 3);
+        assert_eq!(report.unassigned_bank_transactions, 1);
+        assert_eq!(report.unassigned_payment_batches, 1);
+        assert_eq!(report.unassigned_voucher_lines, 1);
+        assert_eq!(
+            stage7_setting(&conn, "stage7_migration_pending_count").as_deref(),
+            Some("3")
+        );
+        assert_eq!(
+            stage7_setting(&conn, "stage7_migration_status").as_deref(),
+            Some("done")
+        );
+        assert!(stage7_setting(&conn, "stage7_migration_completed_at").is_some());
+
+        // 银行流水去重唯一索引已加入账户维度
+        let idx_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_bank_transactions_dedup'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            idx_sql.contains("fund_account_id"),
+            "去重唯一索引应包含 fund_account_id 维度：{idx_sql}"
+        );
+
+        // 历史数据不猜测归属：保持 NULL 进待归集
+        let unassigned: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM bank_transactions WHERE fund_account_id IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(unassigned, 1);
+        assert_eq!(stage7_fk_violation_count(&conn), 0);
+    }
+
+    #[test]
+    fn test_stage7_migration_idempotent() {
+        let conn = setup_stage7_legacy_db();
+        let first = migrate_stage7_schema(&conn).unwrap();
+        let ts_first = stage7_setting(&conn, "stage7_migration_completed_at").unwrap();
+
+        let second = migrate_stage7_schema(&conn).unwrap();
+        assert_eq!(first.pending_count, second.pending_count);
+        // 重跑迁移不覆盖首次完成时间戳
+        assert_eq!(
+            stage7_setting(&conn, "stage7_migration_completed_at").as_deref(),
+            Some(ts_first.as_str())
+        );
+        // 迁移本身不写默认账户，重跑不产生重复数据
+        let accounts: i64 = conn
+            .query_row("SELECT COUNT(*) FROM fund_accounts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(accounts, 0);
+
+        // 已存在默认账户时重跑迁移，不得重复插入
+        conn.execute(
+            "INSERT INTO fund_accounts
+             (account_code, name, account_type, gl_account_code, is_default)
+             VALUES ('BANK-001', '基本户', 'bank', '1002', 1)",
+            [],
+        )
+        .unwrap();
+        migrate_stage7_schema(&conn).unwrap();
+        let accounts: i64 = conn
+            .query_row("SELECT COUNT(*) FROM fund_accounts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(accounts, 1);
+    }
+
+    #[test]
+    fn test_stage7_duplicate_default_account_rolls_back() {
+        let conn = setup_stage7_legacy_db();
+        // 模拟归集向导在同一事务写入默认账户时出现重复默认账户
+        let result = run_migration_in_transaction(&conn, |c| {
+            create_stage7_tables(c)?;
+            c.execute(
+                "INSERT INTO fund_accounts
+                 (account_code, name, account_type, gl_account_code, is_default)
+                 VALUES ('BANK-001', '基本户', 'bank', '1002', 1)",
+                [],
+            )?;
+            // 同类型第二个默认账户 → 部分唯一索引冲突
+            c.execute(
+                "INSERT INTO fund_accounts
+                 (account_code, name, account_type, gl_account_code, is_default)
+                 VALUES ('BANK-002', '备用户', 'bank', '1002', 1)",
+                [],
+            )?;
+            Ok(())
+        });
+        assert!(result.is_err(), "重复默认账户应导致迁移失败");
+        // 回滚后建表与第一条 INSERT 均不残留
+        assert!(
+            !stage7_table_exists(&conn, "fund_accounts"),
+            "失败回滚后不应残留 fund_accounts 表"
+        );
+        // 库仍可用：老数据可正常查询，无外键悬空
+        let batches: i64 = conn
+            .query_row("SELECT COUNT(*) FROM payment_batches", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(batches, 1);
+        assert_eq!(stage7_fk_violation_count(&conn), 0);
+    }
+
+    #[test]
+    fn test_stage7_migration_rejects_orphan_foreign_keys() {
+        let conn = setup_stage7_legacy_db();
+        // 模拟历史脏数据：分录科目在科目表中不存在（外键悬空）。
+        // 旧版本/外部工具可能在关闭外键校验时写入，这里先关闭 pragma 复现该数据状态。
+        conn.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+        conn.execute(
+            "INSERT INTO voucher_lines (voucher_id, account_code, debit_amount, credit_amount, line_order)
+             VALUES (1, 'ZZZ9', 1, 0, 9)",
+            [],
+        )
+        .unwrap();
+        let result = migrate_stage7_schema(&conn);
+        assert!(result.is_err(), "存在外键悬空引用时迁移应中止");
+        // 回滚：新增列、新表与状态键均不残留
+        assert!(!stage7_column_exists(
+            &conn,
+            "voucher_lines",
+            "fund_account_id"
+        ));
+        assert!(!stage7_column_exists(
+            &conn,
+            "bank_transactions",
+            "fund_account_id"
+        ));
+        assert!(!stage7_table_exists(&conn, "fund_accounts"));
+        assert!(stage7_setting(&conn, "stage7_migration_status").is_none());
+        // 库仍可用：分录数据完整
+        let lines: i64 = conn
+            .query_row("SELECT COUNT(*) FROM voucher_lines", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(lines, 3);
+    }
+
+    #[test]
+    fn test_stage7_partial_ddl_rolls_back() {
+        let conn = setup_stage7_legacy_db();
+        // 模拟迁移中途失败（部分建表）
+        let result: AppResult<()> = run_migration_in_transaction(&conn, |c| {
+            c.execute_batch(
+                "CREATE TABLE stage7_probe_tmp (id INTEGER PRIMARY KEY);
+                 INSERT INTO stage7_probe_tmp VALUES (1);",
+            )?;
+            Err(AppError::General("模拟迁移中途失败".into()))
+        });
+        assert!(result.is_err());
+        // 建表已回滚，库保持可用
+        assert!(!stage7_table_exists(&conn, "stage7_probe_tmp"));
+        let txs: i64 = conn
+            .query_row("SELECT COUNT(*) FROM bank_transactions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(txs, 1);
+        assert_eq!(stage7_fk_violation_count(&conn), 0);
     }
 }

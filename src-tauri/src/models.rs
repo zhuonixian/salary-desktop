@@ -1075,3 +1075,194 @@ pub struct SocialInsuranceProfileInput {
     pub hf_personal_rate: Option<f64>,
     pub remark: Option<String>,
 }
+
+// ==================== 第七阶段：资金账户 / 往来单位 / 操作人 / 审批事件 / 业务附件 ====================
+// 以下模型由 Task 3+（cashier.rs 领域模块）接入，接入前临时 allow(dead_code)。
+
+/// 资金账户（银行 / 现金 / 第三方支付）
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FundAccount {
+    pub id: i64,
+    pub account_code: String,
+    pub name: String,
+    pub account_type: String,
+    pub bank_name: Option<String>,
+    pub account_no: Option<String>,
+    pub currency: String,
+    pub gl_account_code: String,
+    pub opening_date: Option<String>,
+    pub opening_balance: f64,
+    pub is_default: bool,
+    pub is_active: bool,
+    pub remark: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+/// 资金账户录入/更新入参（id=Some 时更新已有账户）
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FundAccountInput {
+    pub id: Option<i64>,
+    pub account_code: String,
+    pub name: String,
+    pub account_type: String,
+    pub bank_name: Option<String>,
+    pub account_no: Option<String>,
+    pub gl_account_code: String,
+    pub opening_date: Option<String>,
+    pub opening_balance: Option<f64>,
+    pub is_default: Option<bool>,
+    pub is_active: Option<bool>,
+    pub remark: Option<String>,
+}
+
+/// 资金账户查询条件
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FundAccountQuery {
+    pub account_type: Option<String>,
+    pub is_active: Option<bool>,
+    pub keyword: Option<String>,
+}
+
+/// 往来单位（供应商 / 客户 / 其他；员工继续引用 employees，不在本表维护）
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BusinessPartner {
+    pub id: i64,
+    pub partner_code: String,
+    pub name: String,
+    pub partner_type: String,
+    pub tax_id: Option<String>,
+    pub contact_person: Option<String>,
+    pub phone: Option<String>,
+    pub bank_name: Option<String>,
+    pub bank_account: Option<String>,
+    pub gl_account_code: Option<String>,
+    pub status: String,
+    pub remark: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+/// 往来单位录入/更新入参（id=Some 时更新已有单位）
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BusinessPartnerInput {
+    pub id: Option<i64>,
+    pub partner_code: String,
+    pub name: String,
+    pub partner_type: String,
+    pub tax_id: Option<String>,
+    pub contact_person: Option<String>,
+    pub phone: Option<String>,
+    pub bank_name: Option<String>,
+    pub bank_account: Option<String>,
+    pub gl_account_code: Option<String>,
+    pub status: Option<String>,
+    pub remark: Option<String>,
+}
+
+/// 往来单位查询条件
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BusinessPartnerQuery {
+    pub partner_type: Option<String>,
+    pub status: Option<String>,
+    pub keyword: Option<String>,
+}
+
+/// 本地操作人档案（署名与审计用，不构成账号体系/RBAC）
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperatorProfile {
+    pub id: i64,
+    pub name: String,
+    pub role: String,
+    pub is_active: bool,
+    pub remark: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+/// 操作人录入/更新入参（id=Some 时更新已有操作人）
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperatorProfileInput {
+    pub id: Option<i64>,
+    pub name: String,
+    pub role: String,
+    pub is_active: Option<bool>,
+    pub remark: Option<String>,
+}
+
+/// 审批事件（追加式，不允许 UPDATE/DELETE；报销单与资金单据共用）
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalEvent {
+    pub id: i64,
+    pub entity_type: String,
+    pub entity_id: i64,
+    pub action: String,
+    pub from_status: Option<String>,
+    pub to_status: Option<String>,
+    pub operator_id: Option<i64>,
+    pub comment: Option<String>,
+    pub created_at: String,
+}
+
+/// 审批事件写入入参（approve/reject/void/reverse 须填 comment，由领域层校验）
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalEventInput {
+    pub entity_type: String,
+    pub entity_id: i64,
+    pub action: String,
+    pub from_status: Option<String>,
+    pub to_status: Option<String>,
+    pub operator_id: Option<i64>,
+    pub comment: Option<String>,
+}
+
+/// 业务附件（通用挂接：实体类型 + 实体 ID；文件归档 attachments/ 并可 AES-GCM 加密）
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BusinessAttachment {
+    pub id: i64,
+    pub entity_type: String,
+    pub entity_id: i64,
+    pub file_name: String,
+    pub file_path: String,
+    pub encrypted: bool,
+    pub file_size: Option<i64>,
+    pub belong_month: Option<String>,
+    pub uploaded_by: Option<String>,
+    pub created_at: String,
+}
+
+/// 业务附件登记入参
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BusinessAttachmentInput {
+    pub entity_type: String,
+    pub entity_id: i64,
+    pub file_name: String,
+    pub file_path: String,
+    pub encrypted: Option<bool>,
+    pub file_size: Option<i64>,
+    pub belong_month: Option<String>,
+    pub uploaded_by: Option<String>,
+}
+
+/// 第七阶段资金迁移报告：迁移状态与待归集数量（同步写入 app_settings 供归集向导展示）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Stage7MigrationReport {
+    pub status: String,
+    pub pending_count: i64,
+    pub unassigned_bank_transactions: i64,
+    pub unassigned_payment_batches: i64,
+    pub unassigned_voucher_lines: i64,
+    pub completed_at: Option<String>,
+}
