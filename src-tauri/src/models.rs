@@ -1340,3 +1340,60 @@ pub struct Stage7MigrationReport {
     pub unassigned_voucher_lines: i64,
     pub completed_at: Option<String>,
 }
+
+/// 历史归集按月统计：无账户银行流水与待归集资金分录（Task 10，spec 9）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FundMigrationMonthStat {
+    pub belong_month: String,
+    pub bank_transactions: i64,
+    pub voucher_lines: i64,
+}
+
+/// 历史归集实时状态（get_fund_migration_status）：待归集计数 + 按月分组 + 待归集批次清单。
+/// 计数口径与迁移报告一致：排除 void 凭证分录与 void 批次；无法通过批次/流水联动的独立
+/// 资金分录单列（spec 9.5：保持 NULL，不猜测归属）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FundMigrationStatus {
+    pub unassigned_bank_transactions: i64,
+    pub unassigned_payment_batches: i64,
+    pub unassigned_voucher_lines: i64,
+    pub pending_count: i64,
+    pub bank_months: Vec<FundMigrationMonthStat>,
+    pub pending_batches: Vec<PaymentBatch>,
+    pub unlinked_voucher_lines: i64,
+    pub completed_at: Option<String>,
+    pub last_applied_at: Option<String>,
+}
+
+/// 归集预览结果（preview_fund_assignment）：按指定账户与范围核对将影响的对象与分录数
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FundAssignmentPreview {
+    pub entity_type: String,
+    /// 将写入账户的对象数（银行流水条数或付款批次数）
+    pub item_count: i64,
+    /// 联动可补齐的资金分录数（active 凭证且科目与账户挂接科目一致）
+    pub affected_voucher_lines: i64,
+    /// 无法联动而保持 NULL 的资金分录数（void 凭证或科目与账户挂接科目不一致）
+    pub skipped_voucher_lines: i64,
+}
+
+/// 历史归集执行入参（apply_fund_assignment）：对象类型 + 目标账户 + 范围
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FundAssignmentInput {
+    /// bank_transaction（可按 belong_month 圈范围）| payment_batch（可按 batch_id 圈范围）
+    pub entity_type: String,
+    pub account_id: i64,
+    pub belong_month: Option<String>,
+    pub batch_id: Option<i64>,
+}
+
+/// 历史归集执行结果（apply_fund_assignment）：成功 N 条 / 跳过 M 条
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FundAssignmentResult {
+    /// 本体写入数（流水条数或批次数）
+    pub updated_count: i64,
+    /// 联动补齐的资金分录数
+    pub linked_voucher_lines_updated: i64,
+    /// 保持 NULL 的资金分录数（void 凭证或科目不一致）
+    pub skipped_voucher_lines: i64,
+}

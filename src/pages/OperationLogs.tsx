@@ -82,6 +82,7 @@ const operationTypeLabels: Record<string, string> = {
   void_fund_document: '作废资金单据',
   settle_fund_document: '结算资金单据',
   reverse_fund_document: '冲正资金单据',
+  apply_fund_assignment: '历史资金归集',
 };
 
 const getOperationLabel = (value?: string) =>

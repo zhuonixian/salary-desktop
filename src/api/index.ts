@@ -78,6 +78,11 @@ import type {
   FundAccount,
   FundAccountInput,
   FundAccountQuery,
+  FundAssignmentEntityType,
+  FundAssignmentInput,
+  FundAssignmentPreview,
+  FundAssignmentResult,
+  FundMigrationStatus,
   BusinessPartner,
   BusinessPartnerInput,
   BusinessPartnerQuery,
@@ -540,6 +545,28 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
       const seed = mockFundAccounts[0];
       return { ...seed, is_active: Boolean(args?.active) };
     }
+    // 历史归集向导（Task 10）：mock 为零待归集静态回显，完整校验以后端为准
+    case 'get_fund_migration_status':
+      return {
+        unassigned_bank_transactions: 0,
+        unassigned_payment_batches: 0,
+        unassigned_voucher_lines: 0,
+        pending_count: 0,
+        bank_months: [],
+        pending_batches: [],
+        unlinked_voucher_lines: 0,
+        completed_at: new Date().toISOString(),
+        last_applied_at: null,
+      };
+    case 'preview_fund_assignment':
+      return {
+        entity_type: String(args?.entityType ?? ''),
+        item_count: 0,
+        affected_voucher_lines: 0,
+        skipped_voucher_lines: 0,
+      };
+    case 'apply_fund_assignment':
+      return { updated_count: 0, linked_voucher_lines_updated: 0, skipped_voucher_lines: 0 };
     case 'get_business_partners':
       return mockBusinessPartners;
     case 'save_business_partner': {
@@ -2013,6 +2040,30 @@ export async function saveFundAccount(data: FundAccountInput): Promise<FundAccou
 
 export async function setFundAccountActive(id: number, active: boolean): Promise<FundAccount> {
   return invoke<FundAccount>('set_active_fund_account', { id, active });
+}
+
+// ==================== 历史资金归集向导（第七阶段 Task 10） ====================
+
+export async function getFundMigrationStatus(): Promise<FundMigrationStatus> {
+  return invoke<FundMigrationStatus>('get_fund_migration_status');
+}
+
+export async function previewFundAssignment(params: {
+  entity_type: FundAssignmentEntityType;
+  account_id: number;
+  belong_month?: string | null;
+  batch_id?: number | null;
+}): Promise<FundAssignmentPreview> {
+  return invoke<FundAssignmentPreview>('preview_fund_assignment', {
+    entityType: params.entity_type,
+    accountId: params.account_id,
+    belongMonth: params.belong_month ?? null,
+    batchId: params.batch_id ?? null,
+  });
+}
+
+export async function applyFundAssignment(data: FundAssignmentInput): Promise<FundAssignmentResult> {
+  return invoke<FundAssignmentResult>('apply_fund_assignment', { data });
 }
 
 export async function getBusinessPartners(query: BusinessPartnerQuery = {}): Promise<BusinessPartner[]> {

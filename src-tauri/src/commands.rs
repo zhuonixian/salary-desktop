@@ -1998,6 +1998,76 @@ pub fn set_active_fund_account(
 }
 
 #[tauri::command]
+pub fn get_fund_migration_status(
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<FundMigrationStatus, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(cashier::get_fund_migration_status(&conn)?)
+}
+
+#[tauri::command]
+pub fn preview_fund_assignment(
+    entity_type: String,
+    account_id: i64,
+    belong_month: Option<String>,
+    batch_id: Option<i64>,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<FundAssignmentPreview, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(cashier::preview_fund_assignment(
+        &conn,
+        &entity_type,
+        account_id,
+        belong_month.as_deref(),
+        batch_id,
+    )?)
+}
+
+#[tauri::command]
+pub fn apply_fund_assignment(
+    data: FundAssignmentInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<FundAssignmentResult, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let result = cashier::apply_fund_assignment(&conn, &data)?;
+    // 操作全量审计：对象类型、范围、目标账户与成功/联动/跳过条数全部入 operation_logs
+    let (entity_label, scope) = match data.entity_type.as_str() {
+        "bank_transaction" => (
+            "银行流水",
+            data.belong_month
+                .as_deref()
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+                .map(|m| format!("归属月 {m}"))
+                .unwrap_or_else(|| "全部月份".to_string()),
+        ),
+        _ => (
+            "付款批次",
+            data.batch_id
+                .map(|id| format!("批次 #{id}"))
+                .unwrap_or_else(|| "全部待归集批次".to_string()),
+        ),
+    };
+    let account = cashier::get_fund_account(&conn, data.account_id)?;
+    db::log_operation(
+        &conn,
+        "apply_fund_assignment",
+        &format!(
+            "历史资金归集（{entity_label}，{scope} → {} {}）：归集 {} 条，联动资金分录 {} 条，跳过分录 {} 条",
+            account.account_code,
+            account.name,
+            result.updated_count,
+            result.linked_voucher_lines_updated,
+            result.skipped_voucher_lines
+        ),
+        &cashier::current_operator_name(&conn, &current),
+        None,
+    )?;
+    Ok(result)
+}
+
+#[tauri::command]
 pub fn get_business_partners(
     query: BusinessPartnerQuery,
     state: tauri::State<'_, Mutex<Connection>>,

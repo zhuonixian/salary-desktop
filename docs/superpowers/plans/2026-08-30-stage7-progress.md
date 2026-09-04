@@ -104,3 +104,25 @@
 - 未完成/风险：付款类单据审批后仅显示"待付款批次"提示（批次动作归 Task 9）；结算/冲正凭证联动为占位文案（Task 8 落地后补跳转）；附件预览在浏览器 mock 返回空路径走"暂不支持"分支（桌面端走 convertFileSrc）；冲正弹窗月份预填依赖 antd setFieldsValue 先于挂载（实测有效，与 create 弹窗同模式）。
 - 下轮入口：Task 8 资金单自动凭证与事务冲正（必须承接：冲正/结算凭证生成移入事务内）。
 - 提交：a797ef7（feat）+ 9a5235d（test）。
+
+### 2026-09-05 — 7B 业务单据（Task 6-9）完成
+
+- 目标：资金单状态机、审批事件、收付款页面、自动凭证与事务冲正、通用付款批次。
+- 完成：Task 6 fund_documents+全状态机+挂账三条承接（179）；Task 7 14 命令+四 Tab 页+审批时间线（180）；Task 8 结算凭证+红字冲正+vouchers 表重建（187，冲正口径裁定=红字冲销净影响归零）；Task 9 general 批次逐单结算+存量凭证资金账户（195，含 fix：错误透出/门禁前移/负向测试）。每任务双裁决+opus 关键口径裁定。
+- 关键决策：冲正严口径（已月结月份纠错须先反月结）；general 批次无批次级凭证（防双重贷记）；已付款禁作废仅 general。
+- 测试：cargo 195 passed；tsc/lint/build 全过；浏览器 mock 实测收付款全流程。
+- Windows 手工验收：未执行。
+- 未完成/风险：advance_settlement 核销分流待 Task 14；operator 筛选后端参数未做；Windows 验收挂账。
+- 下轮入口：Task 10 历史资金账户归集向导。
+- 提交：6210a7c..3911b19（a797ef7/9a5235d/96018bb/6210a7c 前序、f1478d8/d13bfb5/3911b19）。
+
+### 2026-09-05 — 7C Task 10：历史资金账户归集向导完成
+
+- 目标：历史银行流水/旧付款批次资金分录归集到指定账户（spec 9），承接 Task 2 挂账"待归集计数未排除 void 凭证"。
+- 完成：cashier.rs 归集领域函数三件（get_fund_migration_status 实时统计+按月分组+待归集批次清单+独立分录数、preview_fund_assignment 按账户/范围只读预览、apply_fund_assignment 单事务写入+联动+计数刷新）；commands.rs/lib.rs 三命令（写命令记 operation_logs 全量审计：对象类型/范围/目标账户/成功/联动/跳过条数）；db.rs build_stage7_report 口径修正（void 凭证分录 + void 批次排除，build/record 提为 pub(crate)）；models.rs 五结构体；前端 FundAccounts.tsx"历史归集"向导 Modal（统计 Alert → 银行流水/付款批次 Segmented → 归属月/目标账户选择（单账户唯一候选自动预填仍需确认）→ 自动预览 → Popconfirm 执行 → 成功 N/跳过 M 反馈）；OperationLogs 补 apply_fund_assignment 映射。
+- 关键决策（spec 依据）：归集维度=流水（可按归属月圈范围）+批次（可单批次），均联动 active 凭证资金分录（bank_manual 源=流水 id；salary/reimbursement_payment 源=批次 id），void 凭证分录不动；科目≠账户挂接科目的分录跳过保持 NULL（spec 9.5 不猜测、不改账）；月结保护逐月 ensure_month_open 前置，任一命中整体回滚；幂等=UPDATE 带 fund_account_id IS NULL（流水范围重复执行零写入），指定批次重复归集明确报错"已归集或不存在"；停用账户不可作归集目标（与全应用口径一致）；归集后事务内刷新 stage7_migration_* 计数并写 stage7_fund_assignment_last_applied_at。
+- 修改文件：cashier.rs、db.rs、models.rs、commands.rs、lib.rs；types/index.ts、api/index.ts（含 mock）、pages/FundAccounts.tsx、pages/OperationLogs.tsx。
+- 测试：cargo 202 passed（基线 195 + 新增 7：void 口径、状态分组、流水归集联动 bank_manual/void 不动/幂等、批次归集联动+重复拦截、科目不一致跳过、月结拦截回滚、账户与类型校验）；tsc/lint/build 全过；浏览器 headless 实测向导（统计/两类别/唯一账户预填/空态预览/批次 Tab 表格，无新增 JS 报错）。
+- 未完成/风险：独立凭证分录（manual 类等无来源联动）保持 NULL 属 spec 9.5 允许终态，月结 warning→blocking 升级归 Task 13；旧批次作废后不再计入待归集（口径与 void 凭证一致）；Windows exe 手工验收待做。
+- 下轮入口：Task 11 流水账户化与导入预览。
+- 提交：本条对应 commit 见 task-10-report.md。

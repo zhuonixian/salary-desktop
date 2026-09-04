@@ -230,6 +230,10 @@ pub fn run() {
         commands::get_fund_accounts,
         commands::save_fund_account,
         commands::set_active_fund_account,
+        // ===== 历史资金归集向导（第七阶段 7C Task 10，spec 9） =====
+        commands::get_fund_migration_status,
+        commands::preview_fund_assignment,
+        commands::apply_fund_assignment,
         commands::get_business_partners,
         commands::save_business_partner,
         commands::set_active_business_partner,

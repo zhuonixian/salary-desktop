@@ -1074,24 +1074,29 @@ fn count_fk_check_violations(conn: &Connection) -> AppResult<i64> {
 
 /// 统计待归集数量：无资金账户的银行流水、付款批次与资金科目（1001/1002/1012）凭证分录。
 /// 历史数据不做归属猜测（保持 NULL），仅计数供归集向导展示。
-fn build_stage7_report(conn: &Connection) -> AppResult<Stage7MigrationReport> {
+/// Task 10 口径修正（Task 2 挂账承接）：void 凭证分录与 void 付款批次不计入——已作废数据
+/// 无资金意义且永远无法归集，计入会导致待归集计数永远无法清零。
+pub(crate) fn build_stage7_report(conn: &Connection) -> AppResult<Stage7MigrationReport> {
     let unassigned_bank_transactions: i64 = conn.query_row(
         "SELECT COUNT(*) FROM bank_transactions WHERE fund_account_id IS NULL",
         [],
         |r| r.get(0),
     )?;
     let unassigned_payment_batches: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM payment_batches WHERE fund_account_id IS NULL",
+        "SELECT COUNT(*) FROM payment_batches
+         WHERE fund_account_id IS NULL AND status != 'void'",
         [],
         |r| r.get(0),
     )?;
     let fund_codes = STAGE7_FUND_GL_CODES.join("','");
     let unassigned_voucher_lines: i64 = conn.query_row(
         &format!(
-            "SELECT COUNT(*) FROM voucher_lines
-             WHERE fund_account_id IS NULL
-               AND (debit_amount > 0 OR credit_amount > 0)
-               AND account_code IN ('{fund_codes}')"
+            "SELECT COUNT(*) FROM voucher_lines vl
+             JOIN vouchers v ON v.id = vl.voucher_id
+             WHERE vl.fund_account_id IS NULL
+               AND (vl.debit_amount > 0 OR vl.credit_amount > 0)
+               AND vl.account_code IN ('{fund_codes}')
+               AND v.status != 'void'"
         ),
         [],
         |r| r.get(0),
@@ -1108,8 +1113,12 @@ fn build_stage7_report(conn: &Connection) -> AppResult<Stage7MigrationReport> {
     })
 }
 
-/// 将迁移状态写入 app_settings：状态、待归集数量（总数 + 明细）、首次完成时间戳（重跑不覆盖）
-fn record_stage7_state(conn: &Connection, report: &Stage7MigrationReport) -> AppResult<()> {
+/// 将迁移状态写入 app_settings：状态、待归集数量（总数 + 明细）、首次完成时间戳（重跑不覆盖）。
+/// Task 10 起归集向导在归集事务内复用本函数刷新待归集计数，保持 `stage7_migration_*` 键实时。
+pub(crate) fn record_stage7_state(
+    conn: &Connection,
+    report: &Stage7MigrationReport,
+) -> AppResult<()> {
     set_setting(conn, "stage7_migration_status", &report.status)?;
     set_setting(
         conn,
@@ -3012,7 +3021,7 @@ fn payment_batch_no(month: &str, batch_type: &str) -> String {
     )
 }
 
-fn row_to_payment_batch(row: &rusqlite::Row<'_>) -> rusqlite::Result<PaymentBatch> {
+pub(crate) fn row_to_payment_batch(row: &rusqlite::Row<'_>) -> rusqlite::Result<PaymentBatch> {
     Ok(PaymentBatch {
         id: row.get(0)?,
         batch_no: row.get(1)?,
@@ -8525,6 +8534,49 @@ mod stage7_tests {
         "approval_events",
         "business_attachments",
     ];
+
+    /// Task 10 口径修正（Task 2 挂账承接）：待归集计数必须排除 void 凭证资金分录与 void 付款批次。
+    /// 已作废数据无资金意义且永远无法被归集，若计入则待归集计数永远无法清零（spec 9：无法
+    /// 确定归属的"有效"数据才进待归集）。
+    #[test]
+    fn test_stage7_report_excludes_void_vouchers_and_batches() {
+        let conn = setup_financial_db();
+        conn.execute_batch(
+            "
+            -- 有效数据：1 流水 + 1 批次 + 1 资金分录（全部待归集）
+            INSERT INTO bank_transactions
+                (transaction_date, belong_month, summary, expense_amount, status, created_at, updated_at)
+                VALUES ('2026-07-01', '2026-07', '历史支出', 500, 'unmatched', '2026-07-01', '2026-07-01');
+            INSERT INTO payment_batches (batch_no, belong_month, batch_type, status, created_at, updated_at)
+                VALUES ('GZ202607001', '2026-07', 'salary', 'paid', '2026-07-01', '2026-07-01');
+            INSERT INTO vouchers
+                (voucher_no, voucher_date, belong_month, source_type, source_id, total_amount, status, created_at, updated_at)
+                VALUES ('V1', '2026-07-10', '2026-07', 'bank_manual', 999, 500, 'active', '2026-07-10', '2026-07-10');
+            INSERT INTO voucher_lines (voucher_id, account_code, debit_amount, credit_amount, line_order)
+                VALUES (1, '1002', 500, 0, 1);
+            -- 作废数据：void 凭证分录 + void 批次（不应计入待归集）
+            INSERT INTO vouchers
+                (voucher_no, voucher_date, belong_month, source_type, source_id, total_amount, status, created_at, updated_at)
+                VALUES ('V2', '2026-07-11', '2026-07', 'bank_manual', 998, 300, 'void', '2026-07-11', '2026-07-11');
+            INSERT INTO voucher_lines (voucher_id, account_code, debit_amount, credit_amount, line_order)
+                VALUES (2, '1002', 300, 0, 1);
+            INSERT INTO payment_batches (batch_no, belong_month, batch_type, status, created_at, updated_at)
+                VALUES ('GZ202607002', '2026-07', 'salary', 'void', '2026-07-02', '2026-07-02');
+            ",
+        )
+        .unwrap();
+        let report = build_stage7_report(&conn).unwrap();
+        assert_eq!(report.unassigned_bank_transactions, 1);
+        assert_eq!(
+            report.unassigned_payment_batches, 1,
+            "void 批次不应计入待归集"
+        );
+        assert_eq!(
+            report.unassigned_voucher_lines, 1,
+            "void 凭证分录不应计入待归集"
+        );
+        assert_eq!(report.pending_count, 3);
+    }
 
     #[test]
     fn test_stage7_fresh_db_initializes_fund_tables() {

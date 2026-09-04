@@ -1005,6 +1005,55 @@ export interface FundAccountQuery {
   keyword?: string;
 }
 
+// ==================== 历史资金归集向导（第七阶段 Task 10，spec 9） ====================
+// 字段与后端 src-tauri/src/models.rs FundMigrationStatus/FundAssignment* 1:1 对齐。
+// 计数口径：排除 void 凭证分录与 void 批次；无法经批次/流水联动的独立分录保持 NULL 并单列。
+
+export interface FundMigrationMonthStat {
+  belong_month: string;
+  bank_transactions: number;
+  voucher_lines: number;
+}
+
+export interface FundMigrationStatus {
+  unassigned_bank_transactions: number;
+  unassigned_payment_batches: number;
+  unassigned_voucher_lines: number;
+  pending_count: number;
+  bank_months: FundMigrationMonthStat[];
+  pending_batches: PaymentBatch[];
+  unlinked_voucher_lines: number;
+  completed_at: string | null;
+  last_applied_at: string | null;
+}
+
+export type FundAssignmentEntityType = 'bank_transaction' | 'payment_batch';
+
+export interface FundAssignmentPreview {
+  entity_type: string;
+  /** 将写入账户的对象数（流水条数或批次数） */
+  item_count: number;
+  /** 联动可补齐的资金分录数 */
+  affected_voucher_lines: number;
+  /** 保持未归集的资金分录数（凭证已作废或科目不一致） */
+  skipped_voucher_lines: number;
+}
+
+export interface FundAssignmentInput {
+  entity_type: FundAssignmentEntityType;
+  account_id: number;
+  /** bank_transaction 圈范围；空 = 全部待归集月份 */
+  belong_month?: string | null;
+  /** payment_batch 圈范围；空 = 全部待归集批次 */
+  batch_id?: number | null;
+}
+
+export interface FundAssignmentResult {
+  updated_count: number;
+  linked_voucher_lines_updated: number;
+  skipped_voucher_lines: number;
+}
+
 export interface BusinessPartner {
   id: number;
   partner_code: string;

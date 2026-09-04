@@ -361,7 +361,7 @@ pub fn get_fund_accounts(conn: &Connection, q: &FundAccountQuery) -> AppResult<V
     rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
 }
 
-fn get_fund_account(conn: &Connection, id: i64) -> AppResult<FundAccount> {
+pub(crate) fn get_fund_account(conn: &Connection, id: i64) -> AppResult<FundAccount> {
     conn.query_row(
         &format!("SELECT {FUND_ACCOUNT_COLS} FROM fund_accounts WHERE id = ?1"),
         params![id],
@@ -583,6 +583,455 @@ fn clear_same_type_default(
         params![account_type, exclude_id.unwrap_or(-1)],
     )?;
     Ok(())
+}
+
+// ==================== 历史资金归集向导（Task 10，spec 9） ====================
+//
+// 迁移已建资金账户框架但历史数据 fund_account_id 全 NULL。归集维度（spec 9.3/9.5）：
+// - 旧银行流水按账户归集（可按归属月圈范围），并联动其 active bank_manual 凭证资金分录；
+// - 旧付款批次按批次归集，并联动其 active salary/reimbursement_payment 凭证资金分录；
+// - 无法唯一确定归属的资金分录保持 NULL（不猜测），计入 unlinked_voucher_lines 供展示。
+// 幂等：UPDATE 一律带 `fund_account_id IS NULL` 条件，已归集数据自动跳过；重复归集指定
+// 批次时明确报错（优于静默空操作）。写入前逐一 `ensure_month_open`（月结保护），全程
+// 单事务 + 归集后刷新 `stage7_migration_*` 计数，操作由命令层记 operation_logs 审计。
+
+/// 归集支持的对象类型
+pub const FUND_ASSIGNMENT_ENTITIES: &[&str] = &["bank_transaction", "payment_batch"];
+
+/// 最后一次归集时间键（app_settings）
+const STAGE7_FUND_ASSIGNMENT_LAST_APPLIED_KEY: &str = "stage7_fund_assignment_last_applied_at";
+
+/// 待归集资金分录公共条件（口径与 db::build_stage7_report 一致：排除 void 凭证）
+fn fund_line_where(alias: &str) -> String {
+    let codes = db::STAGE7_FUND_GL_CODES.join("','");
+    format!(
+        "{alias}.fund_account_id IS NULL
+         AND ({alias}.debit_amount > 0 OR {alias}.credit_amount > 0)
+         AND {alias}.account_code IN ('{codes}')"
+    )
+}
+
+/// 归集目标账户校验：须存在且启用（与全应用资金账户选择口径一致），返回账户
+fn migration_target_account(conn: &Connection, account_id: i64) -> AppResult<FundAccount> {
+    let account = get_fund_account(conn, account_id)?;
+    if !account.is_active {
+        return Err(AppError::InvalidParam(format!(
+            "资金账户 {} {} 已停用，不能作为归集目标",
+            account.account_code, account.name
+        )));
+    }
+    Ok(account)
+}
+
+/// 校验归集对象类型
+fn ensure_assignment_entity(entity_type: &str) -> AppResult<()> {
+    if !FUND_ASSIGNMENT_ENTITIES.contains(&entity_type) {
+        return Err(AppError::InvalidParam(format!(
+            "不支持的归集对象类型 {entity_type}（支持：{}）",
+            FUND_ASSIGNMENT_ENTITIES.join(" / ")
+        )));
+    }
+    Ok(())
+}
+
+/// 历史归集实时状态：待归集计数（排除 void）、按月分组、待归集批次与独立分录数
+pub fn get_fund_migration_status(conn: &Connection) -> AppResult<FundMigrationStatus> {
+    let report = db::build_stage7_report(conn)?;
+
+    // 银行流水与资金分录按归属月合并分组（分录月份取凭证归属月）
+    let mut months: std::collections::BTreeMap<String, (i64, i64)> =
+        std::collections::BTreeMap::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT belong_month, COUNT(*) FROM bank_transactions
+             WHERE fund_account_id IS NULL GROUP BY belong_month ORDER BY belong_month",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        for row in rows {
+            let (month, count) = row?;
+            months.entry(month).or_insert((0, 0)).0 = count;
+        }
+    }
+    {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT v.belong_month, COUNT(*) FROM voucher_lines vl
+             JOIN vouchers v ON v.id = vl.voucher_id
+             WHERE {} AND v.status != 'void'
+             GROUP BY v.belong_month ORDER BY v.belong_month",
+            fund_line_where("vl")
+        ))?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        for row in rows {
+            let (month, count) = row?;
+            months.entry(month).or_insert((0, 0)).1 = count;
+        }
+    }
+    let bank_months = months
+        .into_iter()
+        .map(
+            |(belong_month, (bank_transactions, voucher_lines))| FundMigrationMonthStat {
+                belong_month,
+                bank_transactions,
+                voucher_lines,
+            },
+        )
+        .collect();
+
+    // 待归集批次清单（非 void、账户为空）
+    let pending_batches = pending_payment_batches(conn, None)?;
+
+    // 独立分录数 = 待归集分录 - 可经批次/流水联动分录（active 凭证且来源对象仍在待归集）
+    let linked_voucher_lines: i64 = conn.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM voucher_lines vl
+             JOIN vouchers v ON v.id = vl.voucher_id
+             LEFT JOIN payment_batches pb
+               ON v.source_type IN ('salary_payment','reimbursement_payment')
+              AND pb.id = v.source_id
+             LEFT JOIN bank_transactions bt
+               ON v.source_type = 'bank_manual' AND bt.id = v.source_id
+             WHERE {fund_lines}
+               AND v.status = 'active'
+               AND ((pb.id IS NOT NULL AND pb.fund_account_id IS NULL AND pb.status != 'void')
+                 OR (bt.id IS NOT NULL AND bt.fund_account_id IS NULL))",
+            fund_lines = fund_line_where("vl")
+        ),
+        [],
+        |r| r.get(0),
+    )?;
+    let unlinked_voucher_lines = (report.unassigned_voucher_lines - linked_voucher_lines).max(0);
+
+    Ok(FundMigrationStatus {
+        unassigned_bank_transactions: report.unassigned_bank_transactions,
+        unassigned_payment_batches: report.unassigned_payment_batches,
+        unassigned_voucher_lines: report.unassigned_voucher_lines,
+        pending_count: report.pending_count,
+        bank_months,
+        pending_batches,
+        unlinked_voucher_lines,
+        completed_at: db::get_setting(conn, "stage7_migration_completed_at")?,
+        last_applied_at: db::get_setting(conn, STAGE7_FUND_ASSIGNMENT_LAST_APPLIED_KEY)?,
+    })
+}
+
+/// 待归集批次查询（batch_id 为 None 时返回全部；账户为空且非 void，复用批次行映射）
+fn pending_payment_batches(
+    conn: &Connection,
+    batch_id: Option<i64>,
+) -> AppResult<Vec<PaymentBatch>> {
+    let mut sql = String::from(
+        "SELECT b.id, b.batch_no, b.belong_month, b.batch_type, b.status, b.total_amount,
+                b.item_count, b.payment_date, b.remark, b.fund_account_id, fa.name,
+                b.created_at, b.updated_at
+         FROM payment_batches b
+         LEFT JOIN fund_accounts fa ON fa.id = b.fund_account_id
+         WHERE b.fund_account_id IS NULL AND b.status != 'void'",
+    );
+    let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    if let Some(id) = batch_id {
+        sql.push_str(" AND b.id = ?1");
+        params_vec.push(Box::new(id));
+    }
+    sql.push_str(" ORDER BY b.belong_month, b.id");
+    let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_refs.as_slice(), db::row_to_payment_batch)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
+/// 联动分录统计：来源对象集合（银行流水 / 付款批次）内 active 凭证的资金分录，
+/// 按科目是否等于账户挂接科目分流。返回 (可联动补齐数, 科目不一致保持 NULL 数)。
+fn count_linkable_lines(
+    conn: &Connection,
+    entity_type: &str,
+    source_ids: &[i64],
+    gl_account_code: &str,
+) -> AppResult<(i64, i64)> {
+    if source_ids.is_empty() {
+        return Ok((0, 0));
+    }
+    let in_ids = source_ids
+        .iter()
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    // 批次付款凭证为 salary_payment / reimbursement_payment（source_id=批次 id），
+    // 流水手工凭证为 bank_manual（source_id=流水 id），见 accounting.rs 生成逻辑
+    let source_types = match entity_type {
+        "bank_transaction" => "bank_manual",
+        _ => "salary_payment','reimbursement_payment",
+    };
+    let codes = db::STAGE7_FUND_GL_CODES.join("','");
+    let sql = format!(
+        "SELECT
+           COALESCE(SUM(CASE WHEN vl.account_code = ?1 THEN 1 ELSE 0 END), 0),
+           COALESCE(SUM(CASE WHEN vl.account_code != ?1 THEN 1 ELSE 0 END), 0)
+         FROM voucher_lines vl
+         JOIN vouchers v ON v.id = vl.voucher_id
+         WHERE v.source_type IN ('{source_types}')
+           AND v.source_id IN ({in_ids})
+           AND v.status = 'active'
+           AND vl.fund_account_id IS NULL
+           AND (vl.debit_amount > 0 OR vl.credit_amount > 0)
+           AND vl.account_code IN ('{codes}')"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let (affected, skipped): (i64, i64) =
+        stmt.query_row(params![gl_account_code], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok((affected, skipped))
+}
+
+/// 归集预览：按指定账户与范围核对将写入的对象数与联动分录数（只读，不写库）。
+/// 单账户唯一映射时前端可预填目标账户，但写入必须经 apply 确认（spec 9：不静默写入）。
+pub fn preview_fund_assignment(
+    conn: &Connection,
+    entity_type: &str,
+    account_id: i64,
+    belong_month: Option<&str>,
+    batch_id: Option<i64>,
+) -> AppResult<FundAssignmentPreview> {
+    ensure_assignment_entity(entity_type)?;
+    let account = migration_target_account(conn, account_id)?;
+
+    let (item_count, affected, skipped) = match entity_type {
+        "bank_transaction" => {
+            let month = belong_month.map(str::trim).filter(|m| !m.is_empty());
+            let (condition, params_vec): (String, Vec<Box<dyn rusqlite::ToSql>>) = match month {
+                Some(m) => (
+                    "fund_account_id IS NULL AND belong_month = ?1".to_string(),
+                    vec![Box::new(m.to_string())],
+                ),
+                None => ("fund_account_id IS NULL".to_string(), vec![]),
+            };
+            let sql = format!("SELECT id FROM bank_transactions WHERE {condition} ORDER BY id");
+            let params_refs: Vec<&dyn rusqlite::ToSql> =
+                params_vec.iter().map(|p| p.as_ref()).collect();
+            let mut stmt = conn.prepare(&sql)?;
+            let ids = stmt
+                .query_map(params_refs.as_slice(), |r| r.get::<_, i64>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            let item_count = ids.len() as i64;
+            let (affected, skipped) =
+                count_linkable_lines(conn, entity_type, &ids, &account.gl_account_code)?;
+            (item_count, affected, skipped)
+        }
+        _ => {
+            let batches = pending_payment_batches(conn, batch_id)?;
+            let ids: Vec<i64> = batches.iter().map(|b| b.id).collect();
+            let (affected, skipped) =
+                count_linkable_lines(conn, entity_type, &ids, &account.gl_account_code)?;
+            (ids.len() as i64, affected, skipped)
+        }
+    };
+
+    Ok(FundAssignmentPreview {
+        entity_type: entity_type.to_string(),
+        item_count,
+        affected_voucher_lines: affected,
+        skipped_voucher_lines: skipped,
+    })
+}
+
+/// 执行历史归集（单事务）：写入对象账户 + 联动 active 凭证资金分录 + 刷新迁移计数。
+/// - 月结保护：逐月 `ensure_month_open`，任一月份已正式月结则整体回滚不写入；
+/// - 幂等：UPDATE 带 `fund_account_id IS NULL`，已归集对象自动跳过；
+/// - void 凭证分录不联动；科目与账户挂接科目不一致的分录保持 NULL（spec 9.5）。
+pub fn apply_fund_assignment(
+    conn: &Connection,
+    input: &FundAssignmentInput,
+) -> AppResult<FundAssignmentResult> {
+    ensure_assignment_entity(&input.entity_type)?;
+    let account = migration_target_account(conn, input.account_id)?;
+    let now = Utc::now().to_rfc3339();
+    let tx = conn.unchecked_transaction()?;
+
+    let (updated_count, linked_updated, skipped_lines) = match input.entity_type.as_str() {
+        "bank_transaction" => {
+            let month = input
+                .belong_month
+                .as_deref()
+                .map(str::trim)
+                .filter(|m| !m.is_empty());
+            let (condition, params_vec): (String, Vec<Box<dyn rusqlite::ToSql>>) = match month {
+                Some(m) => (
+                    "fund_account_id IS NULL AND belong_month = ?1".to_string(),
+                    vec![Box::new(m.to_string())],
+                ),
+                None => ("fund_account_id IS NULL".to_string(), vec![]),
+            };
+            let sql = format!(
+                "SELECT id, belong_month FROM bank_transactions WHERE {condition} ORDER BY id"
+            );
+            let params_refs: Vec<&dyn rusqlite::ToSql> =
+                params_vec.iter().map(|p| p.as_ref()).collect();
+            let mut stmt = tx.prepare(&sql)?;
+            let targets = stmt
+                .query_map(params_refs.as_slice(), |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            let ids: Vec<i64> = targets.iter().map(|(id, _)| *id).collect();
+
+            // 月结保护：先校验流水月份与联动凭证月份，再写入（任一月结则整体回滚）
+            let mut months: Vec<String> = targets.into_iter().map(|(_, m)| m).collect();
+            months.extend(linked_voucher_months(&tx, "bank_transaction", &ids)?);
+            months.sort();
+            months.dedup();
+            for m in &months {
+                db::ensure_month_open(&tx, m)?;
+            }
+
+            let updated = if ids.is_empty() {
+                0
+            } else {
+                let in_ids = in_list(&ids);
+                let mut all: Vec<Box<dyn rusqlite::ToSql>> = params_vec;
+                all.push(Box::new(account.id));
+                all.push(Box::new(now.clone()));
+                let all_refs: Vec<&dyn rusqlite::ToSql> = all.iter().map(|p| p.as_ref()).collect();
+                tx.execute(
+                    &format!(
+                        "UPDATE bank_transactions SET fund_account_id = ?{}, updated_at = ?{}
+                         WHERE fund_account_id IS NULL AND id IN ({in_ids})",
+                        all.len() - 1,
+                        all.len()
+                    ),
+                    all_refs.as_slice(),
+                )? as i64
+            };
+            let (_, skipped) =
+                count_linkable_lines(&tx, "bank_transaction", &ids, &account.gl_account_code)?;
+            let linked = link_voucher_lines(
+                &tx,
+                "bank_transaction",
+                &ids,
+                account.id,
+                &account.gl_account_code,
+            )?;
+            (updated, linked, skipped)
+        }
+        _ => {
+            let batches = pending_payment_batches(&tx, input.batch_id)?;
+            // 指定批次归集时必须命中：重复归集明确拦截，优于静默空操作
+            if let Some(id) = input.batch_id {
+                if batches.is_empty() {
+                    return Err(AppError::InvalidParam(format!(
+                        "付款批次 id={id} 已归集或不存在，请刷新后重试"
+                    )));
+                }
+            }
+            let ids: Vec<i64> = batches.iter().map(|b| b.id).collect();
+
+            let mut months: Vec<String> = batches.into_iter().map(|b| b.belong_month).collect();
+            months.extend(linked_voucher_months(&tx, "payment_batch", &ids)?);
+            months.sort();
+            months.dedup();
+            for m in &months {
+                db::ensure_month_open(&tx, m)?;
+            }
+
+            let updated = if ids.is_empty() {
+                0
+            } else {
+                let n = tx.execute(
+                    &format!(
+                        "UPDATE payment_batches SET fund_account_id = ?1, updated_at = ?2
+                         WHERE fund_account_id IS NULL AND status != 'void' AND id IN ({})",
+                        in_list(&ids)
+                    ),
+                    rusqlite::params![account.id, now],
+                )?;
+                n as i64
+            };
+            let (_, skipped) =
+                count_linkable_lines(&tx, "payment_batch", &ids, &account.gl_account_code)?;
+            let linked = link_voucher_lines(
+                &tx,
+                "payment_batch",
+                &ids,
+                account.id,
+                &account.gl_account_code,
+            )?;
+            (updated, linked, skipped)
+        }
+    };
+
+    // 归集后刷新迁移计数（保持 stage7_migration_* 键实时，首次完成时间戳不覆盖）
+    let report = db::build_stage7_report(&tx)?;
+    db::record_stage7_state(&tx, &report)?;
+    db::set_setting(&tx, STAGE7_FUND_ASSIGNMENT_LAST_APPLIED_KEY, &now)?;
+    tx.commit()?;
+
+    Ok(FundAssignmentResult {
+        updated_count,
+        linked_voucher_lines_updated: linked_updated,
+        skipped_voucher_lines: skipped_lines,
+    })
+}
+
+/// 来源对象集合内 active 凭证的归属月集合（联动前月份校验用）
+fn linked_voucher_months(
+    conn: &Connection,
+    entity_type: &str,
+    source_ids: &[i64],
+) -> AppResult<Vec<String>> {
+    if source_ids.is_empty() {
+        return Ok(vec![]);
+    }
+    let source_types = match entity_type {
+        "bank_transaction" => "bank_manual",
+        _ => "salary_payment','reimbursement_payment",
+    };
+    let sql = format!(
+        "SELECT DISTINCT v.belong_month FROM vouchers v
+         WHERE v.source_type IN ('{source_types}')
+           AND v.source_id IN ({})
+           AND v.status = 'active'
+         ORDER BY v.belong_month",
+        in_list(source_ids)
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
+/// 联动补齐来源对象集合内 active 凭证的资金分录：
+/// 仅补 `fund_account_id IS NULL` 且科目等于账户挂接科目的分录；void 凭证不动。
+fn link_voucher_lines(
+    conn: &Connection,
+    entity_type: &str,
+    source_ids: &[i64],
+    account_id: i64,
+    gl_account_code: &str,
+) -> AppResult<i64> {
+    if source_ids.is_empty() {
+        return Ok(0);
+    }
+    let source_types = match entity_type {
+        "bank_transaction" => "bank_manual",
+        _ => "salary_payment','reimbursement_payment",
+    };
+    let sql = format!(
+        "UPDATE voucher_lines SET fund_account_id = ?1
+         WHERE fund_account_id IS NULL AND account_code = ?2
+           AND voucher_id IN (
+             SELECT id FROM vouchers
+             WHERE source_type IN ('{source_types}')
+               AND source_id IN ({})
+               AND status = 'active'
+           )",
+        in_list(source_ids)
+    );
+    let n = conn.execute(sql.as_str(), rusqlite::params![account_id, gl_account_code])?;
+    Ok(n as i64)
+}
+
+/// 整数 id 集合转 SQL IN 列表（id 均为数据库整型主键，无注入面）
+fn in_list(ids: &[i64]) -> String {
+    ids.iter()
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 // ==================== 往来单位 ====================
@@ -5026,5 +5475,480 @@ mod tests {
         .unwrap();
         assert_eq!(drafts.len(), 2);
         assert!(drafts.iter().any(|d| d.id == receipt.id));
+    }
+
+    // ---------- 历史资金归集向导（Task 10，spec 9） ----------
+
+    /// 插入一条历史（无账户）银行流水，返回 id
+    fn legacy_tx(conn: &Connection, date: &str, month: &str, income: f64, expense: f64) -> i64 {
+        conn.execute(
+            "INSERT INTO bank_transactions
+                (transaction_date, belong_month, summary, income_amount, expense_amount, status, created_at, updated_at)
+             VALUES (?1, ?2, '历史流水', ?3, ?4, 'unmatched', '2026-08-01', '2026-08-01')",
+            params![date, month, income, expense],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    /// 插入历史付款批次（fund_account_id NULL），返回 id
+    fn legacy_batch(
+        conn: &Connection,
+        no: &str,
+        month: &str,
+        batch_type: &str,
+        status: &str,
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO payment_batches
+                (batch_no, belong_month, batch_type, status, total_amount, item_count, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 500, 1, '2026-08-01', '2026-08-01')",
+            params![no, month, batch_type, status],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    /// 插入一张历史凭证：资金行（fund_code，金额 500，fund_account_id NULL）+ 对方行 6602，
+    /// 返回凭证 id
+    fn legacy_voucher(
+        conn: &Connection,
+        no: &str,
+        date: &str,
+        month: &str,
+        source_type: &str,
+        source_id: i64,
+        status: &str,
+        fund_code: &str,
+        fund_debit: bool,
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO vouchers
+                (voucher_no, voucher_date, belong_month, source_type, source_id, total_amount, status, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 500, ?6, '2026-08-01', '2026-08-01')",
+            params![no, date, month, source_type, source_id, status],
+        )
+        .unwrap();
+        let vid = conn.last_insert_rowid();
+        let (d1, c1, d2, c2) = if fund_debit {
+            (500.0, 0.0, 0.0, 500.0)
+        } else {
+            (0.0, 500.0, 500.0, 0.0)
+        };
+        conn.execute(
+            "INSERT INTO voucher_lines (voucher_id, account_code, debit_amount, credit_amount, line_order)
+             VALUES (?1, ?2, ?3, ?4, 1), (?1, '6602', ?5, ?6, 2)",
+            params![vid, fund_code, d1, c1, d2, c2],
+        )
+        .unwrap();
+        vid
+    }
+
+    fn tx_account(conn: &Connection, tx_id: i64) -> Option<i64> {
+        conn.query_row(
+            "SELECT fund_account_id FROM bank_transactions WHERE id = ?1",
+            params![tx_id],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+        .unwrap()
+    }
+
+    fn batch_account(conn: &Connection, batch_id: i64) -> Option<i64> {
+        conn.query_row(
+            "SELECT fund_account_id FROM payment_batches WHERE id = ?1",
+            params![batch_id],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+        .unwrap()
+    }
+
+    /// 取凭证资金行（1001/1002/1012）的 fund_account_id（fixture 中每张凭证恰有一条资金行）
+    fn voucher_fund_line_account(conn: &Connection, voucher_id: i64) -> Option<i64> {
+        conn.query_row(
+            "SELECT fund_account_id FROM voucher_lines
+             WHERE voucher_id = ?1 AND account_code IN ('1001','1002','1012')",
+            params![voucher_id],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+        .unwrap()
+    }
+
+    fn third_party_input(code: &str, name: &str) -> FundAccountInput {
+        FundAccountInput {
+            account_type: "third_party".into(),
+            bank_name: Some("微信".into()),
+            gl_account_code: "1012".into(),
+            ..bank_input(code, name, "")
+        }
+    }
+
+    fn migration_input(entity_type: &str, account_id: i64) -> FundAssignmentInput {
+        FundAssignmentInput {
+            entity_type: entity_type.into(),
+            account_id,
+            belong_month: None,
+            batch_id: None,
+        }
+    }
+
+    #[test]
+    fn test_fund_migration_status_counts_and_grouping() {
+        let conn = setup_financial_db();
+        let tx1 = legacy_tx(&conn, "2026-07-05", "2026-07", 0.0, 500.0);
+        let tx2 = legacy_tx(&conn, "2026-08-05", "2026-08", 300.0, 0.0);
+        let batch1 = legacy_batch(&conn, "GZ202607001", "2026-07", "salary", "paid");
+        let _batch_void = legacy_batch(&conn, "GZ202608001", "2026-08", "salary", "void");
+        // tx1 的生效 bank_manual 凭证（资金行待归集，可通过流水归集联动补齐）
+        legacy_voucher(
+            &conn,
+            "V1",
+            "2026-07-05",
+            "2026-07",
+            "bank_manual",
+            tx1,
+            "active",
+            "1002",
+            true,
+        );
+        // 独立凭证（source_id 无对应流水，无法联动）：资金行只能保持 NULL 或人工处理
+        legacy_voucher(
+            &conn,
+            "V2",
+            "2026-07-06",
+            "2026-07",
+            "bank_manual",
+            9999,
+            "active",
+            "1002",
+            true,
+        );
+        // void 凭证资金行不计入待归集
+        legacy_voucher(
+            &conn,
+            "V3",
+            "2026-08-05",
+            "2026-08",
+            "bank_manual",
+            tx2,
+            "void",
+            "1002",
+            true,
+        );
+
+        let status = get_fund_migration_status(&conn).unwrap();
+        assert_eq!(status.unassigned_bank_transactions, 2);
+        assert_eq!(
+            status.unassigned_payment_batches, 1,
+            "void 批次不计入待归集批次"
+        );
+        assert_eq!(
+            status.unassigned_voucher_lines, 2,
+            "void 凭证分录不计入；有效分录 = 联动 1 + 独立 1"
+        );
+        assert_eq!(status.pending_count, 5);
+        assert_eq!(
+            status.unlinked_voucher_lines, 1,
+            "仅独立凭证分录无法通过批次/流水联动"
+        );
+        assert_eq!(status.pending_batches.len(), 1);
+        assert_eq!(status.pending_batches[0].id, batch1);
+
+        // 按月分组：7 月（1 流水 + 2 分录）、8 月（1 流水 + 0 分录）
+        assert_eq!(status.bank_months.len(), 2);
+        assert_eq!(status.bank_months[0].belong_month, "2026-07");
+        assert_eq!(status.bank_months[0].bank_transactions, 1);
+        assert_eq!(status.bank_months[0].voucher_lines, 2);
+        assert_eq!(status.bank_months[1].belong_month, "2026-08");
+        assert_eq!(status.bank_months[1].bank_transactions, 1);
+        assert_eq!(status.bank_months[1].voucher_lines, 0);
+    }
+
+    #[test]
+    fn test_apply_bank_transaction_assignment_links_bank_manual_vouchers() {
+        let conn = setup_financial_db();
+        let account =
+            save_fund_account(&conn, &bank_input("BANK-001", "基本户", "622200001")).unwrap();
+        let tx1 = legacy_tx(&conn, "2026-07-05", "2026-07", 0.0, 500.0);
+        let tx2 = legacy_tx(&conn, "2026-07-06", "2026-07", 300.0, 0.0);
+        let v1 = legacy_voucher(
+            &conn,
+            "V1",
+            "2026-07-05",
+            "2026-07",
+            "bank_manual",
+            tx1,
+            "active",
+            "1002",
+            true,
+        );
+        let v2 = legacy_voucher(
+            &conn,
+            "V2",
+            "2026-07-06",
+            "2026-07",
+            "bank_manual",
+            tx2,
+            "void",
+            "1002",
+            true,
+        );
+
+        // 预览：单账户唯一候选可预填，但写入必须经 apply（先预览核对数量）
+        let preview =
+            preview_fund_assignment(&conn, "bank_transaction", account.id, None, None).unwrap();
+        assert_eq!(preview.item_count, 2);
+        assert_eq!(preview.affected_voucher_lines, 1, "void 凭证分录不联动");
+        assert_eq!(preview.skipped_voucher_lines, 0);
+
+        let result = apply_fund_assignment(
+            &conn,
+            &FundAssignmentInput {
+                entity_type: "bank_transaction".into(),
+                account_id: account.id,
+                belong_month: None,
+                batch_id: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(result.updated_count, 2);
+        assert_eq!(result.linked_voucher_lines_updated, 1);
+        assert_eq!(result.skipped_voucher_lines, 0);
+
+        assert_eq!(tx_account(&conn, tx1), Some(account.id));
+        assert_eq!(tx_account(&conn, tx2), Some(account.id));
+        assert_eq!(
+            voucher_fund_line_account(&conn, v1),
+            Some(account.id),
+            "生效 bank_manual 凭证资金行应联动补账户"
+        );
+        assert_eq!(
+            voucher_fund_line_account(&conn, v2),
+            None,
+            "void 凭证资金行保持不动"
+        );
+
+        // 归集后 app_settings 计数刷新：待归集清零（void 已被口径排除）
+        let pending: String = conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'stage7_migration_pending_count'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending, "0", "归集后待归集计数应归零");
+        let last_applied: Option<String> = conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'stage7_fund_assignment_last_applied_at'",
+                [],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .unwrap();
+        assert!(last_applied.is_some(), "归集时间应写入 app_settings");
+
+        // 状态归零：无待归集月份、无待归集批次
+        let status = get_fund_migration_status(&conn).unwrap();
+        assert_eq!(status.pending_count, 0);
+        assert!(status.bank_months.is_empty());
+        assert!(status.pending_batches.is_empty());
+
+        // 重复归集幂等：已归集流水自动跳过，不再重复写
+        let again = apply_fund_assignment(
+            &conn,
+            &FundAssignmentInput {
+                entity_type: "bank_transaction".into(),
+                account_id: account.id,
+                belong_month: None,
+                batch_id: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(again.updated_count, 0);
+        assert_eq!(again.linked_voucher_lines_updated, 0);
+    }
+
+    #[test]
+    fn test_apply_payment_batch_assignment_links_active_payment_vouchers_and_rejects_repeat() {
+        let conn = setup_financial_db();
+        let account =
+            save_fund_account(&conn, &bank_input("BANK-001", "基本户", "622200001")).unwrap();
+        let batch1 = legacy_batch(&conn, "GZ202607001", "2026-07", "salary", "paid");
+        let batch2 = legacy_batch(&conn, "GZ202607002", "2026-07", "reimbursement", "paid");
+        // 批次 2 先归集到同一账户，验证按批次粒度互不影响
+        conn.execute(
+            "UPDATE payment_batches SET fund_account_id = ?1 WHERE id = ?2",
+            params![account.id, batch2],
+        )
+        .unwrap();
+        // 批次 1 的生效工资付款凭证（贷 1002 资金行 NULL）+ void 报销付款凭证
+        let v1 = legacy_voucher(
+            &conn,
+            "V1",
+            "2026-07-28",
+            "2026-07",
+            "salary_payment",
+            batch1,
+            "active",
+            "1002",
+            false,
+        );
+        let v2 = legacy_voucher(
+            &conn,
+            "V2",
+            "2026-07-28",
+            "2026-07",
+            "reimbursement_payment",
+            batch1,
+            "void",
+            "1002",
+            false,
+        );
+
+        let preview =
+            preview_fund_assignment(&conn, "payment_batch", account.id, None, Some(batch1))
+                .unwrap();
+        assert_eq!(preview.item_count, 1);
+        assert_eq!(preview.affected_voucher_lines, 1);
+        assert_eq!(preview.skipped_voucher_lines, 0);
+
+        let result = apply_fund_assignment(
+            &conn,
+            &FundAssignmentInput {
+                entity_type: "payment_batch".into(),
+                account_id: account.id,
+                belong_month: None,
+                batch_id: Some(batch1),
+            },
+        )
+        .unwrap();
+        assert_eq!(result.updated_count, 1);
+        assert_eq!(result.linked_voucher_lines_updated, 1);
+        assert_eq!(batch_account(&conn, batch1), Some(account.id));
+        assert_eq!(
+            voucher_fund_line_account(&conn, v1),
+            Some(account.id),
+            "生效付款凭证资金行应联动补账户"
+        );
+        assert_eq!(
+            voucher_fund_line_account(&conn, v2),
+            None,
+            "void 凭证资金行保持不动"
+        );
+
+        // 重复归集同一批次：拦截并提示（明确报错优于静默空操作）
+        let repeat = apply_fund_assignment(
+            &conn,
+            &FundAssignmentInput {
+                entity_type: "payment_batch".into(),
+                account_id: account.id,
+                belong_month: None,
+                batch_id: Some(batch1),
+            },
+        );
+        let err = repeat.unwrap_err();
+        assert!(
+            err.to_string().contains("已归集"),
+            "重复归集批次应拦截：{err}"
+        );
+    }
+
+    #[test]
+    fn test_apply_fund_assignment_skips_gl_mismatch_lines() {
+        let conn = setup_financial_db();
+        // 第三方账户挂 1012，而历史 bank_manual 凭证资金行科目为 1002：科目不一致不能强改
+        let account = save_fund_account(&conn, &third_party_input("WX-001", "微信商户")).unwrap();
+        let tx = legacy_tx(&conn, "2026-07-05", "2026-07", 0.0, 500.0);
+        let v = legacy_voucher(
+            &conn,
+            "V1",
+            "2026-07-05",
+            "2026-07",
+            "bank_manual",
+            tx,
+            "active",
+            "1002",
+            true,
+        );
+
+        let preview =
+            preview_fund_assignment(&conn, "bank_transaction", account.id, None, None).unwrap();
+        assert_eq!(preview.item_count, 1);
+        assert_eq!(preview.affected_voucher_lines, 0, "科目不一致不计入可联动");
+        assert_eq!(preview.skipped_voucher_lines, 1);
+
+        let result =
+            apply_fund_assignment(&conn, &migration_input("bank_transaction", account.id)).unwrap();
+        assert_eq!(result.updated_count, 1, "流水本体仍应归集到指定账户");
+        assert_eq!(result.linked_voucher_lines_updated, 0);
+        assert_eq!(result.skipped_voucher_lines, 1);
+        assert_eq!(
+            voucher_fund_line_account(&conn, v),
+            None,
+            "科目不匹配的分录保持 NULL（spec 9.5：不猜测）"
+        );
+    }
+
+    #[test]
+    fn test_apply_fund_assignment_blocks_closed_month() {
+        let conn = setup_financial_db();
+        let account =
+            save_fund_account(&conn, &bank_input("BANK-001", "基本户", "622200001")).unwrap();
+        let tx = legacy_tx(&conn, "2026-07-05", "2026-07", 0.0, 500.0);
+        legacy_voucher(
+            &conn,
+            "V1",
+            "2026-07-05",
+            "2026-07",
+            "bank_manual",
+            tx,
+            "active",
+            "1002",
+            true,
+        );
+        conn.execute(
+            "INSERT INTO month_closes (month, status, created_at, updated_at)
+             VALUES ('2026-07', 'closed', '2026-08-01', '2026-08-01')",
+            [],
+        )
+        .unwrap();
+
+        let err = apply_fund_assignment(&conn, &migration_input("bank_transaction", account.id))
+            .unwrap_err();
+        assert!(err.to_string().contains("月结"), "已月结月份应拦截：{err}");
+        assert_eq!(tx_account(&conn, tx), None, "拦截后不得写入");
+        let status = get_fund_migration_status(&conn).unwrap();
+        assert_eq!(status.pending_count, 2, "拦截后待归集计数不变");
+    }
+
+    #[test]
+    fn test_apply_fund_assignment_validates_account_and_entity() {
+        let conn = setup_financial_db();
+        let mut inactive = bank_input("BANK-001", "基本户", "622200001");
+        inactive.is_active = Some(false);
+        let account = save_fund_account(&conn, &inactive).unwrap();
+
+        // 账户不存在
+        let missing =
+            apply_fund_assignment(&conn, &migration_input("bank_transaction", 9999)).unwrap_err();
+        assert!(missing.to_string().contains("资金账户不存在"));
+
+        // 停用账户不可作为归集目标（与全应用资金账户选择口径一致）
+        let disabled =
+            apply_fund_assignment(&conn, &migration_input("bank_transaction", account.id))
+                .unwrap_err();
+        assert!(disabled.to_string().contains("停用"));
+
+        // 不支持的归集对象类型
+        let account2 =
+            save_fund_account(&conn, &bank_input("BANK-002", "一般户", "622200002")).unwrap();
+        let bad_type = apply_fund_assignment(&conn, &migration_input("voucher_line", account2.id))
+            .unwrap_err();
+        assert!(bad_type.to_string().contains("归集对象类型"));
+
+        // 预览同样校验账户与类型
+        assert!(preview_fund_assignment(&conn, "bank_transaction", 9999, None, None).is_err());
+        assert!(
+            preview_fund_assignment(&conn, "payment_batch", account.id, None, None).is_err(),
+            "停用账户不可预览归集"
+        );
     }
 }
