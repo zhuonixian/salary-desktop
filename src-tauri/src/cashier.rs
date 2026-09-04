@@ -838,7 +838,6 @@ fn business_partner_referenced(conn: &Connection, id: i64) -> AppResult<bool> {
 // 说明：本节为 Task 6 领域层（状态机 + 审批事件），Tauri 命令由 Task 7 暴露；
 // 命令暴露前整节对 lib 构建不可达，逐项挂 #[allow(dead_code)]（Task 7 统一移除）。
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 资金单据类型（spec 4.4）
 const FUND_DOCUMENT_TYPES: &[&str] = &[
     "receipt",
@@ -849,7 +848,6 @@ const FUND_DOCUMENT_TYPES: &[&str] = &[
     "reversal",
 ];
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 资金单据状态（spec 4.4/5.1）
 const FUND_DOCUMENT_STATUSES: &[&str] = &[
     "draft",
@@ -862,7 +860,6 @@ const FUND_DOCUMENT_STATUSES: &[&str] = &[
     "reversed",
 ];
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 经办复核开关的 app_settings 键（spec 2：可选 maker_checker_enabled；
 /// 启用时提交人与审批人不得相同。单机切换身份属流程约束，不宣称安全隔离）
 const MAKER_CHECKER_SETTING: &str = "maker_checker_enabled";
@@ -870,19 +867,15 @@ const MAKER_CHECKER_SETTING: &str = "maker_checker_enabled";
 /// 资金单附件可变更状态：仅未进入审批流的单据（与报销单口径一致，spec 4.6/第 8 节）
 const FUND_DOCUMENT_ATTACHMENT_EDITABLE_STATUSES: &[&str] = &["draft", "rejected", "void"];
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 可直接结算的单据类型（spec 5.1：receipt/transfer 直接收支结算；
 /// advance_settlement 核销回流走结算；payment/advance 必须经付款批次标记付款）
 const DIRECT_SETTLE_TYPES: &[&str] = &["receipt", "transfer", "advance_settlement"];
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 可进入付款批次的单据类型（spec 5.1：payment/advance）
 const BATCHABLE_TYPES: &[&str] = &["payment", "advance"];
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 const FUND_DOCUMENT_COLS: &str = "id, document_no, document_type, belong_month, document_date, amount, summary, department, expense_type, remark, partner_id, employee_id, source_account_id, target_account_id, counter_account_code, status, payment_batch_id, reversal_of_id, submitted_by, submitted_at, approved_by, approved_at, settled_by, settled_at, voided_by, voided_at, created_by, created_at, updated_at";
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 fn fund_document_from_row(r: &rusqlite::Row) -> rusqlite::Result<FundDocument> {
     Ok(FundDocument {
         id: r.get(0)?,
@@ -917,9 +910,8 @@ fn fund_document_from_row(r: &rusqlite::Row) -> rusqlite::Result<FundDocument> {
     })
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
-/// 状态中文名（错误信息用）
-fn fund_status_label(status: &str) -> &'static str {
+/// 状态中文名（错误信息与命令层日志描述共用）
+pub(crate) fn fund_status_label(status: &str) -> &'static str {
     match status {
         "draft" => "草稿",
         "submitted" => "已提交",
@@ -933,9 +925,8 @@ fn fund_status_label(status: &str) -> &'static str {
     }
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
-/// 单据类型中文名（错误信息用）
-fn fund_document_type_label(doc_type: &str) -> &'static str {
+/// 单据类型中文名（错误信息与命令层日志描述共用）
+pub(crate) fn fund_document_type_label(doc_type: &str) -> &'static str {
     match doc_type {
         "receipt" => "收款单",
         "payment" => "付款单",
@@ -947,7 +938,6 @@ fn fund_document_type_label(doc_type: &str) -> &'static str {
     }
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 状态机动作中文名（错误信息与审批事件注释校验提示用）
 fn fund_action_label(action: &str) -> &'static str {
     match action {
@@ -963,7 +953,6 @@ fn fund_action_label(action: &str) -> &'static str {
     }
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 单据编号：类型前缀 + 单据日期 + 进程相关唯一后缀（与付款批次同防撞策略，spec 4.4 按类型和日期生成）
 fn fund_document_no(document_type: &str, document_date: &str) -> String {
     let prefix = match document_type {
@@ -982,7 +971,6 @@ fn fund_document_no(document_type: &str, document_date: &str) -> String {
     format!("{prefix}{date_compact}{nanos}{:04X}", suffix & 0xFFFF)
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 归属月份格式校验（YYYY-MM）
 fn validate_belong_month(month: &str) -> AppResult<()> {
     let valid = month.len() == 7
@@ -997,7 +985,6 @@ fn validate_belong_month(month: &str) -> AppResult<()> {
     }
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 单据日期格式校验（YYYY-MM-DD）且必须落在归属月份内
 fn validate_document_date(document_date: &str, belong_month: &str) -> AppResult<()> {
     let parsed = NaiveDate::parse_from_str(document_date, "%Y-%m-%d").map_err(|_| {
@@ -1012,7 +999,6 @@ fn validate_document_date(document_date: &str, belong_month: &str) -> AppResult<
     Ok(())
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// patch 语义可空字符串规范化：去空格，空串归一为 None
 fn trimmed_optional(v: Option<&str>) -> Option<String> {
     v.map(str::trim)
@@ -1020,7 +1006,6 @@ fn trimmed_optional(v: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 收款/付款单往来对象：往来单位与员工二选一（spec 4.4 择一规则）
 fn ensure_single_counterparty(input: &FundDocumentInput) -> AppResult<()> {
     match (input.partner_id.is_some(), input.employee_id.is_some()) {
@@ -1034,7 +1019,6 @@ fn ensure_single_counterparty(input: &FundDocumentInput) -> AppResult<()> {
     }
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 对方科目校验：收款/付款结算前必填（spec 4.4）；可填时必须为存在的总账科目
 fn ensure_counter_account(
     conn: &Connection,
@@ -1054,7 +1038,6 @@ fn ensure_counter_account(
     ensure_gl_account_exists(conn, trimmed)
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 往来单位存在且启用
 fn ensure_partner_usable(conn: &Connection, partner_id: i64) -> AppResult<()> {
     let row: Option<(String, String)> = conn
@@ -1075,7 +1058,6 @@ fn ensure_partner_usable(conn: &Connection, partner_id: i64) -> AppResult<()> {
     }
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 员工存在且在职
 fn ensure_employee_usable(conn: &Connection, employee_id: i64) -> AppResult<()> {
     let row: Option<(String, String)> = conn
@@ -1094,7 +1076,6 @@ fn ensure_employee_usable(conn: &Connection, employee_id: i64) -> AppResult<()> 
     }
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 资金账户存在且启用
 fn ensure_fund_account_usable(conn: &Connection, label: &str, account_id: i64) -> AppResult<()> {
     let row: Option<(String, i64)> = conn
@@ -1115,7 +1096,6 @@ fn ensure_fund_account_usable(conn: &Connection, label: &str, account_id: i64) -
     }
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 单据内容校验（spec 4.4/5.1）：类型合法、金额正数、摘要必填、月份/日期格式与匹配、
 /// 账户方向与往来对象择一规则、引用对象存在且启用、对方科目必填/存在。
 fn validate_fund_document_content(conn: &Connection, input: &FundDocumentInput) -> AppResult<()> {
@@ -1248,12 +1228,23 @@ fn validate_fund_document_content(conn: &Connection, input: &FundDocumentInput) 
     Ok(())
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 按条件查询资金单据（月份/类型/状态/往来对象/关键字），按 id 倒序（新单在前）
 pub fn get_fund_documents(
     conn: &Connection,
     q: &FundDocumentQuery,
 ) -> AppResult<Vec<FundDocument>> {
+    // 类型/状态入参校验：拼进 SQL 前先拦住非法枚举，避免拼错时静默返回空列表
+    if let Some(t) = q
+        .document_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        ensure_in_list(t, FUND_DOCUMENT_TYPES, "单据类型")?;
+    }
+    if let Some(s) = q.status.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        ensure_in_list(s, FUND_DOCUMENT_STATUSES, "单据状态")?;
+    }
     let mut where_clauses: Vec<String> = Vec::new();
     let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     let mut idx = 1;
@@ -1265,6 +1256,13 @@ pub fn get_fund_documents(
     {
         where_clauses.push(format!("belong_month = ?{idx}"));
         params_vec.push(Box::new(m.to_string()));
+        idx += 1;
+    }
+    if let Some(a) = q.account_id {
+        where_clauses.push(format!(
+            "(source_account_id = ?{idx} OR target_account_id = ?{idx})"
+        ));
+        params_vec.push(Box::new(a));
         idx += 1;
     }
     if let Some(t) = q
@@ -1315,7 +1313,6 @@ pub fn get_fund_documents(
     rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 按主键取单个资金单据（领域内部与命令层共用）
 fn get_fund_document(conn: &Connection, id: i64) -> AppResult<FundDocument> {
     conn.query_row(
@@ -1327,7 +1324,6 @@ fn get_fund_document(conn: &Connection, id: i64) -> AppResult<FundDocument> {
     .ok_or_else(|| AppError::NotFound(format!("资金单据不存在：id={id}")))
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 单据详情：单据 + 审批轨迹（id 升序，可重放完整历史，spec 4.5）
 pub fn get_fund_document_detail(conn: &Connection, id: i64) -> AppResult<FundDocumentDetail> {
     let document = get_fund_document(conn, id)?;
@@ -1346,7 +1342,6 @@ fn get_fund_document_status(conn: &Connection, id: i64) -> AppResult<Option<Stri
     .map_err(AppError::from)
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 追加一条审批事件（仅插入：模块刻意不提供 UPDATE/DELETE 路径，spec 4.5）。
 /// 必须与状态更新同事务调用。
 fn insert_approval_event(
@@ -1377,7 +1372,6 @@ fn insert_approval_event(
     Ok(())
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 按实体查询审批轨迹（id 升序 = 时间重放顺序，spec 4.5）
 pub fn list_approval_events(
     conn: &Connection,
@@ -1411,7 +1405,6 @@ pub fn list_approval_events(
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 读取经办复核开关（app_settings；缺省关闭）
 fn maker_checker_enabled(conn: &Connection) -> AppResult<bool> {
     Ok(db::get_setting(conn, MAKER_CHECKER_SETTING)?
@@ -1419,8 +1412,12 @@ fn maker_checker_enabled(conn: &Connection) -> AppResult<bool> {
         .unwrap_or(false))
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
-/// 设置经办复核开关（Task 7 命令层暴露给设置界面）
+/// 读取经办复核开关（命令层暴露给设置界面；缺省关闭）
+pub fn get_maker_checker_enabled(conn: &Connection) -> AppResult<bool> {
+    maker_checker_enabled(conn)
+}
+
+/// 设置经办复核开关（命令层暴露给设置界面）
 pub fn set_maker_checker_enabled(conn: &Connection, enabled: bool) -> AppResult<()> {
     db::set_setting(
         conn,
@@ -1429,7 +1426,6 @@ pub fn set_maker_checker_enabled(conn: &Connection, enabled: bool) -> AppResult<
     )
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 创建资金单据（草稿）。须当前操作人署名且归属月份未月结（spec 4.4）。
 pub fn create_fund_document(
     conn: &Connection,
@@ -1473,7 +1469,6 @@ pub fn create_fund_document(
     get_fund_document(conn, conn.last_insert_rowid())
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 更新资金单据（仅草稿可编辑；submitted 后业务字段冻结，spec 5.1）。
 /// 入参不含状态字段：状态只能经状态机命令流转，无法由字段更新绕过。
 pub fn update_fund_document(
@@ -1524,7 +1519,6 @@ pub fn update_fund_document(
     get_fund_document(conn, id)
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 状态机命令公共骨架：当前操作人署名 → 事务内取单据 → 校验来源状态 →
 /// 月结保护 → 单据状态更新 + 追加审批事件（同事务，spec 5.1/4.5）→ 提交。
 /// `extra` 在状态更新前执行（maker_checker 校验、署名字段/批次回写等），
@@ -1593,7 +1587,6 @@ where
     get_fund_document(conn, document_id)
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 提交单据（draft → submitted）。提交后业务字段冻结，须撤回才可修改。
 /// 记录提交人署名（maker_checker 审批人去重的比对依据）。
 pub fn submit_fund_document(
@@ -1621,7 +1614,6 @@ pub fn submit_fund_document(
     )
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 审批通过（submitted → approved）。
 /// maker_checker 启用时审批人与提交人不得相同（spec 2）。
 pub fn approve_fund_document(
@@ -1654,7 +1646,6 @@ pub fn approve_fund_document(
     )
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 驳回（submitted → rejected）。须填写驳回意见。
 pub fn reject_fund_document(
     conn: &Connection,
@@ -1675,7 +1666,6 @@ pub fn reject_fund_document(
     )
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 撤回（submitted/rejected → draft）：提交人反悔或按驳回意见修改后重走流程。
 pub fn withdraw_fund_document(
     conn: &Connection,
@@ -1696,7 +1686,6 @@ pub fn withdraw_fund_document(
     )
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 作废（仅未结算，spec 5.1）。已进批次须先由批次作废释放；已结算只能冲正。
 pub fn void_fund_document(
     conn: &Connection,
@@ -1723,8 +1712,9 @@ pub fn void_fund_document(
     )
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
-/// 标记进入付款批次（approved → batched；仅付款/借款单，Task 9 通用批次创建时调用）。
+/// 标记进入付款批次（approved → batched；仅付款/借款单）。
+/// 无独立 Tauri 命令：Task 9 通用批次创建/作废时在自身事务内调用状态机，禁止前端直调绕过批次。
+#[allow(dead_code)] // TODO(Task 9 批次创建挂接后移除)
 pub fn mark_document_batched(
     conn: &Connection,
     current: &CurrentOperatorState,
@@ -1767,7 +1757,6 @@ pub fn mark_document_batched(
     )
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 结算（spec 5.1）：收款/内部转账/借款核销单审批后直接结算；
 /// 付款/借款单须经付款批次标记付款后从 batched 结算。
 pub fn settle_fund_document(
@@ -1806,7 +1795,6 @@ pub fn settle_fund_document(
     )
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 冲正（settled → reversed，spec 5.1）：在开放月份创建相反方向冲正单（立即结算生效），
 /// 原单置为已冲正；原单月份与冲正月份均须未月结。
 /// 凭证联动（反向凭证 + 原凭证保留 active 建立追溯）由 Task 8 挂接，见函数尾 TODO。

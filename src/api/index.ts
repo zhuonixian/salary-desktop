@@ -84,6 +84,12 @@ import type {
   OperatorProfileInput,
   BusinessAttachment,
   BusinessAttachmentInput,
+  ApprovalEvent,
+  FundDocument,
+  FundDocumentInput,
+  FundDocumentQuery,
+  FundDocumentDetail,
+  FundDocumentReverseInput,
 } from '@/types';
 
 type BackendDashboardSummary = {
@@ -288,6 +294,200 @@ let mockCurrentOperatorId: number | null = 1;
 // 预览模式下的业务附件（内存态，模拟 business_attachments 表）
 const mockBusinessAttachments: BusinessAttachment[] = [];
 
+// ==================== 资金单据预览数据（第七阶段 Task 7） ====================
+// 内存态模拟 fund_documents / approval_events / maker_checker_enabled；
+// 状态流转与后端状态机同规则（仅演示用，完整校验以后端为准）。
+
+const mockDocMonth = new Date().toISOString().slice(0, 7);
+
+const baseMockFundDoc = (over: Partial<FundDocument>): FundDocument => ({
+  id: 0,
+  document_no: '',
+  document_type: 'receipt',
+  belong_month: mockDocMonth,
+  document_date: `${mockDocMonth}-05`,
+  amount: 0,
+  summary: '',
+  department: null,
+  expense_type: null,
+  remark: null,
+  partner_id: null,
+  employee_id: null,
+  source_account_id: null,
+  target_account_id: null,
+  counter_account_code: null,
+  status: 'draft',
+  payment_batch_id: null,
+  reversal_of_id: null,
+  submitted_by: null,
+  submitted_at: null,
+  approved_by: null,
+  approved_at: null,
+  settled_by: null,
+  settled_at: null,
+  voided_by: null,
+  voided_at: null,
+  created_by: null,
+  created_at: '2026-01-01T00:00:00Z',
+  updated_at: '2026-01-01T00:00:00Z',
+  ...over,
+});
+
+const mockFundDocuments: FundDocument[] = [
+  baseMockFundDoc({
+    id: 3,
+    document_no: `SK${mockDocMonth.replace('-', '')}0003`,
+    document_type: 'receipt',
+    amount: 12000,
+    summary: '收到客户样品款',
+    partner_id: 1,
+    target_account_id: 1,
+    counter_account_code: '6001',
+    status: 'settled',
+    submitted_by: 1,
+    submitted_at: '2026-01-02T00:00:00Z',
+    approved_by: 2,
+    approved_at: '2026-01-02T01:00:00Z',
+    settled_by: 1,
+    settled_at: '2026-01-02T02:00:00Z',
+  }),
+  baseMockFundDoc({
+    id: 2,
+    document_no: `FK${mockDocMonth.replace('-', '')}0002`,
+    document_type: 'payment',
+    amount: 5600,
+    summary: '支付供应商货款',
+    partner_id: 1,
+    source_account_id: 1,
+    counter_account_code: '2202',
+    status: 'submitted',
+    submitted_by: 1,
+    submitted_at: '2026-01-02T00:00:00Z',
+  }),
+  baseMockFundDoc({
+    id: 1,
+    document_no: `NB${mockDocMonth.replace('-', '')}0001`,
+    document_type: 'transfer',
+    amount: 800,
+    summary: '备用金划转现金库',
+    source_account_id: 1,
+    target_account_id: 2,
+    status: 'draft',
+  }),
+];
+
+const mockApprovalEvents: ApprovalEvent[] = [
+  {
+    id: 1,
+    entity_type: 'fund_document',
+    entity_id: 3,
+    action: 'submit',
+    from_status: 'draft',
+    to_status: 'submitted',
+    operator_id: 1,
+    comment: null,
+    created_at: '2026-01-02T00:00:00Z',
+  },
+  {
+    id: 2,
+    entity_type: 'fund_document',
+    entity_id: 3,
+    action: 'approve',
+    from_status: 'submitted',
+    to_status: 'approved',
+    operator_id: 2,
+    comment: '同意',
+    created_at: '2026-01-02T01:00:00Z',
+  },
+  {
+    id: 3,
+    entity_type: 'fund_document',
+    entity_id: 3,
+    action: 'settle',
+    from_status: 'approved',
+    to_status: 'settled',
+    operator_id: 1,
+    comment: null,
+    created_at: '2026-01-02T02:00:00Z',
+  },
+];
+
+let mockMakerChecker = false;
+
+const mockNextFundDocId = (): number =>
+  mockFundDocuments.reduce((max, d) => Math.max(max, d.id), 0) + 1;
+
+const mockNextEventId = (): number =>
+  mockApprovalEvents.reduce((max, e) => Math.max(max, e.id), 0) + 1;
+
+const mockPushEvent = (
+  entityId: number,
+  action: string,
+  fromStatus: string | null,
+  toStatus: string | null,
+  comment?: string | null,
+): void => {
+  mockApprovalEvents.push({
+    id: mockNextEventId(),
+    entity_type: 'fund_document',
+    entity_id: entityId,
+    action,
+    from_status: fromStatus,
+    to_status: toStatus,
+    operator_id: mockCurrentOperatorId,
+    comment: comment ?? null,
+    created_at: new Date().toISOString(),
+  });
+};
+
+// 轻量状态机模拟：与后端 cashier.rs 同规则（演示完整 草稿→提交→审批→结算 流程）
+const mockTransitionFundDocument = (
+  id: number,
+  fromStatuses: string[],
+  toStatus: string,
+  action: string,
+  comment?: string | null,
+  requireComment = false,
+): FundDocument => {
+  const doc = mockFundDocuments.find((d) => d.id === id);
+  if (!doc) throw new Error(`资金单据ID=${id}未找到`);
+  if (!fromStatuses.includes(doc.status)) {
+    throw new Error(`单据 ${doc.document_no} 当前状态不允许该操作`);
+  }
+  const trimmed = (comment ?? '').trim();
+  if (requireComment && !trimmed) throw new Error('该操作必须填写意见或原因');
+  if (
+    action === 'approve' &&
+    mockMakerChecker &&
+    doc.submitted_by !== null &&
+    doc.submitted_by === mockCurrentOperatorId
+  ) {
+    throw new Error('经办复核已启用：审批人与提交人不能是同一人，请切换操作人后再审批');
+  }
+  if (action === 'settle' && doc.status === 'approved' &&
+      !['receipt', 'transfer', 'advance_settlement'].includes(doc.document_type)) {
+    throw new Error('付款单/借款单须经付款批次标记付款后结算');
+  }
+  const now = new Date().toISOString();
+  if (action === 'submit') {
+    doc.submitted_by = mockCurrentOperatorId;
+    doc.submitted_at = now;
+  } else if (action === 'approve') {
+    doc.approved_by = mockCurrentOperatorId;
+    doc.approved_at = now;
+  } else if (action === 'settle') {
+    doc.settled_by = mockCurrentOperatorId;
+    doc.settled_at = now;
+  } else if (action === 'void') {
+    doc.voided_by = mockCurrentOperatorId;
+    doc.voided_at = now;
+  }
+  doc.status = toStatus;
+  doc.updated_at = now;
+  mockPushEvent(doc.id, action, fromStatuses[0] ?? null, toStatus, trimmed || null);
+  return doc;
+};
+
 const mockTauriResponse = (command: string, args?: Record<string, unknown>): unknown => {
   switch (command) {
     case 'get_fund_accounts':
@@ -413,6 +613,136 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
     case 'get_decrypted_attachment_url':
       // 浏览器预览无本地文件系统：返回空串，页面按"预览不可用"处理
       return '';
+    // 资金单据 mock：内存态轻量状态机，字段结构与后端 FundDocument/ApprovalEvent 一致
+    case 'get_fund_documents': {
+      const query = (args?.query ?? {}) as FundDocumentQuery;
+      return mockFundDocuments.filter((d) => {
+        if (query.belong_month && d.belong_month !== query.belong_month) return false;
+        if (query.document_type && d.document_type !== query.document_type) return false;
+        if (query.status && d.status !== query.status) return false;
+        if (query.partner_id && d.partner_id !== query.partner_id) return false;
+        if (query.employee_id && d.employee_id !== query.employee_id) return false;
+        if (
+          query.account_id &&
+          d.source_account_id !== query.account_id &&
+          d.target_account_id !== query.account_id
+        ) {
+          return false;
+        }
+        if (query.keyword && !`${d.document_no}${d.summary}`.includes(query.keyword)) return false;
+        return true;
+      });
+    }
+    case 'get_fund_document_detail': {
+      const id = Number(args?.id ?? 0);
+      const document = mockFundDocuments.find((d) => d.id === id);
+      if (!document) throw new Error(`资金单据ID=${id}未找到`);
+      return {
+        document,
+        events: mockApprovalEvents.filter(
+          (e) => e.entity_type === 'fund_document' && e.entity_id === id,
+        ),
+      };
+    }
+    case 'list_approval_events':
+      return mockApprovalEvents.filter(
+        (e) =>
+          e.entity_type === (args?.entityType as string) &&
+          e.entity_id === Number(args?.entityId ?? 0),
+      );
+    case 'get_maker_checker_enabled':
+      return mockMakerChecker;
+    case 'set_maker_checker_enabled':
+      mockMakerChecker = Boolean(args?.enabled);
+      return undefined;
+    case 'create_fund_document': {
+      const data = args?.data as FundDocumentInput | undefined;
+      if (!data || !(Number(data.amount) > 0) || !data.summary?.trim()) {
+        throw new Error('单据金额必须为正数且摘要必填');
+      }
+      const now = new Date().toISOString();
+      const prefixes: Record<string, string> = {
+        receipt: 'SK', payment: 'FK', transfer: 'NB', advance: 'JK', advance_settlement: 'HX',
+      };
+      const doc = baseMockFundDoc({
+        ...data,
+        id: mockNextFundDocId(),
+        document_no: `${prefixes[data.document_type] ?? 'CZ'}${data.document_date.replace(/-/g, '')}${String(Date.now()).slice(-4)}`,
+        amount: Number(data.amount),
+        summary: data.summary.trim(),
+        created_at: now,
+        updated_at: now,
+      });
+      mockFundDocuments.unshift(doc);
+      return doc;
+    }
+    case 'update_fund_document': {
+      const data = args?.data as FundDocumentInput | undefined;
+      const doc = mockFundDocuments.find((d) => d.id === Number(data?.id ?? 0));
+      if (!doc) throw new Error('资金单据未找到');
+      if (doc.status !== 'draft') throw new Error('仅草稿可编辑；已提交单据请先撤回');
+      Object.assign(doc, data, { updated_at: new Date().toISOString() });
+      return doc;
+    }
+    case 'submit_fund_document':
+      return mockTransitionFundDocument(
+        Number(args?.id ?? 0), ['draft'], 'submitted', 'submit', args?.comment as string | undefined,
+      );
+    case 'approve_fund_document':
+      return mockTransitionFundDocument(
+        Number(args?.id ?? 0), ['submitted'], 'approved', 'approve', args?.comment as string, true,
+      );
+    case 'reject_fund_document':
+      return mockTransitionFundDocument(
+        Number(args?.id ?? 0), ['submitted'], 'rejected', 'reject', args?.comment as string, true,
+      );
+    case 'withdraw_fund_document':
+      return mockTransitionFundDocument(
+        Number(args?.id ?? 0), ['submitted', 'rejected'], 'draft', 'withdraw', args?.comment as string | undefined,
+      );
+    case 'void_fund_document':
+      return mockTransitionFundDocument(
+        Number(args?.id ?? 0), ['draft', 'submitted', 'approved', 'rejected'], 'void', 'void', args?.comment as string, true,
+      );
+    case 'settle_fund_document':
+      return mockTransitionFundDocument(Number(args?.id ?? 0), ['approved', 'batched'], 'settled', 'settle');
+    case 'reverse_fund_document': {
+      const data = args?.data as FundDocumentReverseInput | undefined;
+      const original = mockFundDocuments.find((d) => d.id === Number(data?.document_id ?? 0));
+      if (!original) throw new Error('资金单据未找到');
+      if (original.status !== 'settled') throw new Error('仅已结算单据可冲正');
+      if (!data?.comment?.trim()) throw new Error('冲正必须填写原因');
+      const now = new Date().toISOString();
+      const reversal = baseMockFundDoc({
+        id: mockNextFundDocId(),
+        document_no: `CZ${data.document_date.replace(/-/g, '')}${String(Date.now()).slice(-4)}`,
+        document_type: 'reversal',
+        belong_month: data.belong_month,
+        document_date: data.document_date,
+        amount: original.amount,
+        summary: `冲正：${original.summary}`,
+        department: original.department,
+        expense_type: original.expense_type,
+        remark: `冲正原单 ${original.document_no}，原因：${data.comment.trim()}`,
+        partner_id: original.partner_id,
+        employee_id: original.employee_id,
+        source_account_id: original.target_account_id,
+        target_account_id: original.source_account_id,
+        counter_account_code: original.counter_account_code,
+        status: 'settled',
+        reversal_of_id: original.id,
+        settled_by: mockCurrentOperatorId,
+        settled_at: now,
+        created_at: now,
+        updated_at: now,
+      });
+      mockFundDocuments.unshift(reversal);
+      original.status = 'reversed';
+      original.updated_at = now;
+      mockPushEvent(original.id, 'reverse', 'settled', 'reversed', data.comment.trim());
+      mockPushEvent(reversal.id, 'reverse', null, 'settled', data.comment.trim());
+      return reversal;
+    }
     // 预览模式跳过启动密码/锁屏（仅在非 Tauri 环境生效），让业务页面可打开。
     case 'is_security_initialized':
       return true;
@@ -1596,4 +1926,64 @@ export async function deleteBusinessAttachment(id: number): Promise<string> {
 
 export async function getDecryptedAttachmentUrl(attachmentId: number): Promise<string> {
   return invoke<string>('get_decrypted_attachment_url', { attachmentId });
+}
+
+// ==================== 资金单据与审批（第七阶段 Task 7） ====================
+// invoke 参数 key 用 camelCase（Tauri 2 自动映射 snake_case）。状态命令的按钮可见性
+// 完全由后端返回的 status 决定；approve/reject/void/reverse 意见必填由后端校验。
+
+export async function getFundDocuments(query: FundDocumentQuery = {}): Promise<FundDocument[]> {
+  return invoke<FundDocument[]>('get_fund_documents', { query });
+}
+
+export async function getFundDocumentDetail(id: number): Promise<FundDocumentDetail> {
+  return invoke<FundDocumentDetail>('get_fund_document_detail', { id });
+}
+
+export async function listApprovalEvents(entityType: string, entityId: number): Promise<ApprovalEvent[]> {
+  return invoke<ApprovalEvent[]>('list_approval_events', { entityType, entityId });
+}
+
+export async function getMakerCheckerEnabled(): Promise<boolean> {
+  return invoke<boolean>('get_maker_checker_enabled');
+}
+
+export async function setMakerCheckerEnabled(enabled: boolean): Promise<void> {
+  await invoke<void>('set_maker_checker_enabled', { enabled });
+}
+
+export async function createFundDocument(data: FundDocumentInput): Promise<FundDocument> {
+  return invoke<FundDocument>('create_fund_document', { data });
+}
+
+export async function updateFundDocument(data: FundDocumentInput): Promise<FundDocument> {
+  return invoke<FundDocument>('update_fund_document', { data });
+}
+
+export async function submitFundDocument(id: number, comment?: string): Promise<FundDocument> {
+  return invoke<FundDocument>('submit_fund_document', { id, comment });
+}
+
+export async function approveFundDocument(id: number, comment: string): Promise<FundDocument> {
+  return invoke<FundDocument>('approve_fund_document', { id, comment });
+}
+
+export async function rejectFundDocument(id: number, comment: string): Promise<FundDocument> {
+  return invoke<FundDocument>('reject_fund_document', { id, comment });
+}
+
+export async function withdrawFundDocument(id: number, comment?: string): Promise<FundDocument> {
+  return invoke<FundDocument>('withdraw_fund_document', { id, comment });
+}
+
+export async function voidFundDocument(id: number, comment: string): Promise<FundDocument> {
+  return invoke<FundDocument>('void_fund_document', { id, comment });
+}
+
+export async function settleFundDocument(id: number): Promise<FundDocument> {
+  return invoke<FundDocument>('settle_fund_document', { id });
+}
+
+export async function reverseFundDocument(data: FundDocumentReverseInput): Promise<FundDocument> {
+  return invoke<FundDocument>('reverse_fund_document', { data });
 }

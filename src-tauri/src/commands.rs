@@ -2179,6 +2179,300 @@ pub fn delete_business_attachment(
     Ok(file_name)
 }
 
+// ==================== Cashier Commands（第七阶段 资金单据与审批） ====================
+//
+// 资金单状态只能经状态机命令流转（spec 2/5.1）；cashier 层函数自带事务（状态更新与
+// approval_events 同事务），命令层直接调用并在成功后写操作日志。get 类命令不记日志。
+
+#[tauri::command]
+pub fn get_fund_documents(
+    query: FundDocumentQuery,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<FundDocument>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(cashier::get_fund_documents(&conn, &query)?)
+}
+
+#[tauri::command]
+pub fn get_fund_document_detail(
+    id: i64,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<FundDocumentDetail, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(cashier::get_fund_document_detail(&conn, id)?)
+}
+
+/// 按实体查询审批轨迹（报销单与资金单共用 approval_events，spec 4.5）
+#[tauri::command]
+pub fn list_approval_events(
+    entity_type: String,
+    entity_id: i64,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<ApprovalEvent>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(cashier::list_approval_events(
+        &conn,
+        &entity_type,
+        entity_id,
+    )?)
+}
+
+#[tauri::command]
+pub fn get_maker_checker_enabled(
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(cashier::get_maker_checker_enabled(&conn)?)
+}
+
+#[tauri::command]
+pub fn set_maker_checker_enabled(
+    enabled: bool,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<(), AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    cashier::set_maker_checker_enabled(&conn, enabled)?;
+    let action = if enabled { "开启" } else { "关闭" };
+    db::log_operation(
+        &conn,
+        "set_maker_checker_enabled",
+        &format!("{action}经办复核（提交人与审批人不得相同）"),
+        &cashier::current_operator_name(&conn, &current),
+        None,
+    )?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn create_fund_document(
+    data: FundDocumentInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<FundDocument, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let doc = cashier::create_fund_document(&conn, &current, &data)?;
+    db::log_operation(
+        &conn,
+        "create_fund_document",
+        &format!(
+            "新增{} {} 金额 {:.2}",
+            cashier::fund_document_type_label(&doc.document_type),
+            doc.document_no,
+            doc.amount
+        ),
+        &cashier::current_operator_name(&conn, &current),
+        Some(&format!("document_id={}", doc.id)),
+    )?;
+    Ok(doc)
+}
+
+#[tauri::command]
+pub fn update_fund_document(
+    data: FundDocumentInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<FundDocument, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let doc = cashier::update_fund_document(&conn, &current, &data)?;
+    db::log_operation(
+        &conn,
+        "update_fund_document",
+        &format!(
+            "修改{} {}（仅草稿可编辑）",
+            cashier::fund_document_type_label(&doc.document_type),
+            doc.document_no
+        ),
+        &cashier::current_operator_name(&conn, &current),
+        Some(&format!("document_id={}", doc.id)),
+    )?;
+    Ok(doc)
+}
+
+/// 状态机命令族：submit/approve/reject/withdraw/void/settle（approve/reject/void 意见必填，
+/// 由 cashier 层校验并随审批事件落库）。
+#[tauri::command]
+pub fn submit_fund_document(
+    id: i64,
+    comment: Option<String>,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<FundDocument, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let doc = cashier::submit_fund_document(&conn, &current, id, comment.as_deref())?;
+    db::log_operation(
+        &conn,
+        "submit_fund_document",
+        &format!(
+            "提交{} {} 金额 {:.2}",
+            cashier::fund_document_type_label(&doc.document_type),
+            doc.document_no,
+            doc.amount
+        ),
+        &cashier::current_operator_name(&conn, &current),
+        Some(&format!("document_id={}", doc.id)),
+    )?;
+    Ok(doc)
+}
+
+#[tauri::command]
+pub fn approve_fund_document(
+    id: i64,
+    comment: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<FundDocument, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let doc = cashier::approve_fund_document(&conn, &current, id, &comment)?;
+    db::log_operation(
+        &conn,
+        "approve_fund_document",
+        &format!(
+            "审批通过{} {} 金额 {:.2}",
+            cashier::fund_document_type_label(&doc.document_type),
+            doc.document_no,
+            doc.amount
+        ),
+        &cashier::current_operator_name(&conn, &current),
+        Some(&format!(
+            "document_id={} comment={}",
+            doc.id,
+            comment.trim()
+        )),
+    )?;
+    Ok(doc)
+}
+
+#[tauri::command]
+pub fn reject_fund_document(
+    id: i64,
+    comment: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<FundDocument, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let doc = cashier::reject_fund_document(&conn, &current, id, &comment)?;
+    db::log_operation(
+        &conn,
+        "reject_fund_document",
+        &format!(
+            "驳回{} {}",
+            cashier::fund_document_type_label(&doc.document_type),
+            doc.document_no
+        ),
+        &cashier::current_operator_name(&conn, &current),
+        Some(&format!(
+            "document_id={} comment={}",
+            doc.id,
+            comment.trim()
+        )),
+    )?;
+    Ok(doc)
+}
+
+#[tauri::command]
+pub fn withdraw_fund_document(
+    id: i64,
+    comment: Option<String>,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<FundDocument, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let doc = cashier::withdraw_fund_document(&conn, &current, id, comment.as_deref())?;
+    db::log_operation(
+        &conn,
+        "withdraw_fund_document",
+        &format!(
+            "撤回{} {} 至草稿",
+            cashier::fund_document_type_label(&doc.document_type),
+            doc.document_no
+        ),
+        &cashier::current_operator_name(&conn, &current),
+        Some(&format!("document_id={}", doc.id)),
+    )?;
+    Ok(doc)
+}
+
+#[tauri::command]
+pub fn void_fund_document(
+    id: i64,
+    comment: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<FundDocument, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let doc = cashier::void_fund_document(&conn, &current, id, &comment)?;
+    db::log_operation(
+        &conn,
+        "void_fund_document",
+        &format!(
+            "作废{} {}",
+            cashier::fund_document_type_label(&doc.document_type),
+            doc.document_no
+        ),
+        &cashier::current_operator_name(&conn, &current),
+        Some(&format!(
+            "document_id={} comment={}",
+            doc.id,
+            comment.trim()
+        )),
+    )?;
+    Ok(doc)
+}
+
+/// 结算：收款/转账/借款核销单 approved 后直接结算；付款/借款单经付款批次标记付款后从
+/// batched 结算（spec 5.1）。凭证联动由 Task 8 挂接。
+#[tauri::command]
+pub fn settle_fund_document(
+    id: i64,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<FundDocument, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let doc = cashier::settle_fund_document(&conn, &current, id)?;
+    db::log_operation(
+        &conn,
+        "settle_fund_document",
+        &format!(
+            "结算{} {} 金额 {:.2}",
+            cashier::fund_document_type_label(&doc.document_type),
+            doc.document_no,
+            doc.amount
+        ),
+        &cashier::current_operator_name(&conn, &current),
+        Some(&format!("document_id={}", doc.id)),
+    )?;
+    Ok(doc)
+}
+
+/// 冲正（settled → reversed）：创建相反方向冲正单（立即结算）并将原单置为已冲正，
+/// 原因必填；原单月份与冲正月份均须未月结（spec 5.1）。
+#[tauri::command]
+pub fn reverse_fund_document(
+    data: FundDocumentReverseInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<FundDocument, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let reversal = cashier::reverse_fund_document(&conn, &current, &data)?;
+    db::log_operation(
+        &conn,
+        "reverse_fund_document",
+        &format!(
+            "冲正资金单据（原单ID={}）生成冲正单 {} 金额 {:.2}",
+            data.document_id, reversal.document_no, reversal.amount
+        ),
+        &cashier::current_operator_name(&conn, &current),
+        Some(&format!(
+            "document_id={} reversal_id={} comment={}",
+            data.document_id,
+            reversal.id,
+            data.comment.trim()
+        )),
+    )?;
+    Ok(reversal)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

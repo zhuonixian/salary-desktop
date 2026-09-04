@@ -1191,7 +1191,6 @@ pub struct OperatorProfileInput {
     pub remark: Option<String>,
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 审批事件（追加式，不允许 UPDATE/DELETE；报销单与资金单据共用）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApprovalEvent {
@@ -1206,7 +1205,6 @@ pub struct ApprovalEvent {
     pub created_at: String,
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 资金单据（spec 4.4）：收款/付款/内部转账/员工借款/借款核销/冲正。
 /// 状态只能通过领域层命令（submit/approve/reject/withdraw/void/mark_batched/settle/reverse）
 /// 变更，前端不得直接编辑状态字段。
@@ -1243,7 +1241,6 @@ pub struct FundDocument {
     pub updated_at: String,
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 资金单据录入/更新入参（id=Some 时更新已有单据；仅草稿可编辑）。
 /// 不含 status 等状态字段：状态只能经状态机命令流转，无法由字段更新绕过。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1264,7 +1261,6 @@ pub struct FundDocumentInput {
     pub counter_account_code: Option<String>,
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 资金单据查询条件
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FundDocumentQuery {
@@ -1274,9 +1270,10 @@ pub struct FundDocumentQuery {
     pub partner_id: Option<i64>,
     pub employee_id: Option<i64>,
     pub keyword: Option<String>,
+    /// 资金账户筛选：来源或目标任一侧命中即返回
+    pub account_id: Option<i64>,
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 资金单据详情：单据 + 按时间升序的完整审批轨迹（可重放历史）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FundDocumentDetail {
@@ -1284,7 +1281,6 @@ pub struct FundDocumentDetail {
     pub events: Vec<ApprovalEvent>,
 }
 
-#[allow(dead_code)] // TODO(Task 7 命令暴露后移除)
 /// 冲正入参：在开放月份创建相反方向冲正单（原单月份与冲正月份均须未月结）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FundDocumentReverseInput {

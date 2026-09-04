@@ -72,6 +72,16 @@ const operationTypeLabels: Record<string, string> = {
   get_current_operator: '查询当前操作人',
   add_business_attachment: '上传业务附件',
   delete_business_attachment: '删除业务附件',
+  set_maker_checker_enabled: '设置经办复核开关',
+  create_fund_document: '新建资金单据',
+  update_fund_document: '修改资金单据',
+  submit_fund_document: '提交资金单据',
+  approve_fund_document: '审批通过资金单据',
+  reject_fund_document: '驳回资金单据',
+  withdraw_fund_document: '撤回资金单据',
+  void_fund_document: '作废资金单据',
+  settle_fund_document: '结算资金单据',
+  reverse_fund_document: '冲正资金单据',
 };
 
 const getOperationLabel = (value?: string) =>

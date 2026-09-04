@@ -1115,3 +1115,126 @@ export const ATTACHMENT_ENTITY_TYPE_LABEL: Record<string, string> = {
   fund_document: '资金单据',
   reimbursement_claim: '报销单',
 };
+
+// ==================== 资金单据与审批（第七阶段 Task 7） ====================
+
+// 字段与后端 src-tauri/src/models.rs ApprovalEvent / FundDocument / FundDocumentInput /
+// FundDocumentQuery / FundDocumentDetail / FundDocumentReverseInput 1:1 对齐（serde snake_case）。
+// 入参不含状态字段：状态只能经状态机命令流转（submit/approve/reject/withdraw/void/settle/reverse），
+// 前端按钮完全由后端返回的 status 决定。
+
+export interface ApprovalEvent {
+  id: number;
+  entity_type: string;
+  entity_id: number;
+  action: string;
+  from_status: string | null;
+  to_status: string | null;
+  operator_id: number | null;
+  comment: string | null;
+  created_at: string;
+}
+
+export interface FundDocument {
+  id: number;
+  document_no: string;
+  document_type: string;
+  belong_month: string;
+  document_date: string;
+  amount: number;
+  summary: string;
+  department: string | null;
+  expense_type: string | null;
+  remark: string | null;
+  partner_id: number | null;
+  employee_id: number | null;
+  source_account_id: number | null;
+  target_account_id: number | null;
+  counter_account_code: string | null;
+  status: string;
+  payment_batch_id: number | null;
+  reversal_of_id: number | null;
+  submitted_by: number | null;
+  submitted_at: string | null;
+  approved_by: number | null;
+  approved_at: string | null;
+  settled_by: number | null;
+  settled_at: string | null;
+  voided_by: number | null;
+  voided_at: string | null;
+  created_by: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FundDocumentInput {
+  id?: number;
+  document_type: string;
+  belong_month: string;
+  document_date: string;
+  amount: number;
+  summary: string;
+  department?: string | null;
+  expense_type?: string | null;
+  remark?: string | null;
+  partner_id?: number | null;
+  employee_id?: number | null;
+  source_account_id?: number | null;
+  target_account_id?: number | null;
+  counter_account_code?: string | null;
+}
+
+export interface FundDocumentQuery {
+  belong_month?: string;
+  document_type?: string;
+  status?: string;
+  partner_id?: number;
+  employee_id?: number;
+  keyword?: string;
+  /** 资金账户筛选：来源或目标任一侧命中即返回 */
+  account_id?: number;
+}
+
+export interface FundDocumentDetail {
+  document: FundDocument;
+  events: ApprovalEvent[];
+}
+
+export interface FundDocumentReverseInput {
+  document_id: number;
+  belong_month: string;
+  document_date: string;
+  comment: string;
+}
+
+// 枚举取值与后端 cashier.rs FUND_DOCUMENT_TYPES / FUND_DOCUMENT_STATUSES 一致
+export const FUND_DOCUMENT_TYPE_LABEL: Record<string, string> = {
+  receipt: '收款单',
+  payment: '付款单',
+  transfer: '内部转账单',
+  advance: '员工借款单',
+  advance_settlement: '借款核销单',
+  reversal: '冲正单',
+};
+
+export const FUND_DOCUMENT_STATUS_LABEL: Record<string, string> = {
+  draft: '草稿',
+  submitted: '已提交',
+  approved: '已审批',
+  rejected: '已驳回',
+  batched: '已进批次',
+  settled: '已结算',
+  void: '已作废',
+  reversed: '已冲正',
+};
+
+export const APPROVAL_ACTION_LABEL: Record<string, string> = {
+  submit: '提交',
+  approve: '审批通过',
+  reject: '驳回',
+  withdraw: '撤回',
+  void: '作废',
+  batch: '进入付款批次',
+  settle: '结算',
+  reverse: '冲正',
+};

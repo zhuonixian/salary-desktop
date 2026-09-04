@@ -81,3 +81,26 @@
 - 未完成/风险：localStorage 被禁用时只保持当前会话；Windows GUI 未验收。
 - 下轮入口：Task 2 DDL、模型与安全迁移框架。
 - 提交：未提交。
+
+### 2026-09-05 — 7A 基础底座（Task 2-5）完成
+
+- 目标：资金领域 DDL/迁移、cashier 骨架与基础资料 CRUD、基础资料前端与操作人、通用加密附件。
+- 完成：Task 2 五表+三列迁移框架（147 测试）；Task 3 cashier.rs CRUD+11 命令+操作人会话（158，含 fix：停用操作人署名时序）；Task 4 基础资料页/OperatorContext/导航拦截（前端三验+浏览器实测）；Task 5 加密附件底座+发票原语复用重构（167 测试）。每任务经独立实现者+审查者双裁决。
+- 关键决策：DDL 入迁移事务满足 spec 9.1；默认账户停用拦截；基础资料尽力署名；附件归档 attachments/{entity_type}/{belong_month}/。
+- 修改文件：db.rs、models.rs、cashier.rs（新）、commands.rs、lib.rs、security.rs、invoice.rs、data_safety.rs、legacy_migration.rs；前端 FundAccounts.tsx（新）、OperatorContext.tsx（新）、types/api/App/OperationLogs/bootstrap。
+- 测试：cargo 167 passed；tsc/lint/build 全过。
+- Windows 手工验收：未执行（批次发布门禁继续挂账）。
+- 未完成/风险：FK 门禁全库启动阻断待复议；operator 筛选前端过滤；附件 add 实体门禁待 Task 6；Task 0 Windows 验收。
+- 下轮入口：Task 6 资金单、状态机和审批事件。
+- 提交：8cf0039..c55ef83（7cb48c8/32a23d0/30d0823/2b05f1d/c55ef83）。
+
+### 2026-09-05 — 7B Task 7：收付款单命令、API 与页面完成
+
+- 目标：暴露 Task 6 资金单领域层为 Tauri 命令（含审批事件查询与 maker_checker 设置），新增收付款单前端页面。
+- 完成：cashier.rs/models.rs 全部 TODO(Task 7) dead_code 标记销项（mark_document_batched 改挂 TODO(Task 9)，批次场景内用）；commands.rs 新增 14 命令（get_fund_documents/get_fund_document_detail/list_approval_events/get·set_maker_checker_enabled/create·update·submit·approve·reject·withdraw·void·settle·reverse_fund_document），get 类不记日志、写命令 log_operation 当前操作人署名；前端 FundDocuments.tsx（收款/付款/内部转账/全部单据 Tab + 月份(全局)/状态/往来对象/账户/关键字筛选 + 新建编辑弹窗按类型动态约束账户方向与往来对象（表单无状态字段）+ 行操作按钮完全由后端状态驱动 + 详情 Drawer（Descriptions + 审批时间线 + 附件上传/列表/删除/预览）+ 冲正弹窗原因必填 + 工具栏"审批设置" maker_checker 开关）；App.tsx 资金出纳组新增"收付款单"路由菜单；OperationLogs 补 10 个写命令中文映射（get 类不映射避免死键）。
+- 关键决策：FundDocumentQuery 新增 account_id 筛选（brief 要求账户筛选而后端无此参数，SQL 拼接 source/target OR 命中，同时给非法类型/状态入参加 ensure_in_list 前置校验）；mock 内存态轻量状态机演示完整草稿→提交→审批→结算→冲正；浏览器 headless 实测通过（解锁→四 Tab→审批流→maker_checker 自审批拦截中文提示→冲正单生成+时间线+原因，无 JS 报错）。
+- 修改文件：cashier.rs、models.rs、commands.rs、lib.rs；types/index.ts、api/index.ts（含 mock）、pages/FundDocuments.tsx（新）、App.tsx、pages/OperationLogs.tsx。
+- 测试：cargo 179 passed（与基线持平，无新增测试对象）；cargo check 警告维持基线 5 个；tsc/lint/build 全过。
+- 未完成/风险：付款类单据审批后仅显示"待付款批次"提示（批次动作归 Task 9）；结算/冲正凭证联动为占位文案（Task 8 落地后补跳转）；附件预览在浏览器 mock 返回空路径走"暂不支持"分支（桌面端走 convertFileSrc）；冲正弹窗月份预填依赖 antd setFieldsValue 先于挂载（实测有效，与 create 弹窗同模式）。
+- 下轮入口：Task 8 资金单自动凭证与事务冲正（必须承接：冲正/结算凭证生成移入事务内）。
+- 提交：6210a7c..HEAD（本任务单提交）。
