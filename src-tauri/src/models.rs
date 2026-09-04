@@ -1077,8 +1077,8 @@ pub struct SocialInsuranceProfileInput {
 }
 
 // ==================== 第七阶段：资金账户 / 往来单位 / 操作人 / 审批事件 / 业务附件 ====================
-// 基础资料模型已由 Task 3（cashier.rs 领域模块）接入；审批事件/业务附件模型
-// 由 Task 5/6 接入，接入前临时 allow(dead_code)。
+// 基础资料与业务附件模型已由 Task 3/5（cashier.rs 领域模块）接入；审批事件模型
+// 由 Task 6 接入，接入前临时 allow(dead_code)。
 
 /// 资金账户（银行 / 现金 / 第三方支付）
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1220,7 +1220,6 @@ pub struct ApprovalEventInput {
 }
 
 /// 业务附件（通用挂接：实体类型 + 实体 ID；文件归档 attachments/ 并可 AES-GCM 加密）
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BusinessAttachment {
     pub id: i64,
@@ -1235,8 +1234,7 @@ pub struct BusinessAttachment {
     pub created_at: String,
 }
 
-/// 业务附件登记入参
-#[allow(dead_code)]
+/// 业务附件上传入参（file_path 为源文件绝对路径；encrypted/file_size/uploaded_by 由后端裁决）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BusinessAttachmentInput {
     pub entity_type: String,

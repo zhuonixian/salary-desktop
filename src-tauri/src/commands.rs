@@ -1238,10 +1238,13 @@ pub fn restore_database(
 
 #[tauri::command]
 pub fn verify_database(
+    app: tauri::AppHandle,
     state: tauri::State<'_, Mutex<Connection>>,
 ) -> Result<DataSafetyCheckResult, AppError> {
+    let app_data_dir = app_data_dir(&app)?;
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
-    let result = data_safety::verify_database(&conn)?;
+    // 传入 app_data_dir：体检同时覆盖附件目录一致性（孤儿文件/缺失文件，spec 4.6）
+    let result = data_safety::verify_database(&conn, Some(&app_data_dir))?;
     db::log_operation(
         &conn,
         "verify_database",
@@ -2103,6 +2106,77 @@ pub fn get_current_operator(
 ) -> Result<Option<OperatorProfile>, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     Ok(cashier::get_current_operator(&conn, &current)?)
+}
+
+// ==================== Cashier Commands（第七阶段 通用加密业务附件） ====================
+
+/// 上传业务附件：源文件经文件对话框选取，后端归档到 attachments/ 并按 DEK 状态加密落库。
+/// 须已选择当前操作人（本地署名）；预览走 `get_decrypted_attachment_url`。
+#[tauri::command]
+pub fn add_business_attachment(
+    data: BusinessAttachmentInput,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Mutex<Connection>>,
+    sec: tauri::State<'_, crate::security::SecurityState>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<BusinessAttachment, AppError> {
+    let app_data_dir = app_data_dir(&app)?;
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let att = cashier::add_business_attachment(&conn, sec.inner(), &current, &app_data_dir, &data)?;
+    db::log_operation(
+        &conn,
+        "add_business_attachment",
+        &format!(
+            "上传附件 {}（{}，实体 {} ID={}）",
+            att.file_name,
+            if att.encrypted {
+                "已加密"
+            } else {
+                "未加密"
+            },
+            att.entity_type,
+            att.entity_id
+        ),
+        &cashier::current_operator_name(&conn, &current),
+        Some(&format!(
+            "attachment_id={} file_size={:?}",
+            att.id, att.file_size
+        )),
+    )?;
+    Ok(att)
+}
+
+#[tauri::command]
+pub fn list_business_attachments(
+    entity_type: String,
+    entity_id: i64,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<BusinessAttachment>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(cashier::list_business_attachments(
+        &conn,
+        &entity_type,
+        entity_id,
+    )?)
+}
+
+/// 删除业务附件（未提交实体的附件才允许删除；已提交须先反审批/驳回）。返回被删原文件名。
+#[tauri::command]
+pub fn delete_business_attachment(
+    id: i64,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<String, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let file_name = cashier::delete_business_attachment(&conn, &current, id)?;
+    db::log_operation(
+        &conn,
+        "delete_business_attachment",
+        &format!("删除附件 {file_name}（附件ID={id}）"),
+        &cashier::current_operator_name(&conn, &current),
+        None,
+    )?;
+    Ok(file_name)
 }
 
 #[cfg(test)]

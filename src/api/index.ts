@@ -82,6 +82,8 @@ import type {
   BusinessPartnerQuery,
   OperatorProfile,
   OperatorProfileInput,
+  BusinessAttachment,
+  BusinessAttachmentInput,
 } from '@/types';
 
 type BackendDashboardSummary = {
@@ -283,6 +285,9 @@ const mockOperatorProfiles: OperatorProfile[] = [
 // 预览模式下的当前操作人（内存态，模拟后端 CurrentOperatorState 会话）
 let mockCurrentOperatorId: number | null = 1;
 
+// 预览模式下的业务附件（内存态，模拟 business_attachments 表）
+const mockBusinessAttachments: BusinessAttachment[] = [];
+
 const mockTauriResponse = (command: string, args?: Record<string, unknown>): unknown => {
   switch (command) {
     case 'get_fund_accounts':
@@ -374,6 +379,40 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
     }
     case 'get_current_operator':
       return mockOperatorProfiles.find((p) => p.id === mockCurrentOperatorId && p.is_active) ?? null;
+    // 业务附件 mock：内存态回显，字段结构与后端 BusinessAttachment 一致
+    case 'add_business_attachment': {
+      const data = args?.data as BusinessAttachmentInput | undefined;
+      const saved: BusinessAttachment = {
+        id: Date.now(),
+        entity_type: data?.entity_type ?? 'fund_document',
+        entity_id: data?.entity_id ?? 0,
+        file_name: data?.file_name || data?.file_path?.split('/').pop() || 'attachment.bin',
+        file_path: data?.file_path ?? '',
+        encrypted: true,
+        file_size: data?.file_size ?? 0,
+        belong_month: data?.belong_month ?? null,
+        uploaded_by: '张会计',
+        created_at: new Date().toISOString(),
+      };
+      mockBusinessAttachments.push(saved);
+      return saved;
+    }
+    case 'list_business_attachments':
+      return mockBusinessAttachments.filter(
+        (a) =>
+          a.entity_type === (args?.entityType as string) &&
+          a.entity_id === Number(args?.entityId ?? 0),
+      );
+    case 'delete_business_attachment': {
+      const id = Number(args?.id ?? 0);
+      const idx = mockBusinessAttachments.findIndex((a) => a.id === id);
+      if (idx < 0) throw new Error(`附件ID=${id}未找到`);
+      const [removed] = mockBusinessAttachments.splice(idx, 1);
+      return removed.file_name;
+    }
+    case 'get_decrypted_attachment_url':
+      // 浏览器预览无本地文件系统：返回空串，页面按"预览不可用"处理
+      return '';
     // 预览模式跳过启动密码/锁屏（仅在非 Tauri 环境生效），让业务页面可打开。
     case 'is_security_initialized':
       return true;
@@ -1532,4 +1571,29 @@ export async function setCurrentOperator(operatorId: number): Promise<OperatorPr
 
 export async function getCurrentOperator(): Promise<OperatorProfile | null> {
   return invoke<OperatorProfile | null>('get_current_operator');
+}
+
+// ==================== 通用加密业务附件（第七阶段 Task 5） ====================
+// invoke 参数 key 用 camelCase（Tauri 2 自动映射 snake_case），与本文件既有约定一致。
+// add 入参 file_path 为源文件绝对路径；返回体的 file_path 为归档路径（encrypted 由后端按
+// DEK 状态裁决）。getDecryptedAttachmentUrl 返回临时解密文件绝对路径，渲染时用
+// convertFileSrc() 包一层（与发票预览 getDecryptedInvoiceUrl 同模式）。
+
+export async function addBusinessAttachment(data: BusinessAttachmentInput): Promise<BusinessAttachment> {
+  return invoke<BusinessAttachment>('add_business_attachment', { data });
+}
+
+export async function listBusinessAttachments(
+  entityType: string,
+  entityId: number,
+): Promise<BusinessAttachment[]> {
+  return invoke<BusinessAttachment[]>('list_business_attachments', { entityType, entityId });
+}
+
+export async function deleteBusinessAttachment(id: number): Promise<string> {
+  return invoke<string>('delete_business_attachment', { id });
+}
+
+export async function getDecryptedAttachmentUrl(attachmentId: number): Promise<string> {
+  return invoke<string>('get_decrypted_attachment_url', { attachmentId });
 }

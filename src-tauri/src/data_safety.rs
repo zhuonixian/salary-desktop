@@ -17,6 +17,8 @@ use crate::security::{self, SecurityState, BACKUP_MAGIC};
 
 const DATABASE_FILE: &str = "salary.db";
 const INVOICE_DIR: &str = "invoices";
+/// 业务附件归档目录（第七阶段）：随备份/恢复/体检一并覆盖（spec 4.6）
+const ATTACHMENT_DIR: &str = "attachments";
 const MANIFEST_FILE: &str = "backup_manifest.json";
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -26,8 +28,12 @@ struct BackupManifest {
     created_at: String,
     database_file: String,
     invoice_dir: String,
+    #[serde(default)]
+    attachment_dir: Option<String>,
     database_size: u64,
     invoice_dir_size: u64,
+    #[serde(default)]
+    attachment_dir_size: Option<u64>,
 }
 
 pub fn get_status(conn: &Connection, app_data_dir: &Path) -> AppResult<DataSafetyStatus> {
@@ -134,6 +140,8 @@ pub fn restore_database(
     let backup_database_path = effective_backup_dir.join(DATABASE_FILE);
     let invoice_dir = app_data_dir.join(INVOICE_DIR);
     let backup_invoice_dir = effective_backup_dir.join(INVOICE_DIR);
+    let attachment_dir = app_data_dir.join(ATTACHMENT_DIR);
+    let backup_attachment_dir = effective_backup_dir.join(ATTACHMENT_DIR);
 
     conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
     let old_conn = std::mem::replace(conn, Connection::open_in_memory()?);
@@ -147,6 +155,15 @@ pub fn restore_database(
         copy_dir_recursive(&backup_invoice_dir, &invoice_dir)?;
     } else {
         fs::create_dir_all(&invoice_dir)?;
+    }
+    // 业务附件目录：与发票目录同规则恢复（旧版备份无 attachments/ 时建空目录兜底）
+    if attachment_dir.exists() {
+        fs::remove_dir_all(&attachment_dir)?;
+    }
+    if backup_attachment_dir.exists() {
+        copy_dir_recursive(&backup_attachment_dir, &attachment_dir)?;
+    } else {
+        fs::create_dir_all(&attachment_dir)?;
     }
 
     let app_data_dir_str = app_data_dir.to_string_lossy().to_string();
@@ -299,7 +316,14 @@ fn unpack_payload(payload: &[u8], out_dir: &Path) -> AppResult<()> {
     Ok(())
 }
 
-pub fn verify_database(conn: &Connection) -> AppResult<DataSafetyCheckResult> {
+/// 数据体检：数据库完整性 + 必备表存在性 +（提供 app_data_dir 时）附件目录一致性。
+/// 附件检查覆盖双向偏差，均为 warning 级（不影响 ok 结论，供用户清理/补救）：
+/// - 孤儿文件：磁盘上有、business_attachments 无引用（含 .enc.tmp 残留）；
+/// - 缺失文件：business_attachments 有记录、磁盘上没有（未随备份恢复/被手动删除）。
+pub fn verify_database(
+    conn: &Connection,
+    app_data_dir: Option<&Path>,
+) -> AppResult<DataSafetyCheckResult> {
     let checked_at = Utc::now().to_rfc3339();
     let integrity_check: String = conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
     let mut messages = Vec::new();
@@ -318,6 +342,7 @@ pub fn verify_database(conn: &Connection) -> AppResult<DataSafetyCheckResult> {
         "reimbursement_claims",
         "operation_logs",
         "app_settings",
+        "business_attachments",
     ];
     for table in required_tables {
         if table_exists(conn, table)? {
@@ -325,6 +350,10 @@ pub fn verify_database(conn: &Connection) -> AppResult<DataSafetyCheckResult> {
         } else {
             messages.push(format!("表 {table} 缺失"));
         }
+    }
+
+    if let Some(dir) = app_data_dir {
+        check_attachment_consistency(conn, dir, &mut messages)?;
     }
 
     Ok(DataSafetyCheckResult {
@@ -336,6 +365,62 @@ pub fn verify_database(conn: &Connection) -> AppResult<DataSafetyCheckResult> {
         integrity_check,
         messages,
     })
+}
+
+/// 附件目录一致性体检（spec 4.6：数据体检必须覆盖 attachments/）。
+fn check_attachment_consistency(
+    conn: &Connection,
+    app_data_dir: &Path,
+    messages: &mut Vec<String>,
+) -> AppResult<()> {
+    let dir = app_data_dir.join(ATTACHMENT_DIR);
+    if !dir.exists() {
+        return Ok(()); // 从未上传过附件：无可体检内容
+    }
+
+    let referenced: Vec<String> = {
+        let mut stmt = conn.prepare("SELECT file_path FROM business_attachments")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+
+    let mut on_disk: Vec<String> = Vec::new();
+    collect_files_light(&dir, &mut on_disk)?;
+
+    let orphans = on_disk.iter().filter(|p| !referenced.contains(*p)).count();
+    let missing = referenced
+        .iter()
+        .filter(|p| !Path::new(p).is_file())
+        .count();
+
+    if orphans > 0 {
+        messages.push(format!(
+            "附件目录发现 {orphans} 个孤儿文件（数据库无引用，含加密残留 .enc.tmp，可手动清理）"
+        ));
+    }
+    if missing > 0 {
+        messages.push(format!(
+            "{missing} 个附件记录对应的文件缺失（可能未随备份恢复或被手动删除）"
+        ));
+    }
+    if orphans == 0 && missing == 0 {
+        messages.push("附件目录一致性检查通过".to_string());
+    }
+    Ok(())
+}
+
+/// 轻量递归收集目录下全部文件绝对路径（不读文件内容，区别于打包用 collect_files）。
+fn collect_files_light(dir: &Path, out: &mut Vec<String>) -> AppResult<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files_light(&path, out)?;
+        } else {
+            out.push(path.to_string_lossy().to_string());
+        }
+    }
+    Ok(())
 }
 
 pub fn compact_database(conn: &Connection) -> AppResult<bool> {
@@ -399,16 +484,28 @@ fn create_backup(
         fs::create_dir_all(&invoice_backup_dir)?;
     }
 
+    // 业务附件目录（第七阶段）：与发票目录同规则打包
+    let attachment_dir = app_data_dir.join(ATTACHMENT_DIR);
+    let attachment_backup_dir = backup_dir.join(ATTACHMENT_DIR);
+    if attachment_dir.exists() {
+        copy_dir_recursive(&attachment_dir, &attachment_backup_dir)?;
+    } else {
+        fs::create_dir_all(&attachment_backup_dir)?;
+    }
+
     let database_size = file_size(&database_backup_path);
     let invoice_dir_size = dir_size(&invoice_backup_dir)?;
+    let attachment_dir_size = dir_size(&attachment_backup_dir)?;
     let manifest = BackupManifest {
         app: "salary-desktop".to_string(),
         version: 1,
         created_at: created_at.clone(),
         database_file: DATABASE_FILE.to_string(),
         invoice_dir: INVOICE_DIR.to_string(),
+        attachment_dir: Some(ATTACHMENT_DIR.to_string()),
         database_size,
         invoice_dir_size,
+        attachment_dir_size: Some(attachment_dir_size),
     };
     let manifest_path = backup_dir.join(MANIFEST_FILE);
     fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
@@ -733,11 +830,142 @@ mod tests {
         fs::create_dir_all(&app_dir).unwrap();
         let conn = db::init_db(&app_dir.to_string_lossy()).unwrap();
 
-        let result = verify_database(&conn).unwrap();
+        let result = verify_database(&conn, Some(&app_dir)).unwrap();
         assert!(result.ok);
         assert_eq!(result.integrity_check, "ok");
         assert!(result.messages.iter().any(|m| m.contains("employees")));
 
         let _ = fs::remove_dir_all(app_dir);
+    }
+
+    /// 附件体检：孤儿文件（磁盘有/DB 无引用）与缺失文件（DB 有记录/磁盘无文件）都要报告。
+    #[test]
+    fn test_verify_database_reports_attachment_orphans_and_missing() {
+        let app_dir = temp_dir("verify-att-app");
+        fs::create_dir_all(&app_dir).unwrap();
+        let conn = db::init_db(&app_dir.to_string_lossy()).unwrap();
+
+        // 磁盘上：一个被 DB 引用的文件 + 一个孤儿文件
+        let att_dir = app_dir
+            .join(ATTACHMENT_DIR)
+            .join("fund_document")
+            .join("2026-08");
+        fs::create_dir_all(&att_dir).unwrap();
+        let referenced = att_dir.join("20260905120000_kept.pdf");
+        fs::write(&referenced, b"kept").unwrap();
+        let orphan = att_dir.join("20260905120001_orphan.pdf");
+        fs::write(&orphan, b"orphan").unwrap();
+        fs::write(att_dir.join("leftover.enc.tmp"), b"leftover").unwrap();
+
+        conn.execute(
+            "INSERT INTO business_attachments
+                (entity_type, entity_id, file_name, file_path, encrypted, file_size, belong_month, uploaded_by, created_at)
+             VALUES ('fund_document', 1, 'kept.pdf', ?1, 1, 4, '2026-08', NULL, 'now')",
+            params![referenced.to_string_lossy()],
+        )
+        .unwrap();
+
+        let result = verify_database(&conn, Some(&app_dir)).unwrap();
+        assert!(result.ok, "孤儿/缺失文件是 warning，不改变 ok 结论");
+        let orphan_msg = result
+            .messages
+            .iter()
+            .find(|m| m.contains("孤儿文件"))
+            .expect("应报告孤儿文件");
+        assert!(
+            orphan_msg.contains('2'),
+            "孤儿文件应为 2 个（orphan + .enc.tmp 残留）: {orphan_msg}"
+        );
+        assert!(
+            !result.messages.iter().any(|m| m.contains("文件缺失")),
+            "文件都在磁盘上时不应报告缺失: {:?}",
+            result.messages
+        );
+
+        // 引用文件被删 → 报告缺失
+        fs::remove_file(&referenced).unwrap();
+        let result = verify_database(&conn, Some(&app_dir)).unwrap();
+        assert!(
+            result.messages.iter().any(|m| m.contains("文件缺失")),
+            "应报告缺失文件: {:?}",
+            result.messages
+        );
+
+        let _ = fs::remove_dir_all(app_dir);
+    }
+
+    /// 备份/恢复覆盖 attachments 目录（spec 4.6）：明文备份含附件文件，
+    /// 恢复后附件文件原样还原；DB 记录中的绝对路径随 dst 目录一致性由上层迁移保证，
+    /// 本测试验证文件层备份/恢复闭环。
+    #[test]
+    fn test_backup_and_restore_cover_attachments_dir() {
+        let (src_app, src_conn) = seed_app("att-src");
+        let backup_parent = temp_dir("att-backup");
+        let dst_app = temp_dir("att-dst");
+        fs::create_dir_all(&backup_parent).unwrap();
+        fs::create_dir_all(&dst_app).unwrap();
+        let sec = SecurityState::new();
+
+        // src 中放一个已登记的附件文件（内容加密与否不影响文件层备份）
+        let att_dir = src_app
+            .join(ATTACHMENT_DIR)
+            .join("fund_document")
+            .join("2026-08");
+        fs::create_dir_all(&att_dir).unwrap();
+        let att_file = att_dir.join("20260905120000_voucher.pdf");
+        fs::write(&att_file, b"cipher-bytes-here").unwrap();
+        src_conn
+            .execute(
+                "INSERT INTO business_attachments
+                    (entity_type, entity_id, file_name, file_path, encrypted, file_size, belong_month, uploaded_by, created_at)
+                 VALUES ('fund_document', 1, 'voucher.pdf', ?1, 1, 16, '2026-08', NULL, 'now')",
+                params![att_file.to_string_lossy()],
+            )
+            .unwrap();
+
+        // 明文备份：backup_dir 内必须含 attachments 树
+        let backup_result =
+            backup_database(&src_conn, &src_app, &backup_parent, false, &sec).unwrap();
+        let backup_dir = PathBuf::from(&backup_result.backup_dir);
+        let backed_up = backup_dir
+            .join(ATTACHMENT_DIR)
+            .join("fund_document")
+            .join("2026-08")
+            .join("20260905120000_voucher.pdf");
+        assert!(
+            backed_up.is_file(),
+            "备份必须包含 attachments 目录: {}",
+            backed_up.display()
+        );
+        assert_eq!(fs::read(&backed_up).unwrap(), b"cipher-bytes-here");
+
+        // dst 恢复：附件文件还原
+        let mut dst_conn = db::init_db(&dst_app.to_string_lossy()).unwrap();
+        let r = restore_database(&mut dst_conn, &dst_app, &backup_dir, &sec).unwrap();
+        assert!(r.success);
+        let restored = dst_app
+            .join(ATTACHMENT_DIR)
+            .join("fund_document")
+            .join("2026-08")
+            .join("20260905120000_voucher.pdf");
+        assert!(
+            restored.is_file(),
+            "恢复后附件文件必须还原: {}",
+            restored.display()
+        );
+        assert_eq!(fs::read(&restored).unwrap(), b"cipher-bytes-here");
+
+        // 恢复后的 DB 中附件记录一致
+        let check_conn = Connection::open(dst_app.join(DATABASE_FILE)).unwrap();
+        let count: i64 = check_conn
+            .query_row("SELECT COUNT(*) FROM business_attachments", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1, "附件记录应随备份恢复");
+
+        let _ = fs::remove_dir_all(src_app);
+        let _ = fs::remove_dir_all(backup_parent);
+        let _ = fs::remove_dir_all(dst_app);
     }
 }

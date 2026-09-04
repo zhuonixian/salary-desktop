@@ -849,6 +849,293 @@ fn resolve_optional(input: &Option<String>, existing: Option<String>) -> Option<
     }
 }
 
+// ==================== 业务附件（通用加密附件底座） ====================
+
+/// 附件可挂接的实体类型（与 approval_events 实体维度一致：报销单 / 资金单据）。
+/// 本任务仅校验枚举；实体存在性校验：reimbursement_claim 可直接查表（见删除门禁），
+/// fund_document 由 Task 6（7B 资金单据）建表后补充存在性与状态校验。
+pub(crate) const ATTACHMENT_ENTITY_TYPES: &[&str] = &["fund_document", "reimbursement_claim"];
+
+/// 附件大小上限 20MB。spec 未明示；参照常见扫描件/合同 PDF 大小设定，
+/// 并避免附件随备份整树打包后备份包体积失控。
+pub(crate) const ATTACHMENT_MAX_FILE_SIZE: i64 = 20 * 1024 * 1024;
+
+/// 报销单附件允许删除/变更的状态（spec 4.6 + 第 8 节：删除仅允许未提交实体；
+/// 已提交附件只允许通过反审批后变更）。draft=未提交、rejected=已驳回、void=已作废。
+const REIMBURSEMENT_ATTACHMENT_EDITABLE_STATUSES: &[&str] = &["draft", "rejected", "void"];
+
+fn validate_attachment_entity_type(entity_type: &str) -> AppResult<()> {
+    if !ATTACHMENT_ENTITY_TYPES.contains(&entity_type) {
+        return Err(AppError::InvalidParam(format!(
+            "不支持的附件实体类型: {entity_type}（允许: {}）",
+            ATTACHMENT_ENTITY_TYPES.join("/")
+        )));
+    }
+    Ok(())
+}
+
+/// 附件归档目录：`{app_data_dir}/attachments/{entity_type}/{belong_month}/`（spec 4.6）。
+/// belong_month 缺失或含非法字符时回退 `unclassified`（与发票归档同规则）。
+fn attachment_archive_dir(
+    app_data_dir: &std::path::Path,
+    entity_type: &str,
+    belong_month: Option<&str>,
+) -> std::path::PathBuf {
+    let raw_month = belong_month.unwrap_or("unclassified");
+    let sanitized: String = raw_month
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    let month = if sanitized.is_empty() {
+        "unclassified"
+    } else {
+        sanitized.as_str()
+    };
+    app_data_dir
+        .join("attachments")
+        .join(entity_type)
+        .join(month)
+}
+
+/// 上传（登记）业务附件：复制源文件到 attachments/ 归档目录 → DEK 已加载时就地加密
+/// （先写 `.enc.tmp` 再原子 rename，与发票图片同原语、同密文格式）→ 写 business_attachments。
+/// 归档/加密/落库任一步失败都补偿清理已产生的文件，不留孤儿文件。
+///
+/// 入参 `file_path` 为源文件绝对路径（前端文件对话框选取）；`file_name` 为空时取源文件名；
+/// `encrypted`/`file_size`/`uploaded_by` 由后端裁决（覆盖入参值）。
+///
+/// TODO(Task 6): fund_documents 建表后，在此补充实体存在性校验（当前仅校验实体类型枚举）。
+pub fn add_business_attachment(
+    conn: &Connection,
+    sec: &crate::security::SecurityState,
+    current: &CurrentOperatorState,
+    app_data_dir: &std::path::Path,
+    input: &BusinessAttachmentInput,
+) -> AppResult<BusinessAttachment> {
+    add_business_attachment_impl(conn, sec, current, app_data_dir, input, Utc::now())
+}
+
+/// impl 入口把"归档时间"参数化：文件名时间戳与 created_at 同源，且测试可注入固定时间
+/// 得到可预测的目标路径（补偿清理测试依赖此能力）。
+pub(crate) fn add_business_attachment_impl(
+    conn: &Connection,
+    sec: &crate::security::SecurityState,
+    current: &CurrentOperatorState,
+    app_data_dir: &std::path::Path,
+    input: &BusinessAttachmentInput,
+    now: chrono::DateTime<Utc>,
+) -> AppResult<BusinessAttachment> {
+    let (_, operator_name) = require_current_operator(conn, current)?;
+    validate_attachment_entity_type(&input.entity_type)?;
+    if input.entity_id <= 0 {
+        return Err(AppError::InvalidParam(
+            "附件实体 ID 非法（必须为正整数）".into(),
+        ));
+    }
+    let src = std::path::Path::new(input.file_path.trim());
+    if !src.is_file() {
+        return Err(AppError::InvalidParam(format!(
+            "源文件不存在: {}",
+            input.file_path
+        )));
+    }
+    let file_size = std::fs::metadata(src)?.len() as i64;
+    if file_size > ATTACHMENT_MAX_FILE_SIZE {
+        return Err(AppError::InvalidParam(format!(
+            "附件超过大小限制（最大 {}MB）",
+            ATTACHMENT_MAX_FILE_SIZE / 1024 / 1024
+        )));
+    }
+
+    // 原文件名：入参 file_name 为空时取源文件名，统一净化路径分隔符与特殊字符
+    let raw_name = if input.file_name.trim().is_empty() {
+        src.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "attachment.bin".to_string())
+    } else {
+        input.file_name.trim().to_string()
+    };
+    let sanitized = crate::invoice::sanitize_archive_filename(&raw_name);
+    let file_name = if sanitized.is_empty() {
+        "attachment.bin".to_string()
+    } else {
+        sanitized
+    };
+
+    let dir = attachment_archive_dir(
+        app_data_dir,
+        &input.entity_type,
+        input.belong_month.as_deref(),
+    );
+    std::fs::create_dir_all(&dir)?;
+    let mut target_path = dir.join(format!("{}_{}", now.format("%Y%m%d%H%M%S"), file_name));
+    // 同秒同名极小概率冲突（file_path UNIQUE）：存在即追加序号，既避免覆盖也避免落库冲突
+    let mut seq = 0u32;
+    while target_path.exists() {
+        seq += 1;
+        target_path = dir.join(format!(
+            "{}_{seq}_{}",
+            now.format("%Y%m%d%H%M%S"),
+            file_name
+        ));
+    }
+
+    // 归档 + 加密：任一步失败补偿清理，不留半成品/孤儿文件
+    let encrypt_result = (|| -> AppResult<i64> {
+        std::fs::copy(src, &target_path)?;
+        match sec.dek() {
+            Some(dek) => {
+                crate::security::encrypt_file_in_place(&target_path, &dek)?;
+                Ok(1)
+            }
+            None => Ok(0), // DEK 未加载：明文归档（与发票归档同语义，encrypted=0 如实记录）
+        }
+    })();
+    let encrypted = match encrypt_result {
+        Ok(flag) => flag,
+        Err(e) => {
+            let _ = std::fs::remove_file(&target_path);
+            let _ = std::fs::remove_file(target_path.with_extension("enc.tmp"));
+            return Err(e);
+        }
+    };
+
+    let created_at = now.to_rfc3339();
+    let insert = conn.execute(
+        "INSERT INTO business_attachments
+            (entity_type, entity_id, file_name, file_path, encrypted, file_size, belong_month, uploaded_by, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            input.entity_type,
+            input.entity_id,
+            file_name,
+            target_path.to_string_lossy(),
+            encrypted,
+            file_size,
+            input.belong_month,
+            operator_name,
+            created_at,
+        ],
+    );
+    if let Err(e) = insert {
+        // 补偿清理：DB 写入失败时删除已归档文件，保持 DB 与磁盘一致
+        let _ = std::fs::remove_file(&target_path);
+        let _ = std::fs::remove_file(target_path.with_extension("enc.tmp"));
+        return Err(e.into());
+    }
+
+    Ok(BusinessAttachment {
+        id: conn.last_insert_rowid(),
+        entity_type: input.entity_type.clone(),
+        entity_id: input.entity_id,
+        file_name,
+        file_path: target_path.to_string_lossy().to_string(),
+        encrypted: encrypted != 0,
+        file_size: Some(file_size),
+        belong_month: input.belong_month.clone(),
+        uploaded_by: Some(operator_name),
+        created_at,
+    })
+}
+
+/// 按实体列出附件（id 升序）。
+pub fn list_business_attachments(
+    conn: &Connection,
+    entity_type: &str,
+    entity_id: i64,
+) -> AppResult<Vec<BusinessAttachment>> {
+    validate_attachment_entity_type(entity_type)?;
+    let mut stmt = conn.prepare(
+        "SELECT id, entity_type, entity_id, file_name, file_path, encrypted, file_size,
+                belong_month, uploaded_by, created_at
+         FROM business_attachments
+         WHERE entity_type = ?1 AND entity_id = ?2
+         ORDER BY id",
+    )?;
+    let rows = stmt.query_map(params![entity_type, entity_id], map_attachment_row)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// 按主键取单个附件（删除门禁与预览命令共用）。
+pub(crate) fn get_business_attachment(conn: &Connection, id: i64) -> AppResult<BusinessAttachment> {
+    conn.query_row(
+        "SELECT id, entity_type, entity_id, file_name, file_path, encrypted, file_size,
+                belong_month, uploaded_by, created_at
+         FROM business_attachments WHERE id = ?1",
+        params![id],
+        map_attachment_row,
+    )
+    .optional()?
+    .ok_or_else(|| AppError::NotFound(format!("附件ID={id}未找到")))
+}
+
+fn map_attachment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BusinessAttachment> {
+    Ok(BusinessAttachment {
+        id: row.get(0)?,
+        entity_type: row.get(1)?,
+        entity_id: row.get(2)?,
+        file_name: row.get(3)?,
+        file_path: row.get(4)?,
+        encrypted: row.get::<_, i64>(5)? != 0,
+        file_size: row.get(6)?,
+        belong_month: row.get(7)?,
+        uploaded_by: row.get(8)?,
+        created_at: row.get(9)?,
+    })
+}
+
+/// 删除业务附件：先删磁盘文件（失败即中止，DB 行保留可重试），再删 DB 行。
+/// 实体状态门禁（spec：删除仅允许未提交实体；已提交附件须反审批后变更）：
+/// - reimbursement_claim：查 reimbursement_claims.status，仅未提交/已驳回/已作废可删；
+///   记录已不存在视为孤儿附件，允许清理。
+/// - fund_document：fund_documents 表由 Task 6 创建，届时补充状态校验（当前放行）。
+/// 返回被删除的原文件名（供命令层写审计）。
+pub fn delete_business_attachment(
+    conn: &Connection,
+    current: &CurrentOperatorState,
+    id: i64,
+) -> AppResult<String> {
+    require_current_operator(conn, current)?;
+    let att = get_business_attachment(conn, id)?;
+    ensure_attachment_entity_editable(conn, &att)?;
+
+    let path = std::path::Path::new(&att.file_path);
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    conn.execute(
+        "DELETE FROM business_attachments WHERE id = ?1",
+        params![id],
+    )?;
+    Ok(att.file_name)
+}
+
+/// 实体提交状态门禁：已提交（待审批/已审批）实体的附件禁止删除。
+fn ensure_attachment_entity_editable(conn: &Connection, att: &BusinessAttachment) -> AppResult<()> {
+    match att.entity_type.as_str() {
+        "reimbursement_claim" => {
+            let status: Option<String> = conn
+                .query_row(
+                    "SELECT status FROM reimbursement_claims WHERE id = ?1",
+                    params![att.entity_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            match status {
+                Some(s) if REIMBURSEMENT_ATTACHMENT_EDITABLE_STATUSES.contains(&s.as_str()) => {
+                    Ok(())
+                }
+                Some(s) => Err(AppError::General(format!(
+                    "报销单已提交审批（状态: {s}），附件须先反审批/驳回后才能删除"
+                ))),
+                None => Ok(()), // 实体记录已不存在：允许清理孤儿附件
+            }
+        }
+        // TODO(Task 6): fund_documents 建表后，按单据状态拦截已提交单据的附件删除
+        _ => Ok(()),
+    }
+}
+
 // ==================== 测试 ====================
 
 #[cfg(test)]
@@ -1448,5 +1735,370 @@ mod tests {
             actor, "李出纳",
             "save 路径停用当前操作人署名不应退化为 system"
         );
+    }
+
+    // ---------- 业务附件 ----------
+
+    use crate::security::{self, SecurityState};
+    use std::path::PathBuf;
+
+    /// 附件测试环境：全量财务库 + 已初始化安全态（DEK 已加载）+ 当前操作人 + 临时 app_dir。
+    fn attachment_env(name: &str) -> (Connection, CurrentOperatorState, SecurityState, PathBuf) {
+        let conn = setup_financial_db();
+        let current = CurrentOperatorState::new();
+        let sec = SecurityState::new();
+        security::setup(
+            &conn,
+            &sec,
+            "Abcd1234",
+            "RC-AAAA",
+            "你小学班主任姓什么？",
+            "王",
+        )
+        .unwrap();
+        let op = save_operator_profile(&conn, &current, &operator_input("张会计", "cashier"))
+            .unwrap()
+            .0;
+        set_current_operator(&conn, &current, op.id).unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "salary-att-{name}-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        (conn, current, sec, dir)
+    }
+
+    fn write_source_file(dir: &PathBuf, name: &str, content: &[u8]) -> String {
+        let path = dir.join(name);
+        std::fs::write(&path, content).unwrap();
+        path.to_string_lossy().to_string()
+    }
+
+    fn attachment_input(path: &str, entity_type: &str, entity_id: i64) -> BusinessAttachmentInput {
+        BusinessAttachmentInput {
+            entity_type: entity_type.into(),
+            entity_id,
+            file_name: String::new(), // 空 → 取源文件名
+            file_path: path.into(),
+            encrypted: None,
+            file_size: None,
+            belong_month: Some("2026-08".into()),
+            uploaded_by: None,
+        }
+    }
+
+    /// 加密上传：落盘文件必须是密文（含 nonce 前缀、非明文内容），DB 标志/署名/大小正确，
+    /// 解密 roundtrip 还原明文；归档路径符合 spec 4.6 目录结构。
+    #[test]
+    fn test_business_attachment_add_encrypted_and_roundtrip() {
+        let (conn, current, sec, app_dir) = attachment_env("add-enc");
+        let plain = b"payment voucher scan \x00\x01\xff attachment content";
+        let src = write_source_file(&app_dir, "voucher.pdf", plain);
+
+        let att = add_business_attachment(
+            &conn,
+            &sec,
+            &current,
+            &app_dir,
+            &attachment_input(&src, "fund_document", 1),
+        )
+        .unwrap();
+
+        assert!(att.encrypted, "DEK 已加载时附件必须加密");
+        assert!(
+            att.file_path.contains("attachments"),
+            "归档路径: {}",
+            att.file_path
+        );
+        assert!(att.file_path.contains(&format!(
+            "attachments{}fund_document{}2026-08",
+            std::path::MAIN_SEPARATOR,
+            std::path::MAIN_SEPARATOR
+        )));
+        assert!(
+            att.file_name.ends_with("voucher.pdf"),
+            "保留原文件名: {}",
+            att.file_name
+        );
+        assert_eq!(att.file_size, Some(plain.len() as i64));
+        assert_eq!(
+            att.uploaded_by.as_deref(),
+            Some("张会计"),
+            "署名取当前操作人"
+        );
+
+        // 落盘文件确为密文：长度 = 12(nonce) + 明文 + 16(tag)，且字节内容不等于明文
+        let stored = std::fs::read(&att.file_path).unwrap();
+        assert_eq!(stored.len(), plain.len() + 12 + 16);
+        assert_ne!(&stored[..], &plain[..]);
+        assert_ne!(
+            &stored[..12.min(stored.len())],
+            &plain[..12.min(plain.len())]
+        );
+
+        // 解密 roundtrip
+        let restored = app_dir.join("restored.bin");
+        security::decrypt_file(
+            std::path::Path::new(&att.file_path),
+            &restored,
+            &sec.dek().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&restored).unwrap(), plain);
+
+        // 列表按实体返回
+        let list = list_business_attachments(&conn, "fund_document", 1).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, att.id);
+        assert!(list_business_attachments(&conn, "fund_document", 2)
+            .unwrap()
+            .is_empty());
+
+        let _ = std::fs::remove_dir_all(&app_dir);
+    }
+
+    /// DEK 未加载（未解锁）时与发票归档同语义：明文归档，encrypted=0。
+    #[test]
+    fn test_business_attachment_add_without_dek_stays_plain() {
+        let (conn, current, _sec_loaded, app_dir) = attachment_env("add-plain");
+        let sec = SecurityState::new(); // 未 setup → 无 DEK
+        let plain = b"plain attachment";
+        let src = write_source_file(&app_dir, "note.txt", plain);
+
+        let att = add_business_attachment(
+            &conn,
+            &sec,
+            &current,
+            &app_dir,
+            &attachment_input(&src, "fund_document", 1),
+        )
+        .unwrap();
+
+        assert!(!att.encrypted);
+        assert_eq!(std::fs::read(&att.file_path).unwrap(), plain);
+
+        let _ = std::fs::remove_dir_all(&app_dir);
+    }
+
+    /// 错误路径：实体类型枚举、实体 ID、源文件存在性、大小上限、未选操作人。
+    #[test]
+    fn test_business_attachment_validation_errors() {
+        let (conn, current, sec, app_dir) = attachment_env("validation");
+        let src = write_source_file(&app_dir, "a.pdf", b"data");
+
+        // 实体类型不在枚举内
+        let err = add_business_attachment(
+            &conn,
+            &sec,
+            &current,
+            &app_dir,
+            &attachment_input(&src, "contract", 1),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("实体类型"), "非法实体类型应拦截: {err}");
+
+        // 实体 ID 非法
+        let err = add_business_attachment(
+            &conn,
+            &sec,
+            &current,
+            &app_dir,
+            &attachment_input(&src, "fund_document", 0),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("实体 ID"), "实体 ID 应拦截: {err}");
+
+        // 源文件不存在
+        let err = add_business_attachment(
+            &conn,
+            &sec,
+            &current,
+            &app_dir,
+            &attachment_input(
+                &app_dir.join("missing.pdf").to_string_lossy(),
+                "fund_document",
+                1,
+            ),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("源文件不存在"), "缺失源文件应拦截: {err}");
+
+        // 超过大小上限
+        let big = write_source_file(
+            &app_dir,
+            "big.bin",
+            &vec![0u8; (ATTACHMENT_MAX_FILE_SIZE + 1) as usize],
+        );
+        let err = add_business_attachment(
+            &conn,
+            &sec,
+            &current,
+            &app_dir,
+            &attachment_input(&big, "fund_document", 1),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("大小限制"), "超限附件应拦截: {err}");
+        // 失败不落库
+        assert!(list_business_attachments(&conn, "fund_document", 1)
+            .unwrap()
+            .is_empty());
+
+        // 未选择当前操作人
+        let fresh_current = CurrentOperatorState::new();
+        let err = add_business_attachment(
+            &conn,
+            &sec,
+            &fresh_current,
+            &app_dir,
+            &attachment_input(&src, "fund_document", 1),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("操作人"), "未选操作人应拦截: {err}");
+
+        let _ = std::fs::remove_dir_all(&app_dir);
+    }
+
+    /// 删除门禁：未提交报销单可删（文件+DB 行一并清理）；已提交/已审批的报销单拦截；
+    /// fund_document 待 Task 6 建表后补状态校验（当前放行）。
+    #[test]
+    fn test_business_attachment_delete_rules() {
+        let (conn, current, sec, app_dir) = attachment_env("delete");
+        conn.execute(
+            "INSERT INTO reimbursement_claims (id, claim_no, employee_id, belong_month, title,
+                total_amount, status, payment_status, created_at, updated_at)
+             VALUES (501, 'BX-TASK5', 1, '2026-08', '差旅报销', 100, 'draft', 'unpaid',
+                     '2026-08-01', '2026-08-01')",
+            [],
+        )
+        .unwrap();
+        let src = write_source_file(&app_dir, "receipt.pdf", b"receipt");
+        let att = add_business_attachment(
+            &conn,
+            &sec,
+            &current,
+            &app_dir,
+            &attachment_input(&src, "reimbursement_claim", 501),
+        )
+        .unwrap();
+
+        // 不存在的附件
+        let err = delete_business_attachment(&conn, &current, 999)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("未找到") || err.contains("NotFound"),
+            "删除不存在附件应报错: {err}"
+        );
+
+        // 已提交（submitted）拦截
+        conn.execute(
+            "UPDATE reimbursement_claims SET status='submitted' WHERE id=501",
+            [],
+        )
+        .unwrap();
+        let err = delete_business_attachment(&conn, &current, att.id)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("反审批") || err.contains("驳回"),
+            "已提交实体附件应拦截删除: {err}"
+        );
+        assert!(
+            std::path::Path::new(&att.file_path).exists(),
+            "拦截后文件必须保留"
+        );
+
+        // 已审批（approved）同样拦截
+        conn.execute(
+            "UPDATE reimbursement_claims SET status='approved' WHERE id=501",
+            [],
+        )
+        .unwrap();
+        assert!(delete_business_attachment(&conn, &current, att.id).is_err());
+
+        // 驳回后可删：文件与 DB 行一并清理
+        conn.execute(
+            "UPDATE reimbursement_claims SET status='rejected' WHERE id=501",
+            [],
+        )
+        .unwrap();
+        let removed = delete_business_attachment(&conn, &current, att.id).unwrap();
+        assert_eq!(removed, att.file_name);
+        assert!(
+            !std::path::Path::new(&att.file_path).exists(),
+            "删除后归档文件应清理"
+        );
+        assert!(list_business_attachments(&conn, "reimbursement_claim", 501)
+            .unwrap()
+            .is_empty());
+
+        // fund_document（实体表未建）：删除放行，留待 Task 6 收紧
+        let src2 = write_source_file(&app_dir, "pay.pdf", b"pay");
+        let att2 = add_business_attachment(
+            &conn,
+            &sec,
+            &current,
+            &app_dir,
+            &attachment_input(&src2, "fund_document", 7),
+        )
+        .unwrap();
+        delete_business_attachment(&conn, &current, att2.id).unwrap();
+        assert!(!std::path::Path::new(&att2.file_path).exists());
+
+        let _ = std::fs::remove_dir_all(&app_dir);
+    }
+
+    /// 补偿清理：DB 写入失败（file_path UNIQUE 冲突）时，已归档文件与加密临时文件
+    /// 必须被清理，不留孤儿文件。用固定时间戳的 impl 入口保证目标路径可预测。
+    #[test]
+    fn test_business_attachment_add_db_failure_cleans_up_file() {
+        use chrono::TimeZone;
+
+        let (conn, current, sec, app_dir) = attachment_env("db-fail");
+        let src = write_source_file(&app_dir, "dup.pdf", b"dup");
+        let input = attachment_input(&src, "fund_document", 1);
+
+        // 固定归档时间 → 目标路径完全可预测
+        let fixed = chrono::Utc.with_ymd_and_hms(2026, 9, 5, 12, 0, 0).unwrap();
+        let expected_target = app_dir
+            .join("attachments")
+            .join("fund_document")
+            .join("2026-08")
+            .join(format!("{}_dup.pdf", fixed.format("%Y%m%d%H%M%S")));
+
+        // 预插一行占用预期 file_path → add 落库时触发 UNIQUE 冲突
+        conn.execute(
+            "INSERT INTO business_attachments
+                (entity_type, entity_id, file_name, file_path, encrypted, file_size, belong_month, uploaded_by, created_at)
+             VALUES ('fund_document', 1, 'dup.pdf', ?1, 0, 3, '2026-08', NULL, 'now')",
+            params![expected_target.to_string_lossy()],
+        )
+        .unwrap();
+
+        // 用固定时间戳的 impl 入口（目标路径可预测），落库失败触发补偿清理
+        let err = add_business_attachment_impl(&conn, &sec, &current, &app_dir, &input, fixed)
+            .unwrap_err()
+            .to_string();
+        assert!(!err.is_empty());
+        // 补偿清理：归档文件与 .enc.tmp 都不得残留
+        assert!(
+            !expected_target.exists(),
+            "落库失败后归档文件应被补偿清理: {}",
+            expected_target.display()
+        );
+        assert!(!expected_target.with_extension("enc.tmp").exists());
+        assert_eq!(
+            list_business_attachments(&conn, "fund_document", 1)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let _ = std::fs::remove_dir_all(&app_dir);
     }
 }

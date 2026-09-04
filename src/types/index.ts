@@ -1080,3 +1080,38 @@ export const OPERATOR_ROLE_LABEL: Record<string, string> = {
   cashier: '出纳',
   admin: '管理员',
 };
+
+// ==================== 通用加密业务附件（第七阶段 Task 5） ====================
+
+// 字段与后端 src-tauri/src/models.rs BusinessAttachment 1:1 对齐（serde snake_case）。
+// BusinessAttachmentInput 的 file_path 为源文件绝对路径（前端文件对话框选取）；
+// encrypted / file_size / uploaded_by 由后端裁决，入参值被忽略。
+export interface BusinessAttachment {
+  id: number;
+  entity_type: string;
+  entity_id: number;
+  file_name: string;
+  file_path: string;
+  encrypted: boolean;
+  file_size: number | null;
+  belong_month: string | null;
+  uploaded_by: string | null;
+  created_at: string;
+}
+
+export interface BusinessAttachmentInput {
+  entity_type: string;
+  entity_id: number;
+  file_name: string;
+  file_path: string;
+  encrypted?: boolean;
+  file_size?: number;
+  belong_month?: string | null;
+  uploaded_by?: string | null;
+}
+
+// 附件可挂接实体类型，与后端 cashier.rs ATTACHMENT_ENTITY_TYPES 一致
+export const ATTACHMENT_ENTITY_TYPE_LABEL: Record<string, string> = {
+  fund_document: '资金单据',
+  reimbursement_claim: '报销单',
+};

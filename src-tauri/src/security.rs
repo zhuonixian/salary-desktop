@@ -96,6 +96,16 @@ pub fn decrypt_file(src: &Path, dst: &Path, dek: &[u8; 32]) -> AppResult<()> {
     Ok(())
 }
 
+/// 就地原子加密：先写 `{path}.enc.tmp` 再 rename 覆盖原文件。
+/// 发票图片归档与业务附件上传共用；密文格式与 [`encrypt_file`] 完全一致
+/// （12 字节 nonce 前缀 + AES-256-GCM 密文），不改变既有发票密文。
+pub fn encrypt_file_in_place(path: &Path, dek: &[u8; 32]) -> AppResult<()> {
+    let tmp = path.with_extension("enc.tmp");
+    encrypt_file(path, &tmp, dek)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 pub fn validate_password_strength(p: &str) -> AppResult<()> {
     if p.len() < 8 {
         return Err(crate::errors::AppError::InvalidParam(
@@ -749,6 +759,40 @@ mod tests {
         assert_eq!(std::fs::read(&dec).unwrap(), plain);
         let _ = std::fs::remove_file(&tmp);
         let _ = std::fs::remove_file(&enc);
+        let _ = std::fs::remove_file(&dec);
+    }
+
+    /// 就地原子加密：原文件被密文替换（不留明文），解密可还原；
+    /// 密文被篡改后解密必须失败（GCM 认证）。
+    #[test]
+    fn encrypt_file_in_place_round_trip_and_tamper_fails() {
+        let tmp = std::env::temp_dir().join(format!("sec_inplace_{}.bin", std::process::id()));
+        let plain = b"in-place encrypt \x00\x01\x02";
+        std::fs::write(&tmp, plain).unwrap();
+        let dek = gen_dek();
+
+        encrypt_file_in_place(&tmp, &dek).unwrap();
+        // 原路径内容已是密文（非明文），且不留 .enc.tmp 中间产物
+        let stored = std::fs::read(&tmp).unwrap();
+        assert_ne!(stored, plain.to_vec());
+        assert!(!tmp.with_extension("enc.tmp").exists());
+
+        // roundtrip
+        let dec = tmp.with_extension("dec");
+        decrypt_file(&tmp, &dec, &dek).unwrap();
+        assert_eq!(std::fs::read(&dec).unwrap(), plain);
+
+        // 篡改密文（nonce 之后第一个字节）→ 解密失败
+        let mut tampered = stored.clone();
+        let mid = 12 + tampered.len() / 2;
+        tampered[mid] ^= 0xFF;
+        std::fs::write(&tmp, tampered).unwrap();
+        assert!(
+            decrypt_file(&tmp, &dec, &dek).is_err(),
+            "篡改后的密文必须解密失败"
+        );
+
+        let _ = std::fs::remove_file(&tmp);
         let _ = std::fs::remove_file(&dec);
     }
 

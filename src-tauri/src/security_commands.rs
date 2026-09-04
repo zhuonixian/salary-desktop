@@ -455,29 +455,56 @@ pub fn get_decrypted_invoice_url(
         .map_err(|_| AppError::NotFound(format!("发票ID={invoice_id}未找到")))?
     };
 
+    decrypt_resource_to_preview(
+        std::path::Path::new(&image_path),
+        encrypted == 1,
+        &sec,
+        invoice_id,
+    )
+}
+
+/// 取业务附件的可预览 URL（绝对路径，前端用 `convertFileSrc()` 渲染）。
+/// 加密附件用 DEK 临时解密到预览目录（与发票预览共用 salary-desktop-preview，
+/// 启动/退出时统一清理）；DEK 未加载返回"请先解锁应用"。
+#[tauri::command]
+pub fn get_decrypted_attachment_url(
+    attachment_id: i64,
+    state: State<'_, Mutex<Connection>>,
+    sec: State<'_, SecurityState>,
+) -> AppResult<String> {
+    let conn = lock_conn(&state)?;
+    let att = crate::cashier::get_business_attachment(&conn, attachment_id)?;
+    decrypt_resource_to_preview(
+        std::path::Path::new(&att.file_path),
+        att.encrypted,
+        &sec,
+        att.id,
+    )
+}
+
+/// 通用解密预览（发票原图 / 业务附件共用）：加密资源用 DEK 解密到 preview 目录，
+/// 未加密资源直接复制。返回预览文件绝对路径；文件名 `{key}_{millis}.{ext}`，
+/// 每次调用都新建副本，避免前端缓存拿到旧的解密文件。
+fn decrypt_resource_to_preview(
+    src: &std::path::Path,
+    encrypted: bool,
+    sec: &SecurityState,
+    key: i64,
+) -> AppResult<String> {
     let preview_dir = std::env::temp_dir().join("salary-desktop-preview");
     std::fs::create_dir_all(&preview_dir)?;
 
-    let src_path = std::path::Path::new(&image_path);
-    let ext = src_path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("bin");
-    let dst = preview_dir.join(format!(
-        "{}_{}.{}",
-        invoice_id,
-        Utc::now().timestamp_millis(),
-        ext
-    ));
+    let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("bin");
+    let dst = preview_dir.join(format!("{}_{}.{}", key, Utc::now().timestamp_millis(), ext));
 
-    if encrypted == 1 {
+    if encrypted {
         let dek = sec
             .dek()
             .ok_or_else(|| AppError::InvalidParam("请先解锁应用".into()))?;
-        security::decrypt_file(src_path, &dst, &dek)
+        security::decrypt_file(src, &dst, &dek)
             .map_err(|_| AppError::InvalidParam("解密失败".into()))?;
     } else {
-        std::fs::copy(src_path, &dst)?;
+        std::fs::copy(src, &dst)?;
     }
 
     Ok(dst.to_string_lossy().to_string())
@@ -593,6 +620,97 @@ mod tests {
             unlock_salary_results_impl(&conn, &sec, "Abcd1234", "2026-09", "重新核算需要调整")
                 .unwrap_err();
         assert!(err.to_string().contains("没有已锁定"));
+    }
+
+    /// 业务附件预览：加密附件解密 roundtrip 还原明文；DEK 未加载提示解锁；
+    /// 密文被篡改后解密失败（复用发票预览同一 helper 与预览目录）。
+    #[test]
+    fn test_decrypted_attachment_url_roundtrip_tamper_and_locked() {
+        use crate::cashier::{
+            add_business_attachment, save_operator_profile, set_current_operator,
+            CurrentOperatorState,
+        };
+        use crate::models::BusinessAttachmentInput;
+
+        let conn = Connection::open_in_memory().unwrap();
+        db::create_tables(&conn).unwrap();
+        let sec = SecurityState::new();
+        security::setup(&conn, &sec, "Abcd1234", "RC-AAAA", "Q", "A").unwrap();
+        let current = CurrentOperatorState::new();
+        let op = save_operator_profile(
+            &conn,
+            &current,
+            &crate::models::OperatorProfileInput {
+                id: None,
+                name: "张会计".into(),
+                role: "cashier".into(),
+                is_active: Some(true),
+                remark: None,
+            },
+        )
+        .unwrap()
+        .0;
+        set_current_operator(&conn, &current, op.id).unwrap();
+
+        let app_dir = std::env::temp_dir().join(format!(
+            "salary-att-preview-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&app_dir).unwrap();
+        let plain = b"attachment preview \x00\x01 roundtrip";
+        let src = app_dir.join("scan.pdf");
+        std::fs::write(&src, plain).unwrap();
+
+        let att = add_business_attachment(
+            &conn,
+            &sec,
+            &current,
+            &app_dir,
+            &BusinessAttachmentInput {
+                entity_type: "fund_document".into(),
+                entity_id: 1,
+                file_name: String::new(),
+                file_path: src.to_string_lossy().to_string(),
+                encrypted: None,
+                file_size: None,
+                belong_month: Some("2026-08".into()),
+                uploaded_by: None,
+            },
+        )
+        .unwrap();
+        assert!(att.encrypted);
+
+        // roundtrip：预览文件内容 = 原明文
+        let preview_path =
+            decrypt_resource_to_preview(std::path::Path::new(&att.file_path), true, &sec, att.id)
+                .unwrap();
+        assert_eq!(std::fs::read(&preview_path).unwrap(), plain);
+
+        // DEK 未加载 → 提示先解锁
+        let locked = SecurityState::new();
+        let err = decrypt_resource_to_preview(
+            std::path::Path::new(&att.file_path),
+            true,
+            &locked,
+            att.id,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("请先解锁应用"), "未解锁预览应拦截: {err}");
+
+        // 篡改密文 → 解密失败
+        let mut stored = std::fs::read(&att.file_path).unwrap();
+        let mid = 12 + stored.len() / 2;
+        stored[mid] ^= 0xFF;
+        std::fs::write(&att.file_path, stored).unwrap();
+        let err =
+            decrypt_resource_to_preview(std::path::Path::new(&att.file_path), true, &sec, att.id)
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("解密失败"), "篡改附件应解密失败: {err}");
+
+        let _ = std::fs::remove_dir_all(&app_dir);
+        let _ = std::fs::remove_file(&preview_path);
     }
 }
 

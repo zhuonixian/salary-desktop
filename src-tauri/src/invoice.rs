@@ -545,7 +545,7 @@ pub(crate) fn copy_image_to_app_dir(
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "invoice.bin".to_string());
-    let sanitized_filename = sanitize_invoice_filename(&raw_filename);
+    let sanitized_filename = sanitize_archive_filename(&raw_filename);
     let filename = if sanitized_filename.is_empty() {
         "invoice.bin"
     } else {
@@ -567,6 +567,7 @@ pub(crate) fn copy_image_to_app_dir(
 /// 若传入 SecurityState 且 DEK 已加载，则对归档后的发票文件就地加密（先写 .enc.tmp 再 rename 替换）。
 /// 返回 1 表示加密成功；返回 0 表示未加密（DEK 未加载或无 sec）。
 /// 加密失败时返回原始错误，避免给用户留下"已加密"的假象。
+/// 复用 security::encrypt_file_in_place（与业务附件共用同一原语，密文格式不变）。
 fn encrypt_image_if_unlocked(archived_path: &str, sec: Option<&SecurityState>) -> AppResult<i64> {
     let Some(sec) = sec else {
         return Ok(0);
@@ -574,14 +575,13 @@ fn encrypt_image_if_unlocked(archived_path: &str, sec: Option<&SecurityState>) -
     let Some(dek) = sec.dek() else {
         return Ok(0);
     };
-    let target = std::path::Path::new(archived_path);
-    let tmp = target.with_extension("enc.tmp");
-    security::encrypt_file(target, &tmp, &dek)?;
-    std::fs::rename(&tmp, target)?;
+    security::encrypt_file_in_place(std::path::Path::new(archived_path), &dek)?;
     Ok(1)
 }
 
-fn sanitize_invoice_filename(raw: &str) -> String {
+/// 归档文件名净化：保留字母数字、点、横线、下划线与中文，
+/// 去掉路径分隔符等特殊字符。发票图片与业务附件归档共用。
+pub(crate) fn sanitize_archive_filename(raw: &str) -> String {
     raw.chars()
         .filter(|c| c.is_ascii_alphanumeric() || matches!(*c, '.' | '-' | '_') || is_han_char(*c))
         .collect()

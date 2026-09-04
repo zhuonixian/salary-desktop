@@ -70,6 +70,8 @@ const operationTypeLabels: Record<string, string> = {
   set_active_operator_profile: '启停操作人',
   set_current_operator: '切换当前操作人',
   get_current_operator: '查询当前操作人',
+  add_business_attachment: '上传业务附件',
+  delete_business_attachment: '删除业务附件',
 };
 
 const getOperationLabel = (value?: string) =>

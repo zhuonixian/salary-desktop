@@ -238,6 +238,10 @@ pub fn run() {
         commands::set_active_operator_profile,
         commands::set_current_operator,
         commands::get_current_operator,
+        // ===== Cashier（第七阶段 通用加密业务附件） =====
+        commands::add_business_attachment,
+        commands::list_business_attachments,
+        commands::delete_business_attachment,
         // ===== Security（Task 6） =====
         security_commands::is_security_initialized,
         security_commands::setup_security,
@@ -254,6 +258,7 @@ pub fn run() {
         security_commands::get_legacy_migration_status,
         security_commands::migrate_legacy_resources,
         security_commands::get_decrypted_invoice_url,
+        security_commands::get_decrypted_attachment_url,
     ]);
 
     diag("calling builder.run()...");
