@@ -17,7 +17,7 @@ description: 第七阶段出纳运营闭环（资金账户、通用收付款、�
 
 ## 已交付能力（按批次）
 
-- **7A 基础底座**：BusinessMonthContext 全局月份贯通；资金账户/往来单位/操作人三类基础资料（引用保护+停用约束）；业务附件加密底座（add/删除挂实体状态门禁）；未选操作人时三层导航拦截。
+- **7A 基础底座**：BusinessMonthContext 全局月份贯通；资金账户/往来单位/操作人三类基础资料（引用保护+停用约束；operator_profiles 仅本地署名留痕，不是多用户账号权限）；业务附件加密底座（add/删除挂实体状态门禁）；未选操作人时三层导航拦截。
 - **7B 通用收付款**：`fund_documents` 全类型状态机（receipt/payment/transfer/advance/advance_settlement/reversal），状态流转与 approval_events 同事务留痕；maker_checker 经办复核；结算凭证 + 事务内红字冲正；vouchers 表安全重建；付款批次新增 general（三批次账户维度必选，逐单结算防双重贷记）；旧批次只读；付款凭证资金行补 `fund_account_id`。
 - **7C 资金对账**：历史资金归集向导（preview/apply，apply 记审计+事务内刷新迁移标记）；银行流水账户化导入+预览；多对多核销引擎 `bank_reconciliation_allocations`（金额守恒、六因子评分、批量确认冲突消解）；旧三命令退役（写前拦截+预过滤+UI 移除）；资金日记账（voucher_lines 派生、滚动余额跨月滚入）；余额调节表（生成/确认/Excel/月结保护）。
 - **7D 管理闭环**：借款核销 `advance_settlement_links`（现金归还/报销抵扣/工资扣回分录分流+累计核销上限+取消恢复）；借款台账（未清/逾期/账龄四桶+Excel）；报销审批治理（状态机命令化、直写通道物理删除、unapprove 联动）；月结 5 项新检查（待审批/已审批未付款/已结算无凭证 blocking、借款逾期 warning）+ 严格模式账户级开关 + 月结包新增日记账/调节表/借款台账 + 仪表盘资金卡 + 预算口径去重 + operator 后端筛选；月结严格检查 SQL 带 `account_type IN ('bank','third_party')` 兜底（防旧备份恢复 cash+strict 死锁）。
@@ -37,7 +37,7 @@ description: 第七阶段出纳运营闭环（资金账户、通用收付款、�
 - 冲正路径：已结算资金单冲正 → 凭证红字 → 日记账/调节表净影响 0
 - 借款三方式核销 + 取消核销恢复 + 台账账龄展示
 - 对账工作台双栏核销、余额调节表生成/确认、旧匹配迁移报告
-- 月结 12 项检查、严格模式 blocking、月结包四件导出
+- 月结 21 项检查（20 项体检 + 月结状态）、严格模式 blocking、月结包四件导出
 - 锁屏/解锁与敏感数据脱敏（账号、金额）回归
 
 ## Minor 挂账（后续打磨，均不阻断）

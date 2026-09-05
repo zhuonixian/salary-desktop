@@ -172,7 +172,7 @@
   - mock 核对：109 个显式 case + default 分流（get_/query_ → []、export_/delete_/update_ → true）覆盖全部前端命令，无需新增。
   - 文档：CLAUDE.md 第七阶段段落改为已交付口径 + 架构摘要补 cashier.rs/25 pages；`.claude/memory/stage7-cashier-operations.md` 重写为已交付能力 + 已知边界（冲正严口径须先反月结、严格模式账户级、tsc -b）+ Windows 验收清单；本文件追加 7D 完成记录；`docs/user-guide.html` 补第七章出纳功能卡片。
 - 测试：cargo 252 passed（基线 251 + 新增 1）；`npx tsc -b`、`npm run lint`、`npm run build`、`cargo fmt --check`、`cargo check` 全过；graphify update 已跑。
-- Windows 手工验收：未执行（无 Windows GUI 环境），验收清单已固化在 stage7 memory（旧库升级→建账户→归集→日记账；general 批次全流程+冲正；借款三方式核销；对账工作台/调节表；月结 12 项+月结包；锁屏脱敏回归）。
+- Windows 手工验收：未执行（无 Windows GUI 环境），验收清单已固化在 stage7 memory（旧库升级→建账户→归集→日记账；general 批次全流程+冲正；借款三方式核销；对账工作台/调节表；月结 21 项检查+月结包；锁屏脱敏回归）。
 - 未完成/风险：Minor 挂账清单 triage 后留 stage7 memory（FundDocuments 编辑抹 settlement_mode、bank_manual 账户下拉收窄、expense_type 文本匹配、attachment_disk_stats O(n²) 等，均不阻断）。
 - 下轮入口：Windows exe 手工验收 → 发版评估。
 
