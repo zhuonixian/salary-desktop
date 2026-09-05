@@ -379,7 +379,9 @@ pub(crate) fn get_fund_account(conn: &Connection, id: i64) -> AppResult<FundAcco
 /// 校验：编码/名称非空、类型合法、期初余额非负（容差 0.005）、启用日期格式、
 /// 挂接科目必须是资金科目（1001/1002/1012）且存在、编码与账号不重复；
 /// 同类型默认账户切换在同一事务中完成（满足 partial unique index）；
-/// 已被凭证分录/银行流水/付款批次引用的账户不允许修改账户类型（引用保护）。
+/// 已被凭证分录/银行流水/付款批次引用的账户不允许修改账户类型（引用保护）；
+/// 严格对账仅限银行/第三方支付账户（现金账户无银行流水与调节表，开启将导致
+/// strict_reconciliation_unconfirmed 月结检查永久 blocking 且无 UI 解除路径）。
 /// 默认账户不允许停用（须先把同类型其他账户设为默认）。
 pub fn save_fund_account(conn: &Connection, input: &FundAccountInput) -> AppResult<FundAccount> {
     let account_code = input.account_code.trim();
@@ -405,6 +407,14 @@ pub fn save_fund_account(conn: &Connection, input: &FundAccountInput) -> AppResu
     let is_active = input.is_active.unwrap_or(prev_active);
     // 严格对账开关（spec 8/9.6）：patch 语义，None 保留原值
     let strict_reconciliation = input.strict_reconciliation.unwrap_or(prev_strict);
+    // 严格对账只面向银行/第三方支付账户：调节表生成与月结严格检查均不覆盖现金账户，
+    // 否则 strict_reconciliation_unconfirmed 将永久 blocking 且无 UI 解除路径。
+    // 更新路径同样生效：已开启严格的账户改类型为现金时一并拦截（先关闭严格再改类型可放行）。
+    if strict_reconciliation && !matches!(input.account_type.as_str(), "bank" | "third_party") {
+        return Err(AppError::InvalidParam(
+            "现金账户不支持严格对账，请关闭后保存".into(),
+        ));
+    }
     if is_default && !is_active {
         return Err(AppError::InvalidParam("默认账户不能同时停用".into()));
     }
@@ -5698,6 +5708,49 @@ mod tests {
         change_ok.account_type = "third_party".into();
         let changed = save_fund_account(&conn, &change_ok).unwrap();
         assert_eq!(changed.account_type, "third_party");
+    }
+
+    #[test]
+    fn test_fund_account_strict_reconciliation_only_for_bank_like_types() {
+        let conn = setup_financial_db();
+
+        // 现金账户开启严格对账被拦截（否则月结 strict_reconciliation_unconfirmed 永久 blocking）
+        let mut cash_strict = cash_input("CASH-S", "现金严格");
+        cash_strict.strict_reconciliation = Some(true);
+        let err = save_fund_account(&conn, &cash_strict)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("严格对账"), "现金开严格应拦截：{err}");
+
+        // 银行账户开启严格对账正常保存
+        let mut bank_strict = bank_input("BANK-S", "严格银行户", "622200003");
+        bank_strict.strict_reconciliation = Some(true);
+        let bank = save_fund_account(&conn, &bank_strict).unwrap();
+        assert!(bank.strict_reconciliation);
+
+        // 第三方支付账户同样允许开启严格对账
+        let mut third_strict = bank_input("TP-S", "严格第三方", "");
+        third_strict.account_type = "third_party".into();
+        third_strict.account_no = None;
+        third_strict.gl_account_code = "1012".into();
+        third_strict.strict_reconciliation = Some(true);
+        let third = save_fund_account(&conn, &third_strict).unwrap();
+        assert!(third.strict_reconciliation);
+
+        // 已开启严格的银行账户改类型为现金被拦截（patch 语义保留 strict 时组合校验生效）
+        let mut to_cash = bank_input("BANK-S", "严格银行户", "622200003");
+        to_cash.id = Some(bank.id);
+        to_cash.account_type = "cash".into();
+        to_cash.gl_account_code = "1001".into();
+        to_cash.strict_reconciliation = None; // patch：保留 true
+        let err = save_fund_account(&conn, &to_cash).unwrap_err().to_string();
+        assert!(err.contains("严格对账"), "严格银行户改现金应拦截：{err}");
+
+        // 同一账户先关闭严格再改类型为现金则放行（提供 UI 解除路径）
+        to_cash.strict_reconciliation = Some(false);
+        let relaxed = save_fund_account(&conn, &to_cash).unwrap();
+        assert!(!relaxed.strict_reconciliation);
+        assert_eq!(relaxed.account_type, "cash");
     }
 
     // ---------- 往来单位 ----------
