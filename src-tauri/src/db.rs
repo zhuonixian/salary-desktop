@@ -3249,9 +3249,12 @@ pub fn get_month_close_workbench(conn: &Connection, month: &str) -> AppResult<Mo
     });
     // 严格对账账户未确认余额调节表（阻塞；spec 8/9.6，Task 13 挂账承接——配置项本任务建）
     // 历史账户默认关闭严格开关，旧用户月结不受影响（spec 13 节：严格检查只在用户主动开启后生效）
+    // account_type 兜底：应用层已拦截"现金账户开严格"，但旧备份恢复可能带回
+    // cash+strict 脏数据（该组合无调节表解除路径，会导致月结永久阻塞）——SQL 层再兜一道。
     let strict_unconfirmed_count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM fund_accounts fa
          WHERE fa.is_active = 1 AND fa.strict_reconciliation = 1
+           AND fa.account_type IN ('bank', 'third_party')
            AND NOT EXISTS (
              SELECT 1 FROM bank_reconciliation_periods p
              WHERE p.fund_account_id = fa.id AND p.belong_month = ?1 AND p.status = 'confirmed'
@@ -10971,6 +10974,55 @@ mod stage7_tests {
             "仅非严格账户部分核销保持 warning"
         );
         assert_eq!(partial.count, 2);
+    }
+
+    /// Task 17 兜底：旧备份恢复可能带回 cash+strict 脏数据（应用层 save_fund_account
+    /// 已拦截该组合，但直插脏数据不可再经 UI 解除）。月结严格检查必须忽略现金账户，
+    /// 避免恢复路径出现"无调节表可确认却永久 blocking"的死锁态。
+    #[test]
+    fn test_month_close_strict_check_ignores_cash_dirty_data() {
+        let conn = setup_financial_db();
+
+        // 直插现金账户且 strict_reconciliation=1（模拟旧备份恢复出的脏数据）
+        conn.execute(
+            "INSERT INTO fund_accounts
+                (account_code, name, account_type, bank_name, account_no, currency,
+                 gl_account_code, opening_date, opening_balance, is_default, is_active,
+                 strict_reconciliation, created_at, updated_at)
+             VALUES ('CASH-DIRTY', '脏数据现金户', 'cash', NULL, NULL, 'CNY',
+                     '1001', '2026-08-01', 500, 0, 1, 1, '2026-08-01', '2026-08-01')",
+            [],
+        )
+        .unwrap();
+
+        // 同库并存一个严格银行账户（应照常阻塞，验证兜底没有误伤正常口径）
+        let strict_bank = t16_seed_account(&conn, "BANK-T17B", true, 10_000.0);
+        let wb = get_month_close_workbench(&conn, "2026-08").unwrap();
+        let strict_check = wb
+            .checks
+            .iter()
+            .find(|c| c.key == "strict_reconciliation_unconfirmed")
+            .expect("严格对账调节表检查项存在");
+        assert_eq!(strict_check.status, "blocking");
+        assert_eq!(strict_check.count, 1, "只计严格银行账户，不计现金脏数据");
+
+        // 仅保留现金脏数据（银行账户确认调节表后）→ 检查恢复 ok，月结不被死锁
+        conn.execute(
+            "INSERT INTO bank_reconciliation_periods
+                (fund_account_id, belong_month, status, confirmed_by, confirmed_at, created_at, updated_at)
+             VALUES (?1, '2026-08', 'confirmed', '测试确认人', '2026-08-31T10:00:00+00:00',
+                     '2026-08-31T10:00:00+00:00', '2026-08-31T10:00:00+00:00')",
+            params![strict_bank],
+        )
+        .unwrap();
+        let wb = get_month_close_workbench(&conn, "2026-08").unwrap();
+        let strict_check = wb
+            .checks
+            .iter()
+            .find(|c| c.key == "strict_reconciliation_unconfirmed")
+            .unwrap();
+        assert_eq!(strict_check.status, "ok", "cash+strict 脏数据不应阻塞月结");
+        assert_eq!(strict_check.count, 0);
     }
 
     /// spec 8：员工借款逾期（warning）。已结清借款不提醒；口径与借款台账一致

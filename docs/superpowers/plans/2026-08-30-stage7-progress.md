@@ -28,11 +28,11 @@
 
 | 批次 | 状态 | 说明 |
 |---|---|---|
-| Gate 0 | 进行中 | 自动化基线通过；Windows 验收、真实备份恢复和旧库样本待完成 |
-| 7A | 进行中 | Task 1 全局月份完成；基础资料、操作人、附件待开始 |
-| 7B | 待开始 | 通用收付款、审批、付款批次、凭证冲正 |
-| 7C | 待开始 | 历史归集、流水账户化、多对多对账、日记账 |
-| 7D | 待开始 | 借款核销、报销治理、月结与收尾 |
+| Gate 0 | 自动化完成 | 自动化基线通过；Windows 验收与真实备份恢复演练待 Windows GUI 环境 |
+| 7A | 完成 | 全局月份 + 基础资料 + 操作人 + 加密附件（Task 1-5） |
+| 7B | 完成 | 通用收付款、审批、付款批次、凭证冲正（Task 6-9） |
+| 7C | 完成 | 历史归集、流水账户化、多对多对账、日记账、调节表（Task 10-13） |
+| 7D | 完成 | 借款核销、报销治理、月结联动、收尾回归与文档（Task 14-17） |
 
 ## 协作规则
 
@@ -145,3 +145,37 @@
 - 关键决策：核销方式存 fund_documents.settlement_mode（ensure_column），links 只存关系与金额；借款须 settled（已发放）才可核销；缺省方式 cash_return 兼容历史资金回流建模；跨月核销允许、月结保护走既有 ensure_month_open。
 - 未完成/风险：Windows exe 手工验收（借款发放→部分核销→台账核对）待做；历史未结算 advance_settlement 单据（无 links）按 1221 贷方结算（旧口径等价）；mock 预览不支持冲正取消核销（提示桌面端操作）。
 - 下轮入口：Task 15 报销审批治理改造。
+
+### 2026-09-05 — Task 15：报销审批治理改造
+
+- 目标：spec 5.2 报销单治理——状态机命令化、审批事件统一、maker_checker、反审批联动。
+- 完成：报销状态机命令化（submit/approve/reject/withdraw/unapprove 专用命令），直写状态通道物理删除；approval_events 统一 append 留痕；maker_checker 经办复核开关接入；unapprove 联动既有凭证/批次（已核验零回归）；前端 Reimbursements.tsx 改造 + 日志映射。
+- 测试：cargo 241 passed；tsc/lint/build 全过。
+- Minor 挂账：save 报错内嵌英文状态码；mock 状态机命令 default 返回 true；void 不查 payment_status（legacy 可达面极窄）。
+
+### 2026-09-05 — Task 16：月结/仪表盘/预算/安全联动（spec 8 收口）
+
+- 目标：spec 8 联动——月结新检查、严格对账账户级开关、仪表盘资金卡、预算去重、数据安全统计、operator 后端筛选。
+- 完成：月结 5 项新检查（待审批资金单/已审批未付款未结算/已结算无辅助凭证均 blocking，借款逾期 warning）+ 严格模式 `fund_accounts.strict_reconciliation` 账户级开关（默认关；部分核销涉严格账户升级 blocking；strict 限 bank 类账户防死锁）+ 月结包新增资金日记账/余额调节表/借款台账 + 仪表盘 7 字段资金卡片 + 预算口径去重（已批报销内发票不再双计，纳入已审批付款资金单）+ DataSafetyStatus 附件/资金表/迁移/孤儿统计 + operator 后端筛选（Task 4 挂账承接）+ FK 门禁报错列明细；前端 MonthClose/Dashboard/FinancialAnalysis/DataSafety/SecurityCenter 联动。
+- 测试：cargo 251 passed（+10）；tsc/lint/build 全过；Fix Round 1：strict 限银行类账户防死锁。
+- 重大发现：`npx tsc --noEmit` 在本仓库为空检查（根 tsconfig 仅 refs + files:[]），实际验证须 `tsc -b`——勘误归 Task 17。
+
+### 2026-09-05 — Task 17：导航整理、可访问性、全量回归与文档（收尾）
+
+- 目标：承接 Task 16 挂账（tsc 勘误、cash 严格开关 UX、月结检查 account_type 兜底）+ 导航/日志映射核对 + 文档四件套 + 使用手册第七章。
+- 完成：
+  - tsc 勘误：实测注入类型错误证明 `tsc --noEmit` 恒过（空检查）、`tsc -b` 报错（exit 2）；CLAUDE.md 核心命令、`.claude/memory/commands-reference.md`、stage7 memory 测试门槛全部改为 `npx tsc -b` 并注明原因。
+  - 月结兜底：db.rs `strict_reconciliation_unconfirmed` SQL 加 `account_type IN ('bank','third_party')`（防旧备份恢复出 cash+strict 死锁态）；新增测试 `test_month_close_strict_check_ignores_cash_dirty_data`（直插脏数据 + 并存严格银行账户差分断言：脏数据不计、银行账户照常 blocking、确认后恢复 ok）。
+  - 前端 UX：FundAccounts 表单 cash 类型隐藏严格对账开关（Form.useWatch 驱动），切类型时同步关闭字段值 + handleSave 再兜一道，与后端拦截对齐避免"提交被拒且无处关闭"死路。
+  - 导航核对：资金出纳分组（资金账户/收付款单/付款批次/银行对账/资金日记账/借款备用金）与薪酬分组（工资计算/社保台账）与 spec 7 节一致，无重复入口，无需改动；路由与菜单一一对应。
+  - 日志映射补齐：generate/confirm/export_bank_reconciliation_period、export_fund_journal、export_month_close_package 七阶段缺漏 + close_month/reopen_month/backup_database/restore_database/compact_database/verify_database 历史缺漏（与 commands.rs 实际写入的 operation_type 一一核对）。
+  - mock 核对：109 个显式 case + default 分流（get_/query_ → []、export_/delete_/update_ → true）覆盖全部前端命令，无需新增。
+  - 文档：CLAUDE.md 第七阶段段落改为已交付口径 + 架构摘要补 cashier.rs/25 pages；`.claude/memory/stage7-cashier-operations.md` 重写为已交付能力 + 已知边界（冲正严口径须先反月结、严格模式账户级、tsc -b）+ Windows 验收清单；本文件追加 7D 完成记录；`docs/user-guide.html` 补第七章出纳功能卡片。
+- 测试：cargo 252 passed（基线 251 + 新增 1）；`npx tsc -b`、`npm run lint`、`npm run build`、`cargo fmt --check`、`cargo check` 全过；graphify update 已跑。
+- Windows 手工验收：未执行（无 Windows GUI 环境），验收清单已固化在 stage7 memory（旧库升级→建账户→归集→日记账；general 批次全流程+冲正；借款三方式核销；对账工作台/调节表；月结 12 项+月结包；锁屏脱敏回归）。
+- 未完成/风险：Minor 挂账清单 triage 后留 stage7 memory（FundDocuments 编辑抹 settlement_mode、bank_manual 账户下拉收窄、expense_type 文本匹配、attachment_disk_stats O(n²) 等，均不阻断）。
+- 下轮入口：Windows exe 手工验收 → 发版评估。
+
+## 第七阶段完成
+
+Task 0-17 全部完成（Task 1 于 8cf0039 前完成未走 SDD；Task 2-16 走 SDD 双轮 review；Task 17 收尾）。后端 252 测试全过；前端 `tsc -b`/lint/build 全过；cargo fmt/check 全过。文档四件套（CLAUDE.md、memory、progress、user-guide）与 graphify 已同步。Windows exe 手工验收为遗留阻断项（清单见 memory）。

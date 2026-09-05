@@ -14,7 +14,7 @@ npm run build                            # 前端构建（tsc + vite build → d
 npm run lint                             # ESLint
 npm run preview                          # 预览构建产物
 npm run start:dev                        # scripts/start-dev.sh（项目自定义启动）
-npx tsc --noEmit                         # 类型检查（不发产物）
+npx tsc -b                               # 类型检查（勿用 tsc --noEmit：根 tsconfig 仅 refs+files:[]，裸跑为空检查恒过）
 ```
 
 ## Tauri / 全栈
@@ -31,7 +31,7 @@ npm run tauri -- <args>                  # 透传给 tauri CLI
 cd src-tauri
 cargo check                              # 编译检查
 cargo build                              # 构建
-cargo test --lib                         # 单元测试（26 个）
+cargo test --lib                         # 单元测试（252 个，第七阶段收尾口径）
 cargo test --lib db::tests               # 仅 db 测试
 cargo test --lib invoice                 # 仅 invoice 测试
 cargo fmt                                # 格式化（codex review 修复时跑过）

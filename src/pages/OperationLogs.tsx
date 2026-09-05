@@ -98,6 +98,18 @@ const operationTypeLabels: Record<string, string> = {
   migrate_legacy_bank_matches: '旧银行匹配迁移',
   cancel_advance_settlement_link: '取消借款核销',
   export_advance_ledger: '导出借款台账',
+  generate_bank_reconciliation_period: '生成余额调节表',
+  confirm_bank_reconciliation_period: '确认余额调节表',
+  export_bank_reconciliation_period: '导出余额调节表',
+  export_fund_journal: '导出资金日记账',
+  export_month_close_package: '导出月结报告包',
+  // 月结与数据安全（第三/六阶段既有命令补齐中文映射）
+  close_month: '正式月结',
+  reopen_month: '反月结',
+  backup_database: '备份数据库',
+  restore_database: '恢复数据库',
+  compact_database: '压缩整理数据库',
+  verify_database: '数据库体检',
 };
 
 const getOperationLabel = (value?: string) =>

@@ -9,7 +9,7 @@ npm install                              # 安装前端依赖
 npm run tauri dev                        # 开发模式（热重载）
 npm run tauri build                      # 打包发布
 cd src-tauri && cargo test --lib         # 后端单元测试
-npx tsc --noEmit                         # 前端类型检查
+npx tsc -b                               # 前端类型检查（勿用 tsc --noEmit：根 tsconfig 仅 refs+files:[]，裸跑为空检查恒过）
 npm run lint                             # ESLint
 ```
 
@@ -25,7 +25,7 @@ npm run lint                             # ESLint
 
 ## 架构摘要
 
-后端模块：`commands.rs`（Tauri 命令入口）→ `db.rs`（schema/CRUD）+ `invoice.rs`（发票业务）+ `ocr.rs`（考勤 OCR）+ `salary.rs`（工资引擎）+ `accounting.rs`（凭证与报表）+ `security*.rs`（安全）+ `data_safety.rs`（备份恢复）+ `excel.rs`（导入导出）。前端为 `App.tsx` + 21 个 page。SQLite 单文件 `salary.db` 存于 `app_data_dir`。发票原图归档 `app_data_dir/invoices/{belong_month}/{timestamp}_{filename}`。
+后端模块：`commands.rs`（Tauri 命令入口）→ `db.rs`（schema/CRUD）+ `invoice.rs`（发票业务）+ `ocr.rs`（考勤 OCR）+ `salary.rs`（工资引擎）+ `accounting.rs`（凭证与报表）+ `cashier.rs`（资金出纳：账户/资金单/批次/核销/日记账/调节表/借款）+ `security*.rs`（安全）+ `data_safety.rs`（备份恢复）+ `excel.rs`（导入导出）。前端为 `App.tsx` + 25 个 page。SQLite 单文件 `salary.db` 存于 `app_data_dir`。发票原图归档 `app_data_dir/invoices/{belong_month}/{timestamp}_{filename}`。
 
 ## 关键设计
 
@@ -73,7 +73,7 @@ npm run lint                             # ESLint
 
 ## 第七阶段开发
 
-第七阶段以出纳运营闭环为目标，按 Gate 0 → 7A 基础底座 → 7B 通用收付款与付款 → 7C 资金日记账与多对多银行对账 → 7D 借款/报销治理/月结收尾推进。开发前先读 `.claude/memory/stage7-cashier-operations.md`、`docs/superpowers/plans/2026-08-30-stage7-progress.md` 和 spec；旧库迁移、资金金额守恒、状态机、月结保护及 Windows exe 验收为阻断项。涉及多模块开发时用 subagent 按互不重叠文件范围协作，由主 agent 统一集成、测试、commit、push。
+第七阶段以出纳运营闭环为目标，按 Gate 0 → 7A 基础底座 → 7B 通用收付款与付款 → 7C 资金日记账与多对多银行对账 → 7D 借款/报销治理/月结收尾推进，Task 0-17 已全部交付（0-16 走 SDD review，收尾 Task 17 含导航核对、cash 严格开关隐藏、月结检查 account_type 兜底与文档四件套）。开发前先读 `.claude/memory/stage7-cashier-operations.md`、`docs/superpowers/plans/2026-08-30-stage7-progress.md` 和 spec；旧库迁移、资金金额守恒、状态机、月结保护为阻断项，Windows exe 手工验收仍待做。涉及多模块开发时用 subagent 按互不重叠文件范围协作，由主 agent 统一集成、测试、commit、push。
 
 ## 编码约定
 

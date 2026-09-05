@@ -407,6 +407,9 @@ const FundAccountTab: React.FC = () => {
   const [editing, setEditing] = useState<FundAccount | null>(null);
   const [form] = Form.useForm<FundAccountFormValues>();
   const [migrationOpen, setMigrationOpen] = useState(false);
+  // 严格对账仅面向银行/第三方支付账户（现金账户无银行流水与调节表，后端也会拦截），
+  // 表单选中现金类型时隐藏开关并强制关闭，避免提交后被拒且无处关闭。
+  const watchedAccountType = Form.useWatch('account_type', form);
 
   const fetchAccounts = useCallback(async () => {
     setLoading(true);
@@ -478,7 +481,9 @@ const FundAccountTab: React.FC = () => {
         opening_balance: values.opening_balance ?? 0,
         is_default: values.is_default,
         is_active: values.is_active,
-        strict_reconciliation: values.strict_reconciliation,
+        // 现金账户不支持严格对账（开关已隐藏），此处再兜一道与后端拦截对齐
+        strict_reconciliation:
+          values.account_type === 'cash' ? false : values.strict_reconciliation,
         remark: values.remark?.trim() ?? '',
       };
       await saveFundAccount(data);
@@ -684,6 +689,8 @@ const FundAccountTab: React.FC = () => {
                 onChange={(value) => {
                   const gl = FUND_TYPE_TO_GL[value];
                   if (gl) form.setFieldsValue({ gl_account_code: gl });
+                  // 切到现金类型时同步关闭严格对账（开关同时隐藏，保证提交值一致）
+                  if (value === 'cash') form.setFieldsValue({ strict_reconciliation: false });
                 }}
               />
             </Form.Item>
@@ -719,14 +726,16 @@ const FundAccountTab: React.FC = () => {
             <Form.Item name="is_active" label="启用" valuePropName="checked">
               <Switch />
             </Form.Item>
-            <Form.Item
-              name="strict_reconciliation"
-              label="严格对账"
-              valuePropName="checked"
-              tooltip="开启后，该账户当月余额调节表未确认或流水/分录存在部分核销时，月结检查由提醒升级为阻塞"
-            >
-              <Switch />
-            </Form.Item>
+            {watchedAccountType !== 'cash' && (
+              <Form.Item
+                name="strict_reconciliation"
+                label="严格对账"
+                valuePropName="checked"
+                tooltip="开启后，该账户当月余额调节表未确认或流水/分录存在部分核销时，月结检查由提醒升级为阻塞"
+              >
+                <Switch />
+              </Form.Item>
+            )}
           </Space>
           <Form.Item name="remark" label="备注">
             <Input.TextArea rows={2} placeholder="备注（可选）" maxLength={200} />

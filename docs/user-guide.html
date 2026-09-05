@@ -419,7 +419,7 @@
     <a href="#employee">4. 员工与考勤</a>
     <a href="#salary">5. 工资核算</a>
     <a href="#invoice">6. 发票与报销</a>
-    <a href="#month-close">7. 月结与付款</a>
+    <a href="#month-close">7. 月结与资金出纳</a>
     <a href="#bank">8. 银行流水</a>
     <a href="#budget">9. 预算与分析</a>
     <a href="#accounting">10. 财务管理与报表</a>
@@ -587,7 +587,7 @@
       <div class="step"><strong>计算工资</strong>：菜单「工资计算」→ 选择月份 → 点「一键计算」</div>
       <div class="step"><strong>审核与调整</strong>：核对计算结果，必要时点「单人重算」或手工调整</div>
       <div class="step"><strong>锁定工资</strong>：核对无误后点「锁定」，防止误改</div>
-      <div class="step"><strong>生成付款批次</strong>：菜单「薪酬核算 → 付款批次」→ 生成工资批次 → 导出银行代发 Excel</div>
+      <div class="step"><strong>生成付款批次</strong>：菜单「资金出纳 → 付款批次」→ 生成工资批次（选择付款账户）→ 导出银行代发 Excel</div>
       <div class="step"><strong>月度关账</strong>：菜单「月结工作台」→ 体检 → 正式月结 → 导出月结包</div>
     </div>
   </div>
@@ -862,20 +862,20 @@
   </div>
 </section>
 
-<!-- ==================== 7. 月结与付款 ==================== -->
+<!-- ==================== 7. 月结与资金出纳 ==================== -->
 <section id="month-close">
   <div class="section-header">
     <div class="section-number">7</div>
     <div>
-      <div class="section-title">月结与付款</div>
-      <div class="section-desc">付款批次统一管理 + 正式月结 + 反月结</div>
+      <div class="section-title">月结与资金出纳</div>
+      <div class="section-desc">资金账户 + 收付款单 + 付款批次 + 银行对账 + 借款备用金 + 正式月结</div>
     </div>
   </div>
 
   <div class="card">
     <div class="card-title"><span class="icon">💳</span>付款批次</div>
-    <p><strong>路径</strong>：菜单「薪酬核算 → 付款批次」</p>
-    <p>统一管理工资代发 + 报销付款两种场景：</p>
+    <p><strong>路径</strong>：菜单「资金出纳 → 付款批次」</p>
+    <p>统一管理工资代发 + 报销付款 + 通用付款三种场景：</p>
     <div class="feature-grid">
       <div class="feature">
         <div class="feature-icon">💼</div>
@@ -887,13 +887,76 @@
         <div class="feature-name">报销批次</div>
         <div class="feature-desc">从已审批未付款报销单生成；标记已付款后自动同步报销单付款状态</div>
       </div>
+      <div class="feature">
+        <div class="feature-icon">🧾</div>
+        <div class="feature-name">通用批次 <span class="badge badge-new">v0.7 新增</span></div>
+        <div class="feature-desc">勾选已审批未结算的付款单成批付款；逐单结算各自生成资金凭证</div>
+      </div>
+    </div>
+    <div class="callout callout-info">
+      <strong>ℹ️ 资金账户必选 <span class="badge badge-new">v0.7 新增</span></strong>
+      新批次生成时必须选择付款资金账户，付款凭证自动贷记该账户挂接科目；历史旧批次只读（仅可作废）。
     </div>
     <p><strong>批次状态流转</strong>：</p>
     <div class="steps">
       <div class="step"><strong>草稿（draft）</strong>：刚生成，可修改</div>
       <div class="step"><strong>已导出（exported）</strong>：导出 Excel 准备发银行</div>
       <div class="step"><strong>已付款（paid）</strong>：银行确认付款完成</div>
-      <div class="step"><strong>作废（void）</strong>：错误批次可作废，释放引用</div>
+      <div class="step"><strong>作废（void）</strong>：错误批次可作废，释放引用单据回已审批</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">🏛️</span>资金账户 <span class="badge badge-new">v0.7 新增</span></div>
+    <p><strong>路径</strong>：菜单「资金出纳 → 资金账户」</p>
+    <div class="steps">
+      <div class="step"><strong>新建账户</strong>：填账户编码/名称，选类型（银行 / 第三方支付 / 现金）与挂接资金科目（1001 库存现金 / 1002 银行存款 / 1012 其他货币资金），期初余额非负</div>
+      <div class="step"><strong>默认账户</strong>：同类账户可设一个默认，付款单默认带出；默认账户须先把其他同类型账户设为默认后才能停用</div>
+      <div class="step"><strong>历史归集</strong>：升级后点「历史归集」向导，把旧银行流水 / 旧付款批次的资金分录归集到对应账户；不做归集，月结会持续提醒</div>
+      <div class="step"><strong>严格对账</strong>：银行 / 第三方支付账户可开启（现金账户无此开关）；开启后该账户当月调节表未确认或存在部分核销时，月结由提醒升级为阻塞</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">💰</span>收付款单 <span class="badge badge-new">v0.7 新增</span></div>
+    <p><strong>路径</strong>：菜单「资金出纳 → 收付款单」</p>
+    <div class="steps">
+      <div class="step"><strong>新建单据</strong>：支持收款 / 付款 / 内部转账 / 员工借款 / 借款核销，按类型选择方向匹配的资金账户与往来单位</div>
+      <div class="step"><strong>审批留痕</strong>：单据走 草稿 → 提交 → 审批（或驳回 / 撤回）→ 结算，每一步记审批时间线（谁、何时、意见），结算自动生成资金凭证</div>
+      <div class="step"><strong>经办复核</strong>：工具栏「审批设置」可开启经办 / 复核分离，经办人与审批人不能是同一操作人</div>
+      <div class="step"><strong>冲正纠错</strong>：已结算单据不直接作废，走「冲正」生成红字凭证（原凭证保留，净影响归零）；已月结月份须先反月结再冲正</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">🏦</span>银行对账（多对多核销） <span class="badge badge-new">v0.7 新增</span></div>
+    <p><strong>路径</strong>：菜单「资金出纳 → 银行对账」</p>
+    <div class="steps">
+      <div class="step"><strong>导入流水</strong>：先选资金账户再导入 CSV / Excel 流水，导入前可预览字段与归属，旧流水可在资金账户页用归集向导补账户</div>
+      <div class="step"><strong>对账工作台</strong>：左栏银行流水、右栏账面资金分录双栏核销；一笔流水可拆分核销到多张分录，反之亦可（核销金额守恒、不跨账户）</div>
+      <div class="step"><strong>自动匹配</strong>：按金额 / 日期窗口 / 摘要等因子评分推荐候选，可批量确认全额等量核销；旧版一对一匹配已升级为多对多</div>
+      <div class="step"><strong>余额调节表</strong>：按月生成「银行对账单余额 ↔ 账面余额」调节表（未达账项 + 在途），确认后作为月结依据；严格对账账户未确认会阻塞月结</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">📒</span>资金日记账 <span class="badge badge-new">v0.7 新增</span></div>
+    <p><strong>路径</strong>：菜单「资金出纳 → 资金日记账」</p>
+    <div class="steps">
+      <div class="step"><strong>按账户查日记账</strong>：选账户与月份，展示每笔收支、余额滚动与对应凭证号，数据直接来自凭证资金分录（账账一致，无第二套账）</div>
+      <div class="step"><strong>跨月滚动</strong>：期初余额自动取上月期末，支持连续翻月追溯</div>
+      <div class="step"><strong>导出 Excel</strong>：一键导出当前账户当月日记账存档</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">🧰</span>借款备用金 <span class="badge badge-new">v0.7 新增</span></div>
+    <p><strong>路径</strong>：菜单「资金出纳 → 借款备用金」</p>
+    <div class="steps">
+      <div class="step"><strong>借款台账</strong>：按员工汇总未清余额、逾期天数与账龄分布（0-30 / 31-60 / 61-90 / 90+ 天），逾期借款在月结体检中提醒</div>
+      <div class="step"><strong>新增借款</strong>：填员工、金额、借款日期与预计归还日期，审批结算后资金从账户付出并挂账其他应收款</div>
+      <div class="step"><strong>核销借款</strong>：支持现金归还 / 报销抵扣 / 工资扣回三种方式，可一张核销单分多笔关联；累计核销不能超过借款金额</div>
+      <div class="step"><strong>取消核销</strong>：未结算的核销单直接作废并恢复额度；已结算的走冲正联动恢复</div>
     </div>
   </div>
 
@@ -902,10 +965,10 @@
     <p><strong>路径</strong>：菜单「工作台 → 月结工作台」</p>
     <div class="steps">
       <div class="step"><strong>选择月份</strong>：月份选择器切换到需要关账的月份</div>
-      <div class="step"><strong>体检</strong>：点「体检」按钮，系统自动检查 8 项异常（未算工资、未锁工资、未付款批次、未匹配流水、超预算、未审批报销、重复金额、异常考勤）</div>
-      <div class="step"><strong>处理阻塞项</strong>：blocking 类型异常必须先处理才能关账；warning 类型可保留</div>
-      <div class="step"><strong>正式月结</strong>：所有阻塞项处理后点「正式月结」→ 输入备注 → 该月所有数据锁定</div>
-      <div class="step"><strong>导出月结包</strong>：点「导出月结包」生成 Excel 压缩包，含月结报告、工资明细、银行代发、发票清单、报销清单、付款批次</div>
+      <div class="step"><strong>体检</strong>：点「体检」按钮，系统自动检查 20 余项异常，涵盖未算 / 未锁工资、未付款批次、未核销流水、超预算、未审批报销、重复金额、异常考勤、凭证平衡，以及 v0.7 新增的资金出纳项（待审批资金单、已审批未付款资金单、已结算缺辅助凭证、待归集银行流水、部分核销、严格对账调节表未确认、借款逾期）</div>
+      <div class="step"><strong>处理阻塞项</strong>：blocking 类型异常必须先处理才能关账；warning 类型可保留（借款逾期、部分核销等资金提醒）</div>
+      <div class="step"><strong>正式月结</strong>：所有阻塞项处理后点「正式月结」→ 输入备注 → 该月所有数据锁定（含资金单据与银行核销）</div>
+      <div class="step"><strong>导出月结包</strong>：点「导出月结包」生成 Excel 压缩包，含月结报告、工资明细、银行代发、发票清单、报销清单、付款批次，以及 v0.7 新增的资金日记账、余额调节表、借款台账</div>
     </div>
     <div class="callout callout-warn">
       <strong>⚠️ 月结后不可修改</strong>
@@ -926,15 +989,13 @@
 
   <div class="card">
     <div class="card-title"><span class="icon">🏦</span>银行流水</div>
-    <p><strong>路径</strong>：菜单「薪酬核算 → 银行流水」</p>
+    <p><strong>路径</strong>：菜单「资金出纳 → 银行对账」（v0.7 起流水匹配升级为多对多核销，详见第 7 章「银行对账」）</p>
     <div class="steps">
       <div class="step"><strong>导出银行流水</strong>：从企业网银导出 CSV 或 Excel 流水（含日期、摘要、对方户名、账号、收入、支出、余额）</div>
-      <div class="step"><strong>导入流水</strong>：点「导入流水」→ 选择文件 → 自动解析字段映射</div>
-      <div class="step"><strong>自动匹配</strong>：系统按金额一致 + 月份一致 + 已付款批次 + 摘要文本加分，自动一对一匹配</div>
-      <div class="step"><strong>人工补对账</strong>：未自动匹配的流水可手工选择对应付款批次（金额必须一致）</div>
+      <div class="step"><strong>导入流水</strong>：点「导入流水」→ 先选资金账户 → 选择文件 → 预览确认后入库</div>
+      <div class="step"><strong>生成凭证</strong>：未核销流水可选科目直接生成入账凭证（如手续费计财务费用、利息收入冲财务费用），计入当月现金流量表</div>
       <div class="step"><strong>忽略流水</strong>：非付款相关的流水（如手续费、利息）可标记为「忽略」</div>
-      <div class="step"><strong>生成凭证</strong>：未匹配流水也可选科目直接生成入账凭证（如手续费计财务费用、利息收入冲财务费用），计入当月现金流量表</div>
-      <div class="step"><strong>月结检查</strong>：存在已付款但未匹配银行流水的批次时，月结体检会阻塞</div>
+      <div class="step"><strong>月结检查</strong>：存在已付款但未核销银行流水的批次，或账户开启严格对账而调节表未确认时，月结体检会阻塞</div>
     </div>
     <div class="callout callout-info">
       <strong>ℹ️ 不做网银直连</strong>
@@ -1383,12 +1444,16 @@
         <tr><td>考勤管理</td><td>月度考勤数据</td></tr>
         <tr><td>打卡表管理</td><td>OCR 识别打卡表</td></tr>
         <tr><td>OCR 识别中心</td><td>OCR 设置 / 百度 token 配置</td></tr>
-        <tr><td rowspan="4"><strong>薪酬核算</strong></td><td>工资计算</td><td>一键计算 / 单人重算 / 锁定 / 工资条 / 个税年度汇总</td></tr>
+        <tr><td rowspan="2"><strong>薪酬核算</strong></td><td>工资计算</td><td>一键计算 / 单人重算 / 锁定 / 工资条 / 个税年度汇总</td></tr>
         <tr><td>社保台账</td><td>按员工×年度基数费率 / 年度调基 / 上下限</td></tr>
-        <tr><td>付款批次</td><td>工资 / 报销付款统一管理</td></tr>
-        <tr><td>银行流水</td><td>导入 / 自动匹配 / 人工对账 / 生成凭证</td></tr>
         <tr><td rowspan="2"><strong>票据报销</strong></td><td>发票管理</td><td>OCR 上传 / 去重 / 详情</td></tr>
-        <tr><td>报销管理</td><td>报销单审批</td></tr>
+        <tr><td>报销管理</td><td>报销单审批 / 经办复核 / 反审批</td></tr>
+        <tr><td rowspan="6"><strong>资金出纳</strong></td><td>资金账户</td><td>账户 CRUD / 默认账户 / 历史归集 / 严格对账开关</td></tr>
+        <tr><td>收付款单</td><td>收款 / 付款 / 转账 / 借款单据审批流 + 时间线 + 冲正</td></tr>
+        <tr><td>付款批次</td><td>工资 / 报销 / 通用批次，资金账户必选</td></tr>
+        <tr><td>银行对账</td><td>流水导入 / 多对多核销工作台 / 余额调节表</td></tr>
+        <tr><td>资金日记账</td><td>按账户收支明细 + 滚动余额 + Excel 导出</td></tr>
+        <tr><td>借款备用金</td><td>借款台账 / 账龄 / 三方式核销 / 导出</td></tr>
         <tr><td rowspan="3"><strong>财务管理</strong></td><td>科目表</td><td>62 预置科目 / 期初余额 / 映射</td></tr>
         <tr><td>记账凭证</td><td>自动生成 / 作废联动 / 分录明细</td></tr>
         <tr><td>财务报表</td><td>三大报表 + 科目余额表 / 同期对比 / Excel</td></tr>
@@ -1406,6 +1471,7 @@
     <table>
       <thead><tr><th>版本</th><th>主要能力</th></tr></thead>
       <tbody>
+        <tr><td><strong>v0.7（待发版）</strong></td><td>出纳运营闭环（资金账户 / 收付款单审批留痕 / 通用付款批次 / 多对多银行对账 / 资金日记账 / 余额调节表 / 借款核销 / 报销治理 / 月结资金联动）</td></tr>
         <tr><td><strong>v0.6.0</strong></td><td>财务功能拓展（科目余额表 / 年末结转 / 社保台账 / 累计预扣 / 工资条 / 同期列）</td></tr>
         <tr><td><strong>v0.5.2</strong></td><td>受控解锁工资与月结防漏锁（2026-08-21）</td></tr>
         <tr><td><strong>v0.4.x</strong></td><td>安全配置（启动密码 / 锁屏 / 加密 / 脱敏）</td></tr>
