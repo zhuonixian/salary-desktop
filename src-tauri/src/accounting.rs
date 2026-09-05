@@ -2179,6 +2179,19 @@ mod tests {
         conn
     }
 
+    /// 报销状态机测试用当前操作人（Task 15 治理：审批命令须署名）
+    fn claim_operator(conn: &Connection) -> crate::cashier::CurrentOperatorState {
+        conn.execute(
+            "INSERT INTO operator_profiles (name, role, is_active, created_at, updated_at)
+             VALUES ('测试审批', 'cashier', 1, '2026-08-01', '2026-08-01')",
+            [],
+        )
+        .unwrap();
+        let current = crate::cashier::CurrentOperatorState::default();
+        crate::cashier::set_current_operator(conn, &current, conn.last_insert_rowid()).unwrap();
+        current
+    }
+
     /// 第七阶段资金辅助核算：分录 fund_account_id 落库并可回读（spec 4.7）；
     /// get_active_voucher_for_source 按 (source_type, source_id) 命中唯一 active 凭证。
     #[test]
@@ -3209,7 +3222,8 @@ mod tests {
         assert_eq!(vouchers.len(), 1);
         assert_eq!(vouchers[0].source_id, invoice.id);
 
-        // 挂到报销单并审批通过
+        // 挂到报销单并审批通过（Task 15 起：保存恒为草稿，审批经 cashier 状态机）
+        let current = claim_operator(&conn);
         let claim = db::save_reimbursement_claim(
             &conn,
             &crate::models::ReimbursementClaimInput {
@@ -3218,14 +3232,12 @@ mod tests {
                 belong_month: "2026-08".into(),
                 title: "办公报销".into(),
                 invoice_ids: vec![invoice.id],
-                status: Some("submitted".into()),
-                payment_status: None,
-                payment_date: None,
                 remark: None,
             },
         )
         .unwrap();
-        // 保存后（submitted 未审批）不应有报销计提；发票仍单独入账（防漏记），
+        assert_eq!(claim.status, "draft");
+        // 保存后（草稿未审批）不应有报销计提；发票仍单独入账（防漏记），
         // 其单独凭证被补偿性 void+重建（金额不变，凭证号前移）
         let accruals = get_vouchers(
             &conn,
@@ -3248,9 +3260,9 @@ mod tests {
         .unwrap();
         assert_eq!(active_expense.len(), 1);
 
-        // 审批通过：生成报销计提
-        db::update_reimbursement_claim_status(&conn, claim.id, Some("approved".into()), None, None)
-            .unwrap();
+        // 提交并审批通过：生成报销计提
+        crate::cashier::submit_reimbursement_claim(&conn, &current, claim.id, None).unwrap();
+        crate::cashier::approve_reimbursement_claim(&conn, &current, claim.id, "同意").unwrap();
         let accruals = get_vouchers(
             &conn,
             &VoucherQuery {
@@ -3265,14 +3277,7 @@ mod tests {
         assert_eq!(accruals[0].total_amount, 113.0);
 
         // 反审批：报销计提 void，发票恢复单独入账
-        db::update_reimbursement_claim_status(
-            &conn,
-            claim.id,
-            Some("submitted".into()),
-            None,
-            None,
-        )
-        .unwrap();
+        crate::cashier::unapprove_reimbursement_claim(&conn, &current, claim.id, "换票").unwrap();
         let active_accruals = get_vouchers(
             &conn,
             &VoucherQuery {
@@ -3308,10 +3313,10 @@ mod tests {
         .unwrap();
         assert_eq!(active_expense.len(), 0);
 
-        // soft_delete_reimbursement_claim：报销计提凭证 void
-        db::update_reimbursement_claim_status(&conn, claim.id, Some("approved".into()), None, None)
-            .unwrap();
-        db::soft_delete_reimbursement_claim(&conn, claim.id).unwrap();
+        // 重新审批后再作废：报销计提凭证 void
+        crate::cashier::submit_reimbursement_claim(&conn, &current, claim.id, None).unwrap();
+        crate::cashier::approve_reimbursement_claim(&conn, &current, claim.id, "同意").unwrap();
+        crate::cashier::void_reimbursement_claim(&conn, &current, claim.id, "测试作废").unwrap();
         let active_accruals = get_vouchers(
             &conn,
             &VoucherQuery {

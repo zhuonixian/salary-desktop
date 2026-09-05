@@ -804,10 +804,10 @@ fn rebuild_vouchers_source_type_check(conn: &Connection) -> AppResult<()> {
     result
 }
 
-/// 重建 `approval_events` 表扩展 `action` CHECK 白名单（`'unbatch'`，批次释放资金单，
-/// spec 5.3）。旧库 CHECK 固化在表定义里，只能重建表放行新动作；新库 DDL 已含该动作时
-/// 跳过（幂等）。按 id 原序复制全部行并重建索引；本表无子表引用（无级联风险），
-/// 全程在单事务中执行，任一步失败整体回滚。
+/// 重建 `approval_events` 表扩展 `action` CHECK 白名单（`'unapprove'`，报销反审批，
+/// spec 5.2；此前已扩展过 `'unbatch'`）。旧库 CHECK 固化在表定义里，只能重建表放行新动作；
+/// 新库 DDL 已含该动作时跳过（幂等）。按 id 原序复制全部行并重建索引；
+/// 本表无子表引用（无级联风险），全程在单事务中执行，任一步失败整体回滚。
 fn rebuild_approval_events_action_check(conn: &Connection) -> AppResult<()> {
     let create_sql: Option<String> = conn
         .query_row(
@@ -820,7 +820,7 @@ fn rebuild_approval_events_action_check(conn: &Connection) -> AppResult<()> {
     let Some(sql) = create_sql else {
         return Ok(());
     };
-    if sql.contains("unbatch") {
+    if sql.contains("unapprove") {
         return Ok(());
     }
     run_migration_in_transaction(conn, |c| {
@@ -833,7 +833,7 @@ fn rebuild_approval_events_action_check(conn: &Connection) -> AppResult<()> {
                 entity_id INTEGER NOT NULL,
                 action TEXT NOT NULL CHECK (action IN
                     ('submit','approve','reject','settle','void','reverse','withdraw','batch',
-                     'unbatch')),
+                     'unbatch','unapprove')),
                 from_status TEXT,
                 to_status TEXT,
                 operator_id INTEGER,
@@ -999,13 +999,14 @@ fn create_stage7_tables(conn: &Connection) -> AppResult<()> {
 
         -- 追加式审批事件（spec 4.5）：报销单与资金单据共用，不允许 UPDATE/DELETE。
         -- action 覆盖资金单状态机全部命令（withdraw=撤回、batch=进入付款批次）
+        -- 及报销审批治理（unapprove=反审批，spec 5.2）
         CREATE TABLE IF NOT EXISTS approval_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             entity_type TEXT NOT NULL CHECK (entity_type IN ('reimbursement_claim','fund_document')),
             entity_id INTEGER NOT NULL,
             action TEXT NOT NULL CHECK (action IN
                 ('submit','approve','reject','settle','void','reverse','withdraw','batch',
-                 'unbatch')),
+                 'unbatch','unapprove')),
             from_status TEXT,
             to_status TEXT,
             operator_id INTEGER,
@@ -3495,7 +3496,7 @@ pub fn get_payment_batch_detail(conn: &Connection, id: i64) -> AppResult<Payment
     Ok(PaymentBatchDetail { batch, items })
 }
 
-fn active_payment_item_exists(
+pub(crate) fn active_payment_item_exists(
     conn: &Connection,
     source_type: &str,
     source_id: i64,
@@ -6322,14 +6323,28 @@ pub fn get_reimbursement_invoices(
     rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
 }
 
+/// 保存报销单（Task 15 治理，spec 5.2）：只处理草稿业务字段。
+/// - 新增恒为 draft/unpaid；编辑仅允许草稿（submitted 须先撤回、approved 须先反审批、
+///   rejected 须先撤回），状态/付款状态/付款日期不再接受入参写入；
+/// - 审批流走 cashier.rs 状态机命令，付款只能通过付款批次事务更新。
 pub fn save_reimbursement_claim(
     conn: &Connection,
     data: &ReimbursementClaimInput,
 ) -> AppResult<ReimbursementClaim> {
     ensure_month_open(conn, &data.belong_month)?;
     if let Some(id) = data.id {
-        let old_month = get_reimbursement_claim_month(conn, id)?;
-        ensure_month_open(conn, &old_month)?;
+        let existing = get_reimbursement_claim(conn, id)?;
+        ensure_month_open(conn, &existing.belong_month)?;
+        if existing.status == "void" {
+            return Err(AppError::NotFound(format!("报销单ID={id}未找到或已作废")));
+        }
+        if existing.status != "draft" {
+            return Err(AppError::InvalidParam(format!(
+                "报销单 {} 当前状态「{}」，仅草稿可编辑；请先撤回/反审批",
+                existing.claim_no,
+                existing.status
+            )));
+        }
         if active_payment_item_exists(conn, "reimbursement_claim", id)? {
             return Err(AppError::InvalidParam(
                 "报销单已纳入付款批次，不能直接编辑".into(),
@@ -6373,20 +6388,18 @@ pub fn save_reimbursement_claim(
     let tx = conn.unchecked_transaction()?;
     let mut old_invoice_ids: Vec<i64> = Vec::new();
     let claim_id = if let Some(id) = data.id {
+        // 编辑不触碰 status/payment_status/payment_date（spec 5.2 状态不可由表单改写）
         let updated = tx.execute(
             "UPDATE reimbursement_claims
              SET employee_id=?1, belong_month=?2, title=?3, total_amount=?4, invoice_count=?5,
-                 status=?6, payment_status=?7, payment_date=?8, remark=?9, updated_at=?10
-             WHERE id=?11 AND status != 'void'",
+                 remark=?6, updated_at=?7
+             WHERE id=?8 AND status != 'void'",
             params![
                 employee_id,
                 data.belong_month.trim(),
                 title,
                 total_amount,
                 data.invoice_ids.len() as i32,
-                data.status.as_deref().unwrap_or("draft"),
-                data.payment_status.as_deref().unwrap_or("unpaid"),
-                data.payment_date.as_ref(),
                 data.remark.as_ref(),
                 now,
                 id
@@ -6414,7 +6427,7 @@ pub fn save_reimbursement_claim(
             "INSERT INTO reimbursement_claims
              (claim_no, employee_id, belong_month, title, total_amount, invoice_count,
               status, payment_status, payment_date, remark, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'draft', 'unpaid', NULL, ?7, ?8, ?9)",
             params![
                 claim_no,
                 employee_id,
@@ -6422,9 +6435,6 @@ pub fn save_reimbursement_claim(
                 title,
                 total_amount,
                 data.invoice_ids.len() as i32,
-                data.status.as_deref().unwrap_or("draft"),
-                data.payment_status.as_deref().unwrap_or("unpaid"),
-                data.payment_date.as_ref(),
                 data.remark.as_ref(),
                 now,
                 now
@@ -6474,88 +6484,12 @@ fn compensate_claim_vouchers(
     Ok(())
 }
 
-pub fn update_reimbursement_claim_status(
-    conn: &Connection,
-    id: i64,
-    status: Option<String>,
-    payment_status: Option<String>,
-    payment_date: Option<String>,
-) -> AppResult<bool> {
-    let existing = get_reimbursement_claim(conn, id)?;
-    ensure_month_open(conn, &existing.belong_month)?;
-    if payment_status.is_some() && active_payment_item_exists(conn, "reimbursement_claim", id)? {
-        return Err(AppError::InvalidParam(
-            "报销单已纳入付款批次，请在付款批次中处理付款状态".into(),
-        ));
-    }
-    let old_status = existing.status.clone();
-    let new_status = status.unwrap_or(existing.status);
-    let new_payment_status = payment_status.unwrap_or(existing.payment_status);
-    let now = Utc::now().to_rfc3339();
-    // 状态变更与凭证联动同事务：进入 approved 生成计提并作废关联发票单独凭证（防重复计费）；
-    // 离开 approved（反审批/驳回）作废计提并恢复仍满足条件的发票单独凭证
-    let tx = conn.unchecked_transaction()?;
-    let updated = tx.execute(
-        "UPDATE reimbursement_claims
-         SET status=?1, payment_status=?2, payment_date=?3, updated_at=?4
-         WHERE id=?5 AND status != 'void'",
-        params![new_status, new_payment_status, payment_date, now, id],
-    )?;
-    if updated > 0 && new_status != old_status {
-        let invoice_ids: Vec<i64> = {
-            let mut stmt = tx.prepare(
-                "SELECT invoice_id FROM reimbursement_claim_invoices WHERE claim_id = ?1",
-            )?;
-            let rows = stmt.query_map(params![id], |r| r.get(0))?;
-            rows.collect::<Result<Vec<_>, _>>()?
-        };
-        if new_status == "approved" {
-            for invoice_id in &invoice_ids {
-                crate::accounting::void_invoice_expense_voucher(&tx, *invoice_id)?;
-            }
-            crate::accounting::generate_reimbursement_accrual_voucher(&tx, id)?;
-        } else if old_status == "approved" {
-            crate::accounting::void_reimbursement_accrual_voucher(&tx, id)?;
-            for invoice_id in &invoice_ids {
-                crate::accounting::maybe_generate_invoice_expense_voucher(&tx, *invoice_id)?;
-            }
-        }
-    }
-    tx.commit()?;
-    Ok(updated > 0)
-}
+/// 报销单状态流转（submit/approve/reject/withdraw/unapprove/void）自 Task 15 起
+/// 统一收敛到 `cashier.rs` 审批治理状态机：署名 + 来源状态校验 + 月结保护 +
+/// 凭证联动 + approval_events 追加同事务（spec 5.2）。
+/// 旧的 `update_reimbursement_claim_status` 直写通道与 `soft_delete_reimbursement_claim`
+/// 已移除，防止绕过审批轨迹。
 
-pub fn soft_delete_reimbursement_claim(conn: &Connection, id: i64) -> AppResult<bool> {
-    let old_month = get_reimbursement_claim_month(conn, id)?;
-    ensure_month_open(conn, &old_month)?;
-    if active_payment_item_exists(conn, "reimbursement_claim", id)? {
-        return Err(AppError::InvalidParam(
-            "报销单已纳入付款批次，不能直接作废".into(),
-        ));
-    }
-    let now = Utc::now().to_rfc3339();
-    // 报销单作废与凭证联动同事务：作废计提凭证 + 关联发票恢复单独入账
-    let tx = conn.unchecked_transaction()?;
-    let updated = tx.execute(
-        "UPDATE reimbursement_claims SET status='void', updated_at=?1 WHERE id=?2 AND status != 'void'",
-        params![now, id],
-    )?;
-    if updated > 0 {
-        let invoice_ids: Vec<i64> = {
-            let mut stmt = tx.prepare(
-                "SELECT invoice_id FROM reimbursement_claim_invoices WHERE claim_id = ?1",
-            )?;
-            let rows = stmt.query_map(params![id], |r| r.get(0))?;
-            rows.collect::<Result<Vec<_>, _>>()?
-        };
-        crate::accounting::void_reimbursement_accrual_voucher(&tx, id)?;
-        for invoice_id in &invoice_ids {
-            crate::accounting::maybe_generate_invoice_expense_voucher(&tx, *invoice_id)?;
-        }
-    }
-    tx.commit()?;
-    Ok(updated > 0)
-}
 
 fn ensure_invoice_not_claimed(
     conn: &Connection,
@@ -7074,7 +7008,10 @@ pub mod tests {
     #[test]
     fn test_month_close_excludes_void_paid_reimbursements() {
         let conn = setup_financial_db();
-        assert!(soft_delete_reimbursement_claim(&conn, 1).unwrap());
+        let operator = seed_claim_operator(&conn);
+        let voided = crate::cashier::void_reimbursement_claim(&conn, &operator, 1, "测试作废")
+            .unwrap();
+        assert_eq!(voided.status, "void");
 
         let workbench = get_month_close_workbench(&conn, "2026-08").unwrap();
 
@@ -7215,6 +7152,19 @@ pub mod tests {
     /// 批次测试用操作人会话（general 批次状态机署名必须）
     pub(crate) fn batch_operator() -> crate::cashier::CurrentOperatorState {
         crate::cashier::CurrentOperatorState::default()
+    }
+
+    /// 报销治理测试用：种一个启用操作人并设为当前（状态机命令署名必须）
+    pub(crate) fn seed_claim_operator(conn: &Connection) -> crate::cashier::CurrentOperatorState {
+        conn.execute(
+            "INSERT INTO operator_profiles (name, role, is_active, created_at, updated_at)
+             VALUES ('测试审批', 'cashier', 1, '2026-08-01', '2026-08-01')",
+            [],
+        )
+        .unwrap();
+        let operator = crate::cashier::CurrentOperatorState::default();
+        crate::cashier::set_current_operator(conn, &operator, conn.last_insert_rowid()).unwrap();
+        operator
     }
 
     /// general 批次测试环境：带银行信息的往来单位 + 已选操作人会话，返回 (partner_id, operator)
@@ -7422,17 +7372,16 @@ pub mod tests {
         let invoice_delete_err = soft_delete_invoice(&conn, 1).unwrap_err();
         assert!(matches!(invoice_delete_err, AppError::InvalidParam(_)));
 
-        let reimbursement_err = update_reimbursement_claim_status(
-            &conn,
-            1,
-            Some("approved".into()),
-            Some("paid".into()),
-            Some("2026-08-31".into()),
-        )
-        .unwrap_err();
+        // Task 15 起：报销状态走状态机命令，同样受月结保护（反审批/作废均被拦）
+        let claim_operator = seed_claim_operator(&conn);
+        let reimbursement_err =
+            crate::cashier::unapprove_reimbursement_claim(&conn, &claim_operator, 1, "月结反审批")
+                .unwrap_err();
         assert!(matches!(reimbursement_err, AppError::InvalidParam(_)));
 
-        let reimbursement_delete_err = soft_delete_reimbursement_claim(&conn, 1).unwrap_err();
+        let reimbursement_delete_err =
+            crate::cashier::void_reimbursement_claim(&conn, &claim_operator, 1, "月结作废")
+                .unwrap_err();
         assert!(matches!(
             reimbursement_delete_err,
             AppError::InvalidParam(_)
@@ -7657,17 +7606,20 @@ pub mod tests {
         assert_eq!(detail.batch.item_count, 1);
         assert_eq!(detail.batch.total_amount, 500.0);
 
-        let direct_payment_err = update_reimbursement_claim_status(
+        // Task 15 起：报销单无直接付款通道（付款只能经批次）；已入批次禁止反审批/作废
+        let claim_operator = seed_claim_operator(&conn);
+        let direct_unapprove_err = crate::cashier::unapprove_reimbursement_claim(
             &conn,
+            &claim_operator,
             2,
-            None,
-            Some("paid".into()),
-            Some("2026-08-31".into()),
+            "批次内反审批",
         )
         .unwrap_err();
-        assert!(matches!(direct_payment_err, AppError::InvalidParam(_)));
+        assert!(matches!(direct_unapprove_err, AppError::InvalidParam(_)));
 
-        let direct_void_err = soft_delete_reimbursement_claim(&conn, 2).unwrap_err();
+        let direct_void_err =
+            crate::cashier::void_reimbursement_claim(&conn, &claim_operator, 2, "批次内作废")
+                .unwrap_err();
         assert!(matches!(direct_void_err, AppError::InvalidParam(_)));
 
         let draft_paid_err = mark_payment_batch_paid(
@@ -9282,7 +9234,10 @@ pub mod tests {
     #[test]
     fn test_update_void_reimbursement_claim_is_rejected_without_relinking() {
         let conn = setup_financial_db();
-        assert!(soft_delete_reimbursement_claim(&conn, 1).unwrap());
+        let operator = seed_claim_operator(&conn);
+        let voided = crate::cashier::void_reimbursement_claim(&conn, &operator, 1, "测试作废")
+            .unwrap();
+        assert_eq!(voided.status, "void");
 
         let err = save_reimbursement_claim(
             &conn,
@@ -9292,9 +9247,6 @@ pub mod tests {
                 belong_month: "2026-08".into(),
                 title: "作废后编辑".into(),
                 invoice_ids: vec![1],
-                status: Some("draft".into()),
-                payment_status: Some("unpaid".into()),
-                payment_date: None,
                 remark: None,
             },
         )
@@ -10186,6 +10138,11 @@ mod stage7_tests {
         assert!(
             sql.contains("unbatch"),
             "action CHECK 应包含 unbatch：{sql}"
+        );
+        // Task 15：重建后同时放行报销反审批动作（spec 5.2）
+        assert!(
+            sql.contains("unapprove"),
+            "action CHECK 应包含 unapprove：{sql}"
         );
         // 历史轨迹保留，且新动作可写入
         let total: i64 = conn

@@ -31,6 +31,12 @@ const operationTypeLabels: Record<string, string> = {
   export_invoices: '导出发票清单',
   create_reimbursement: '新增报销单',
   update_reimbursement: '更新报销单',
+  submit_reimbursement: '提交报销单',
+  approve_reimbursement: '审批通过报销单',
+  reject_reimbursement: '驳回报销单',
+  withdraw_reimbursement: '撤回报销单',
+  unapprove_reimbursement: '报销反审批',
+  // 历史直写状态通道已退役（Task 15），标签仅为旧日志可读性保留
   update_reimbursement_status: '更新报销状态',
   delete_reimbursement: '作废报销单',
   export_department_cost_report: '导出部门成本表',

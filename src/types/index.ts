@@ -941,15 +941,15 @@ export interface ReimbursementClaim {
   updated_at?: string;
 }
 
+// Task 15 治理（spec 5.2）：入参只承载草稿业务字段；审批/付款状态不可由表单写入——
+// 审批状态经 submit/approve/reject/withdraw/unapprove 状态机命令流转，
+// 付款状态只能由付款批次事务更新。
 export interface ReimbursementClaimInput {
   id?: number;
   employee_id?: number;
   belong_month: string;
   title: string;
   invoice_ids: number[];
-  status?: ReimbursementStatus;
-  payment_status?: PaymentStatus;
-  payment_date?: string;
   remark?: string;
 }
 

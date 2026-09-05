@@ -215,7 +215,11 @@ pub fn run() {
         commands::query_reimbursement_claims,
         commands::save_reimbursement_claim,
         commands::get_reimbursement_invoices,
-        commands::update_reimbursement_claim_status,
+        commands::submit_reimbursement_claim,
+        commands::approve_reimbursement_claim,
+        commands::reject_reimbursement_claim,
+        commands::withdraw_reimbursement_claim,
+        commands::unapprove_reimbursement_claim,
         commands::delete_reimbursement_claim,
         // ===== Accounting（第五阶段 科目/期初/映射） =====
         commands::get_gl_accounts,

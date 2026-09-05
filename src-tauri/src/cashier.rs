@@ -13,6 +13,8 @@
 //! `Some("")`=清空）；错误信息统一中文。
 //! 资金单据状态只能经命令流转（submit/approve/reject/withdraw/void/mark_batched/settle/reverse），
 //! 状态更新、凭证生成与 approval_events 追加同事务；前端不得直接编辑状态字段。
+//! 报销单审批治理（spec 5.2）同样收敛在本模块：submit/approve/reject/withdraw/
+//! unapprove/void 命令化，保存路径只处理草稿业务字段，付款只经付款批次。
 
 use std::sync::Mutex;
 
@@ -3385,6 +3387,333 @@ fn resolve_optional(input: &Option<String>, existing: Option<String>) -> Option<
         }
         None => existing,
     }
+}
+
+// ==================== 报销单审批治理（Task 15，spec 5.2） ====================
+
+/// 报销单审批状态标签
+fn reimbursement_status_label(status: &str) -> &'static str {
+    match status {
+        "draft" => "草稿",
+        "submitted" => "待审批",
+        "approved" => "已审批",
+        "rejected" => "已驳回",
+        "void" => "已作废",
+        _ => "未知状态",
+    }
+}
+
+/// 报销单状态机动作标签
+fn reimbursement_action_label(action: &str) -> &'static str {
+    match action {
+        "submit" => "提交",
+        "approve" => "审批",
+        "reject" => "驳回",
+        "withdraw" => "撤回",
+        "unapprove" => "反审批",
+        "void" => "作废",
+        _ => "状态变更",
+    }
+}
+
+/// 报销单已纳入在途付款批次时禁止反审批/作废（批次只收 approved+unpaid 单；
+/// 释放必须先经付款批次作废，防止批次明细与计提凭证脱钩，spec 5.2/5.3）
+fn ensure_reimbursement_not_batched(conn: &Connection, claim_id: i64, action: &str) -> AppResult<()> {
+    if db::active_payment_item_exists(conn, "reimbursement_claim", claim_id)? {
+        return Err(AppError::InvalidParam(format!(
+            "报销单已纳入付款批次，请先在付款批次中作废释放后再{}",
+            reimbursement_action_label(action)
+        )));
+    }
+    Ok(())
+}
+
+/// 最近一次提交人（maker_checker 审批人去重的比对依据，spec 5.2）。
+/// 历史直写状态的老单没有 submit 事件，返回 None（无法比对时放行，兼容旧数据）。
+fn last_reimbursement_submitter(conn: &Connection, claim_id: i64) -> AppResult<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT operator_id FROM approval_events
+             WHERE entity_type = 'reimbursement_claim' AND entity_id = ?1 AND action = 'submit'
+             ORDER BY id DESC LIMIT 1",
+            params![claim_id],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// 报销单关联发票 ID 列表
+fn reimbursement_claim_invoice_ids(conn: &Connection, claim_id: i64) -> AppResult<Vec<i64>> {
+    let mut stmt = conn
+        .prepare("SELECT invoice_id FROM reimbursement_claim_invoices WHERE claim_id = ?1")?;
+    let rows = stmt.query_map(params![claim_id], |r| r.get(0))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// 进入 approved 的凭证联动（状态已更新后、同事务内调用）：
+/// 作废关联发票单独入账凭证（防重复计费），生成报销计提
+fn on_reimbursement_approved(conn: &Connection, claim_id: i64) -> AppResult<()> {
+    for invoice_id in reimbursement_claim_invoice_ids(conn, claim_id)? {
+        accounting::void_invoice_expense_voucher(conn, invoice_id)?;
+    }
+    accounting::generate_reimbursement_accrual_voucher(conn, claim_id)?;
+    Ok(())
+}
+
+/// 离开 approved 的凭证联动（状态已更新后、同事务内调用）：
+/// 作废报销计提，恢复关联发票单独入账
+fn on_reimbursement_left_approved(conn: &Connection, claim_id: i64) -> AppResult<()> {
+    accounting::void_reimbursement_accrual_voucher(conn, claim_id)?;
+    for invoice_id in reimbursement_claim_invoice_ids(conn, claim_id)? {
+        accounting::maybe_generate_invoice_expense_voucher(conn, invoice_id)?;
+    }
+    Ok(())
+}
+
+/// 报销单状态机事务内核（模式同 `transition_fund_document_in_tx`，spec 5.2）：
+/// 当前操作人署名 → 意见校验 → 来源状态校验 → 月结保护 →
+/// 单据状态更新 → 联动守卫（maker_checker/凭证联动，失败整体回滚）→ 追加审批事件。
+#[allow(clippy::too_many_arguments)]
+fn transition_reimbursement_in_tx<F>(
+    tx: &Connection,
+    current: &CurrentOperatorState,
+    claim_id: i64,
+    action: &str,
+    from_statuses: &[&str],
+    to_status: &str,
+    comment: Option<&str>,
+    require_comment: bool,
+    extra: F,
+) -> AppResult<ReimbursementClaim>
+where
+    F: FnOnce(&Connection, &ReimbursementClaim, i64) -> AppResult<()>,
+{
+    let (operator_id, _) = require_current_operator(tx, current)?;
+    let trimmed = comment.map(str::trim).unwrap_or("");
+    if require_comment && trimmed.is_empty() {
+        return Err(AppError::InvalidParam(format!(
+            "{}必须填写意见或原因",
+            reimbursement_action_label(action)
+        )));
+    }
+    let now = Utc::now().to_rfc3339();
+    let claim = db::get_reimbursement_claim(tx, claim_id)?;
+    if !from_statuses.contains(&claim.status.as_str()) {
+        return Err(AppError::General(format!(
+            "报销单 {} 当前状态「{}」，不允许{}（仅允许来源状态：{}）",
+            claim.claim_no,
+            reimbursement_status_label(&claim.status),
+            reimbursement_action_label(action),
+            from_statuses
+                .iter()
+                .map(|s| reimbursement_status_label(s))
+                .collect::<Vec<_>>()
+                .join("、")
+        )));
+    }
+    // 状态写操作均受月结保护（spec 4.4）
+    ensure_month_open(tx, &claim.belong_month)?;
+    tx.execute(
+        "UPDATE reimbursement_claims SET status = ?2, updated_at = ?3 WHERE id = ?1 AND status != 'void'",
+        params![claim_id, to_status, now],
+    )?;
+    // 联动与守卫放在状态更新后：任一失败整体回滚（含状态更新），不留半成品
+    extra(tx, &claim, operator_id)?;
+    insert_approval_event(
+        tx,
+        "reimbursement_claim",
+        claim_id,
+        action,
+        Some(&claim.status),
+        Some(to_status),
+        Some(operator_id),
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        },
+    )?;
+    db::get_reimbursement_claim(tx, claim_id)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn transition_reimbursement<F>(
+    conn: &Connection,
+    current: &CurrentOperatorState,
+    claim_id: i64,
+    action: &str,
+    from_statuses: &[&str],
+    to_status: &str,
+    comment: Option<&str>,
+    require_comment: bool,
+    extra: F,
+) -> AppResult<ReimbursementClaim>
+where
+    F: FnOnce(&Connection, &ReimbursementClaim, i64) -> AppResult<()>,
+{
+    let tx = conn.unchecked_transaction()?;
+    let claim = transition_reimbursement_in_tx(
+        &tx,
+        current,
+        claim_id,
+        action,
+        from_statuses,
+        to_status,
+        comment,
+        require_comment,
+        extra,
+    )?;
+    tx.commit()?;
+    Ok(claim)
+}
+
+/// 提交报销单（draft → submitted）。记录提交人署名（maker_checker 比对依据）。
+pub fn submit_reimbursement_claim(
+    conn: &Connection,
+    current: &CurrentOperatorState,
+    id: i64,
+    comment: Option<&str>,
+) -> AppResult<ReimbursementClaim> {
+    transition_reimbursement(
+        conn,
+        current,
+        id,
+        "submit",
+        &["draft"],
+        "submitted",
+        comment,
+        false,
+        |_, _, _| Ok(()),
+    )
+}
+
+/// 审批通过（submitted → approved），意见必填。
+/// maker_checker 启用时审批人与提交人不得相同（spec 5.2）；
+/// 同事务作废关联发票单独凭证并生成报销计提。
+pub fn approve_reimbursement_claim(
+    conn: &Connection,
+    current: &CurrentOperatorState,
+    id: i64,
+    comment: &str,
+) -> AppResult<ReimbursementClaim> {
+    transition_reimbursement(
+        conn,
+        current,
+        id,
+        "approve",
+        &["submitted"],
+        "approved",
+        Some(comment),
+        true,
+        |tx, claim, operator_id| {
+            if maker_checker_enabled(tx)?
+                && last_reimbursement_submitter(tx, claim.id)?.is_some_and(|s| s == operator_id)
+            {
+                return Err(AppError::General(
+                    "经办复核已启用：审批人与提交人不能是同一人，请切换操作人后再审批".into(),
+                ));
+            }
+            on_reimbursement_approved(tx, claim.id)
+        },
+    )
+}
+
+/// 驳回（submitted → rejected），意见必填并随审批事件落库。
+pub fn reject_reimbursement_claim(
+    conn: &Connection,
+    current: &CurrentOperatorState,
+    id: i64,
+    comment: &str,
+) -> AppResult<ReimbursementClaim> {
+    transition_reimbursement(
+        conn,
+        current,
+        id,
+        "reject",
+        &["submitted"],
+        "rejected",
+        Some(comment),
+        true,
+        |_, _, _| Ok(()),
+    )
+}
+
+/// 撤回（submitted/rejected → draft）：提交人反悔或按驳回意见修改后重走流程。
+pub fn withdraw_reimbursement_claim(
+    conn: &Connection,
+    current: &CurrentOperatorState,
+    id: i64,
+    comment: Option<&str>,
+) -> AppResult<ReimbursementClaim> {
+    transition_reimbursement(
+        conn,
+        current,
+        id,
+        "withdraw",
+        &["submitted", "rejected"],
+        "draft",
+        comment,
+        false,
+        |_, _, _| Ok(()),
+    )
+}
+
+/// 反审批（approved → draft），原因必填并随审批事件落库（spec 5.2：
+/// 已审批后修改附件或发票必须先反审批，记录原因并作废原计提凭证）。
+/// 已纳入付款批次或已付款的单据不得反审批。
+pub fn unapprove_reimbursement_claim(
+    conn: &Connection,
+    current: &CurrentOperatorState,
+    id: i64,
+    comment: &str,
+) -> AppResult<ReimbursementClaim> {
+    transition_reimbursement(
+        conn,
+        current,
+        id,
+        "unapprove",
+        &["approved"],
+        "draft",
+        Some(comment),
+        true,
+        |tx, claim, _| {
+            ensure_reimbursement_not_batched(tx, claim.id, "unapprove")?;
+            if claim.payment_status == "paid" {
+                return Err(AppError::InvalidParam(
+                    "报销单已付款，不能反审批；请通过冲正流程纠错".into(),
+                ));
+            }
+            on_reimbursement_left_approved(tx, claim.id)
+        },
+    )
+}
+
+/// 作废报销单（draft/submitted/approved/rejected → void），原因必填。
+/// 已纳入付款批次的单据须先经批次作废释放；已审批单作废联动作废计提凭证
+/// 并恢复关联发票单独入账；轨迹写入 approval_events。
+pub fn void_reimbursement_claim(
+    conn: &Connection,
+    current: &CurrentOperatorState,
+    id: i64,
+    comment: &str,
+) -> AppResult<ReimbursementClaim> {
+    transition_reimbursement(
+        conn,
+        current,
+        id,
+        "void",
+        &["draft", "submitted", "approved", "rejected"],
+        "void",
+        Some(comment),
+        true,
+        |tx, claim, _| {
+            ensure_reimbursement_not_batched(tx, claim.id, "void")?;
+            if claim.status == "approved" {
+                on_reimbursement_left_approved(tx, claim.id)?;
+            }
+            Ok(())
+        },
+    )
 }
 
 // ==================== 业务附件（通用加密附件底座） ====================
@@ -10176,5 +10505,348 @@ mod tests {
         update_fund_document(&conn, &current, &edit).unwrap();
         assert_eq!(active_link_count(&conn, loan1.id), 0, "旧关联应被替换");
         assert_eq!(active_link_count(&conn, loan2.id), 1);
+    }
+
+    // ---------- 报销单审批治理（Task 15，spec 5.2） ----------
+
+    /// 报销单治理测试环境：财务库 + 当前操作人张会计，返回 (库, 会话, 操作人ID)
+    fn reimbursement_env() -> (Connection, CurrentOperatorState, i64) {
+        let conn = setup_financial_db();
+        let current = CurrentOperatorState::new();
+        let op = save_operator_profile(&conn, &current, &operator_input("张会计", "cashier"))
+            .unwrap()
+            .0;
+        set_current_operator(&conn, &current, op.id).unwrap();
+        (conn, current, op.id)
+    }
+
+    /// 给员工 1 新建一张未挂报销的发票，返回发票 ID
+    fn fresh_claim_invoice(conn: &Connection, number: &str) -> i64 {
+        db::insert_invoice(
+            conn,
+            &crate::models::InvoiceInput {
+                invoice_code: Some("A".into()),
+                invoice_number: Some(number.into()),
+                invoice_type: Some("普通发票".into()),
+                issue_date: Some("2026-08-01".into()),
+                check_code: None,
+                amount: Some(100.0),
+                tax_amount: Some(13.0),
+                total_amount: Some(113.0),
+                seller_name: Some("销售方".into()),
+                seller_tax_id: None,
+                buyer_name: None,
+                buyer_tax_id: None,
+                expense_type_code: Some("office".into()),
+                employee_id: Some(1),
+                belong_month: Some("2026-08".into()),
+                remark: None,
+                image_path: None,
+                raw_ocr_json: None,
+            },
+            "/tmp/t15.pdf",
+            0,
+        )
+        .unwrap()
+        .id
+    }
+
+    /// 新建一张草稿报销单（员工 1 + 新发票）
+    fn fresh_draft_claim(conn: &Connection, number: &str) -> ReimbursementClaim {
+        let invoice_id = fresh_claim_invoice(conn, number);
+        db::save_reimbursement_claim(
+            conn,
+            &ReimbursementClaimInput {
+                id: None,
+                employee_id: Some(1),
+                belong_month: "2026-08".into(),
+                title: format!("治理测试{number}"),
+                invoice_ids: vec![invoice_id],
+                remark: None,
+            },
+        )
+        .unwrap()
+    }
+
+    fn claim_actions(conn: &Connection, claim_id: i64) -> Vec<String> {
+        list_approval_events(conn, "reimbursement_claim", claim_id)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.action)
+            .collect()
+    }
+
+    #[test]
+    fn test_reimbursement_state_machine_matrix_and_events() {
+        let (conn, current, op_id) = reimbursement_env();
+        let claim = fresh_draft_claim(&conn, "9001");
+        assert_eq!(claim.status, "draft");
+        assert_eq!(claim.payment_status, "unpaid");
+        assert!(claim.payment_date.is_none());
+
+        // 非法迁移：draft 不允许 approve/reject/withdraw/unapprove
+        assert!(approve_reimbursement_claim(&conn, &current, claim.id, "同意").is_err());
+        assert!(reject_reimbursement_claim(&conn, &current, claim.id, "驳回").is_err());
+        assert!(withdraw_reimbursement_claim(&conn, &current, claim.id, None).is_err());
+        assert!(unapprove_reimbursement_claim(&conn, &current, claim.id, "反审批").is_err());
+        assert!(
+            list_approval_events(&conn, "reimbursement_claim", claim.id)
+                .unwrap()
+                .is_empty(),
+            "失败的非法迁移不得留下审批事件"
+        );
+
+        // submit：draft → submitted；重复提交拒绝
+        let submitted = submit_reimbursement_claim(&conn, &current, claim.id, None).unwrap();
+        assert_eq!(submitted.status, "submitted");
+        assert!(submit_reimbursement_claim(&conn, &current, claim.id, None).is_err());
+
+        // approve：意见必填；submitted → approved；署名落事件
+        assert!(approve_reimbursement_claim(&conn, &current, claim.id, "   ").is_err());
+        let approved = approve_reimbursement_claim(&conn, &current, claim.id, "同意报销").unwrap();
+        assert_eq!(approved.status, "approved");
+
+        // 凭证联动：计提 active、关联发票单独凭证被作废（防重复计费）
+        assert!(
+            accounting::get_active_voucher_for_source(&conn, "reimbursement_accrual", claim.id)
+                .unwrap()
+                .is_some(),
+            "审批通过应生成报销计提凭证"
+        );
+        let invoice_id = claim_invoice_ids(&conn, claim.id)[0];
+        assert!(
+            accounting::get_active_voucher_for_source(&conn, "invoice_expense", invoice_id)
+                .unwrap()
+                .is_none(),
+            "审批通过后发票不得保留单独入账凭证"
+        );
+
+        // 审批轨迹：submit + approve，署名与意见一致
+        let events = list_approval_events(&conn, "reimbursement_claim", claim.id).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].action, "submit");
+        assert_eq!(events[0].from_status.as_deref(), Some("draft"));
+        assert_eq!(events[0].to_status.as_deref(), Some("submitted"));
+        assert_eq!(events[0].operator_id, Some(op_id));
+        assert_eq!(events[1].action, "approve");
+        assert_eq!(events[1].from_status.as_deref(), Some("submitted"));
+        assert_eq!(events[1].to_status.as_deref(), Some("approved"));
+        assert_eq!(events[1].comment.as_deref(), Some("同意报销"));
+        assert_eq!(events[1].operator_id, Some(op_id));
+
+        // unapprove：原因必填；approved → draft；计提作废 + 发票恢复单独入账
+        assert!(unapprove_reimbursement_claim(&conn, &current, claim.id, "  ").is_err());
+        let unapproved =
+            unapprove_reimbursement_claim(&conn, &current, claim.id, "发票开错需换票").unwrap();
+        assert_eq!(unapproved.status, "draft");
+        assert!(
+            accounting::get_active_voucher_for_source(&conn, "reimbursement_accrual", claim.id)
+                .unwrap()
+                .is_none(),
+            "反审批应作废报销计提凭证"
+        );
+        assert!(
+            accounting::get_active_voucher_for_source(&conn, "invoice_expense", invoice_id)
+                .unwrap()
+                .is_some(),
+            "反审批后发票应恢复单独入账凭证"
+        );
+
+        // 驳回链路：submit → reject（意见必填）→ withdraw → draft
+        submit_reimbursement_claim(&conn, &current, claim.id, None).unwrap();
+        assert!(reject_reimbursement_claim(&conn, &current, claim.id, "").is_err());
+        let rejected = reject_reimbursement_claim(&conn, &current, claim.id, "票据不合规").unwrap();
+        assert_eq!(rejected.status, "rejected");
+        // rejected 不能直接 submit，须先 withdraw
+        assert!(submit_reimbursement_claim(&conn, &current, claim.id, None).is_err());
+        let withdrawn = withdraw_reimbursement_claim(&conn, &current, claim.id, None).unwrap();
+        assert_eq!(withdrawn.status, "draft");
+
+        // void：原因必填；写事件；void 后终态不可再操作
+        assert!(void_reimbursement_claim(&conn, &current, claim.id, " ").is_err());
+        let voided = void_reimbursement_claim(&conn, &current, claim.id, "重复提交作废").unwrap();
+        assert_eq!(voided.status, "void");
+        assert!(submit_reimbursement_claim(&conn, &current, claim.id, None).is_err());
+
+        assert_eq!(
+            claim_actions(&conn, claim.id),
+            vec!["submit", "approve", "unapprove", "submit", "reject", "withdraw", "void"]
+        );
+    }
+
+    fn claim_invoice_ids(conn: &Connection, claim_id: i64) -> Vec<i64> {
+        let mut stmt = conn
+            .prepare("SELECT invoice_id FROM reimbursement_claim_invoices WHERE claim_id = ?1")
+            .unwrap();
+        let rows = stmt.query_map(params![claim_id], |r| r.get(0)).unwrap();
+        rows.collect::<Result<Vec<_>, _>>().unwrap()
+    }
+
+    #[test]
+    fn test_reimbursement_void_voids_accrual_for_legacy_and_fresh_claims() {
+        // 旧状态数据兼容：种子报销单 2 为 approved（历史直写状态，无审批事件），
+        // 计提可正常补生成；作废联动作废计提并补记 void 事件
+        let (conn, current, _) = reimbursement_env();
+        accounting::generate_reimbursement_accrual_voucher(&conn, 2).unwrap();
+        assert!(
+            accounting::get_active_voucher_for_source(&conn, "reimbursement_accrual", 2)
+                .unwrap()
+                .is_some()
+        );
+
+        let voided = void_reimbursement_claim(&conn, &current, 2, "错报作废").unwrap();
+        assert_eq!(voided.status, "void");
+        assert!(
+            accounting::get_active_voucher_for_source(&conn, "reimbursement_accrual", 2)
+                .unwrap()
+                .is_none(),
+            "作废应联动作废报销计提凭证"
+        );
+        let events = list_approval_events(&conn, "reimbursement_claim", 2).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, "void");
+        assert_eq!(events[0].comment.as_deref(), Some("错报作废"));
+
+        // 完整联动：approved 单作废 → 计提 void + 发票恢复单独入账
+        // （种子发票缺 amount/tax 走"历史数据跳过单独入账"守卫，故用新建发票验证恢复）
+        let claim = fresh_draft_claim(&conn, "9005");
+        submit_reimbursement_claim(&conn, &current, claim.id, None).unwrap();
+        approve_reimbursement_claim(&conn, &current, claim.id, "同意").unwrap();
+        let invoice_id = claim_invoice_ids(&conn, claim.id)[0];
+        assert!(
+            accounting::get_active_voucher_for_source(&conn, "invoice_expense", invoice_id)
+                .unwrap()
+                .is_none(),
+            "审批通过后发票单独凭证应被作废"
+        );
+        void_reimbursement_claim(&conn, &current, claim.id, "审批后作废").unwrap();
+        assert!(
+            accounting::get_active_voucher_for_source(&conn, "reimbursement_accrual", claim.id)
+                .unwrap()
+                .is_none(),
+            "作废应作废报销计提凭证"
+        );
+        assert!(
+            accounting::get_active_voucher_for_source(&conn, "invoice_expense", invoice_id)
+                .unwrap()
+                .is_some(),
+            "作废 approved 单后关联发票应恢复单独入账"
+        );
+    }
+
+    #[test]
+    fn test_reimbursement_maker_checker_blocks_self_approval() {
+        let (conn, current, submitter_id) = reimbursement_env();
+        let reviewer = save_operator_profile(
+            &conn,
+            &current,
+            &operator_input("李审批", "approver"),
+        )
+        .unwrap()
+        .0;
+        set_maker_checker_enabled(&conn, true).unwrap();
+
+        let claim = fresh_draft_claim(&conn, "9002");
+        submit_reimbursement_claim(&conn, &current, claim.id, None).unwrap();
+        let err =
+            approve_reimbursement_claim(&conn, &current, claim.id, "自己批自己").unwrap_err();
+        assert!(
+            err.to_string().contains("不能是同一人"),
+            "maker_checker 开启时应拦截提交人自审批: {err}"
+        );
+        // 状态不得被半途改动、失败步骤不得留事件
+        assert_eq!(
+            claim_actions(&conn, claim.id),
+            vec!["submit"],
+            "被拒绝的审批不应写入事件"
+        );
+
+        // 切换审批人后通过
+        set_current_operator(&conn, &current, reviewer.id).unwrap();
+        approve_reimbursement_claim(&conn, &current, claim.id, "同意").unwrap();
+        let events = list_approval_events(&conn, "reimbursement_claim", claim.id).unwrap();
+        assert_eq!(events[1].operator_id, Some(reviewer.id));
+        assert_ne!(events[1].operator_id, Some(submitter_id));
+
+        // 关闭 maker_checker：同一人可提交后自审批
+        set_maker_checker_enabled(&conn, false).unwrap();
+        let claim2 = fresh_draft_claim(&conn, "9003");
+        submit_reimbursement_claim(&conn, &current, claim2.id, None).unwrap();
+        approve_reimbursement_claim(&conn, &current, claim2.id, "自审").unwrap();
+
+        // 旧数据兼容：无 submit 事件的历史单（直写 submitted）无法比对提交人，放行
+        let (conn2, current2, _) = reimbursement_env();
+        set_maker_checker_enabled(&conn2, true).unwrap();
+        conn2
+            .execute(
+                "UPDATE reimbursement_claims SET status='submitted' WHERE id=1",
+                [],
+            )
+            .unwrap();
+        approve_reimbursement_claim(&conn2, &current2, 1, "历史单放行").unwrap();
+    }
+
+    #[test]
+    fn test_reimbursement_batched_claim_blocks_unapprove_and_void() {
+        let (mut conn, current, _) = reimbursement_env();
+        // 报销批次收集要求员工有银行账号（与生产口径一致）
+        crate::db::tests::fill_employee_bank_info(&conn);
+        let claim = fresh_draft_claim(&conn, "9004");
+        submit_reimbursement_claim(&conn, &current, claim.id, None).unwrap();
+        approve_reimbursement_claim(&conn, &current, claim.id, "同意").unwrap();
+
+        let acc = save_fund_account(&conn, &bank_input("BANK-T15", "测试户", "62220015")).unwrap();
+        let detail = db::create_payment_batch(
+            &mut conn,
+            &PaymentBatchInput {
+                belong_month: "2026-08".into(),
+                batch_type: "reimbursement".into(),
+                fund_account_id: Some(acc.id),
+                source_ids: Some(vec![claim.id]),
+                remark: None,
+            },
+            &current,
+        )
+        .unwrap();
+        assert_eq!(detail.batch.item_count, 1);
+
+        // 已纳入在途批次：反审批 / 作废都拒绝，防止批次与凭证脱钩
+        let unapprove_err =
+            unapprove_reimbursement_claim(&conn, &current, claim.id, "试试反审批").unwrap_err();
+        assert!(matches!(unapprove_err, AppError::InvalidParam(_)));
+        let void_err = void_reimbursement_claim(&conn, &current, claim.id, "试试作废").unwrap_err();
+        assert!(matches!(void_err, AppError::InvalidParam(_)));
+    }
+
+    #[test]
+    fn test_reimbursement_commands_require_current_operator() {
+        let conn = setup_financial_db();
+        let current = CurrentOperatorState::new(); // 未选择操作人
+        assert!(submit_reimbursement_claim(&conn, &current, 1, None).is_err());
+        assert!(approve_reimbursement_claim(&conn, &current, 1, "同意").is_err());
+        assert!(reject_reimbursement_claim(&conn, &current, 1, "驳回").is_err());
+        assert!(withdraw_reimbursement_claim(&conn, &current, 1, None).is_err());
+        assert!(unapprove_reimbursement_claim(&conn, &current, 1, "反审批").is_err());
+        assert!(void_reimbursement_claim(&conn, &current, 1, "作废").is_err());
+        // 失败命令不得改状态
+        let status: String = conn
+            .query_row("SELECT status FROM reimbursement_claims WHERE id=1", [], |r| r
+                .get(0))
+            .unwrap();
+        assert_eq!(status, "approved");
+    }
+
+    #[test]
+    fn test_reimbursement_unapprove_blocked_after_paid() {
+        let (conn, current, _) = reimbursement_env();
+        // 已付款报销单（种子单 1：approved + paid）不得反审批，防止付款后凭证脱钩
+        let err = unapprove_reimbursement_claim(&conn, &current, 1, "已付款反审批").unwrap_err();
+        assert!(matches!(err, AppError::InvalidParam(_)));
+        assert_eq!(
+            conn.query_row("SELECT status FROM reimbursement_claims WHERE id=1", [], |r| r
+                .get::<_, String>(0))
+            .unwrap(),
+            "approved"
+        );
     }
 }

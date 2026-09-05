@@ -1007,6 +1007,10 @@ pub struct ReimbursementClaim {
     pub updated_at: Option<String>,
 }
 
+/// 报销单保存入参（Task 15 治理，spec 5.2）：仅承载草稿业务字段。
+/// 审批状态/付款状态/付款日期不再可由保存路径写入——状态只能经
+/// submit/approve/reject/withdraw/unapprove 状态机命令流转（cashier.rs），
+/// 付款状态只能由付款批次事务更新（spec 5.2「付款只能通过付款批次完成」）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReimbursementClaimInput {
     pub id: Option<i64>,
@@ -1014,9 +1018,6 @@ pub struct ReimbursementClaimInput {
     pub belong_month: String,
     pub title: String,
     pub invoice_ids: Vec<i64>,
-    pub status: Option<String>,
-    pub payment_status: Option<String>,
-    pub payment_date: Option<String>,
     pub remark: Option<String>,
 }
 

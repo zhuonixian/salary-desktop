@@ -64,8 +64,6 @@ import type {
   ReimbursementClaimInput,
   ReimbursementInvoice,
   ReimbursementQuery,
-  ReimbursementStatus,
-  PaymentStatus,
   SecurityStatus,
   UnlockResult,
   RevealResult,
@@ -2258,22 +2256,47 @@ export async function getReimbursementInvoices(claimId: number): Promise<Reimbur
   return invoke<ReimbursementInvoice[]>('get_reimbursement_invoices', { claimId });
 }
 
-export async function updateReimbursementClaimStatus(
+// Task 15 治理（spec 5.2）：审批状态只能经状态机命令流转（署名 + 审批轨迹）；
+// approve/reject/unapprove 意见必填；付款状态只能由付款批次事务更新，
+// 不再提供 update_reimbursement_claim_status 直写通道。
+
+export async function submitReimbursementClaim(
   id: number,
-  status?: ReimbursementStatus,
-  paymentStatus?: PaymentStatus,
-  paymentDate?: string,
-): Promise<boolean> {
-  return invoke<boolean>('update_reimbursement_claim_status', {
-    id,
-    status,
-    paymentStatus,
-    paymentDate,
-  });
+  comment?: string,
+): Promise<ReimbursementClaim> {
+  return invoke<ReimbursementClaim>('submit_reimbursement_claim', { id, comment });
 }
 
-export async function deleteReimbursementClaim(id: number): Promise<boolean> {
-  return invoke<boolean>('delete_reimbursement_claim', { id });
+export async function approveReimbursementClaim(
+  id: number,
+  comment: string,
+): Promise<ReimbursementClaim> {
+  return invoke<ReimbursementClaim>('approve_reimbursement_claim', { id, comment });
+}
+
+export async function rejectReimbursementClaim(
+  id: number,
+  comment: string,
+): Promise<ReimbursementClaim> {
+  return invoke<ReimbursementClaim>('reject_reimbursement_claim', { id, comment });
+}
+
+export async function withdrawReimbursementClaim(
+  id: number,
+  comment?: string,
+): Promise<ReimbursementClaim> {
+  return invoke<ReimbursementClaim>('withdraw_reimbursement_claim', { id, comment });
+}
+
+export async function unapproveReimbursementClaim(
+  id: number,
+  comment: string,
+): Promise<ReimbursementClaim> {
+  return invoke<ReimbursementClaim>('unapprove_reimbursement_claim', { id, comment });
+}
+
+export async function deleteReimbursementClaim(id: number, comment: string): Promise<ReimbursementClaim> {
+  return invoke<ReimbursementClaim>('delete_reimbursement_claim', { id, comment });
 }
 
 // ==================== 安全模块 ====================

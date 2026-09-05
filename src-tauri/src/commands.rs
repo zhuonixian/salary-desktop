@@ -1848,6 +1848,9 @@ pub fn export_invoice_list(
 }
 
 // ==================== Reimbursement Commands ====================
+// Task 15 治理（spec 5.2）：保存路径只处理草稿业务字段；审批/驳回/撤回/反审批/作废
+// 走 cashier::*_reimbursement_claim 状态机命令（署名 + approval_events + 凭证联动同事务）；
+// 付款状态只能由付款批次事务更新，不再提供 update_reimbursement_claim_status 直写通道。
 
 #[tauri::command]
 pub fn query_reimbursement_claims(
@@ -1862,6 +1865,7 @@ pub fn query_reimbursement_claims(
 pub fn save_reimbursement_claim(
     data: ReimbursementClaimInput,
     state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
 ) -> Result<ReimbursementClaim, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     let is_update = data.id.is_some();
@@ -1879,7 +1883,7 @@ pub fn save_reimbursement_claim(
             result.claim_no,
             result.total_amount
         ),
-        "system",
+        &cashier::current_operator_name(&conn, &current),
         None,
     )?;
     Ok(result)
@@ -1894,51 +1898,127 @@ pub fn get_reimbursement_invoices(
     db::get_reimbursement_invoices(&conn, claim_id)
 }
 
+/// 报销单状态机命令族：submit/approve/reject/withdraw/unapprove（approve/reject/unapprove
+/// 意见必填，由 cashier 层校验并随审批事件落库）。
 #[tauri::command]
-pub fn update_reimbursement_claim_status(
+pub fn submit_reimbursement_claim(
     id: i64,
-    status: Option<String>,
-    payment_status: Option<String>,
-    payment_date: Option<String>,
+    comment: Option<String>,
     state: tauri::State<'_, Mutex<Connection>>,
-) -> Result<bool, AppError> {
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<ReimbursementClaim, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
-    let result = db::update_reimbursement_claim_status(
+    let claim = cashier::submit_reimbursement_claim(&conn, &current, id, comment.as_deref())?;
+    db::log_operation(
         &conn,
-        id,
-        status.clone(),
-        payment_status.clone(),
-        payment_date.clone(),
+        "submit_reimbursement",
+        &format!("提交报销单 {} 金额 {:.2}", claim.claim_no, claim.total_amount),
+        &cashier::current_operator_name(&conn, &current),
+        Some(&format!("claim_id={id}")),
     )?;
-    if result {
-        db::log_operation(
-            &conn,
-            "update_reimbursement_status",
-            &format!("更新报销单ID={id}状态: {:?} / {:?}", status, payment_status),
-            "system",
-            None,
-        )?;
-    }
-    Ok(result)
+    Ok(claim)
+}
+
+#[tauri::command]
+pub fn approve_reimbursement_claim(
+    id: i64,
+    comment: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<ReimbursementClaim, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let claim = cashier::approve_reimbursement_claim(&conn, &current, id, &comment)?;
+    db::log_operation(
+        &conn,
+        "approve_reimbursement",
+        &format!(
+            "审批通过报销单 {} 金额 {:.2}",
+            claim.claim_no, claim.total_amount
+        ),
+        &cashier::current_operator_name(&conn, &current),
+        Some(&format!("claim_id={id} comment={}", comment.trim())),
+    )?;
+    Ok(claim)
+}
+
+#[tauri::command]
+pub fn reject_reimbursement_claim(
+    id: i64,
+    comment: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<ReimbursementClaim, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let claim = cashier::reject_reimbursement_claim(&conn, &current, id, &comment)?;
+    db::log_operation(
+        &conn,
+        "reject_reimbursement",
+        &format!("驳回报销单 {}", claim.claim_no),
+        &cashier::current_operator_name(&conn, &current),
+        Some(&format!("claim_id={id} comment={}", comment.trim())),
+    )?;
+    Ok(claim)
+}
+
+#[tauri::command]
+pub fn withdraw_reimbursement_claim(
+    id: i64,
+    comment: Option<String>,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<ReimbursementClaim, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let claim = cashier::withdraw_reimbursement_claim(&conn, &current, id, comment.as_deref())?;
+    db::log_operation(
+        &conn,
+        "withdraw_reimbursement",
+        &format!("撤回报销单 {}（回到草稿）", claim.claim_no),
+        &cashier::current_operator_name(&conn, &current),
+        Some(&format!("claim_id={id}")),
+    )?;
+    Ok(claim)
+}
+
+#[tauri::command]
+pub fn unapprove_reimbursement_claim(
+    id: i64,
+    comment: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<ReimbursementClaim, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let claim = cashier::unapprove_reimbursement_claim(&conn, &current, id, &comment)?;
+    db::log_operation(
+        &conn,
+        "unapprove_reimbursement",
+        &format!(
+            "反审批报销单 {}（已作废计提凭证，原因：{}）",
+            claim.claim_no,
+            comment.trim()
+        ),
+        &cashier::current_operator_name(&conn, &current),
+        Some(&format!("claim_id={id}")),
+    )?;
+    Ok(claim)
 }
 
 #[tauri::command]
 pub fn delete_reimbursement_claim(
     id: i64,
+    comment: String,
     state: tauri::State<'_, Mutex<Connection>>,
-) -> Result<bool, AppError> {
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<ReimbursementClaim, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
-    let result = db::soft_delete_reimbursement_claim(&conn, id)?;
-    if result {
-        db::log_operation(
-            &conn,
-            "delete_reimbursement",
-            &format!("作废报销单ID={id}"),
-            "system",
-            None,
-        )?;
-    }
-    Ok(result)
+    let claim = cashier::void_reimbursement_claim(&conn, &current, id, &comment)?;
+    db::log_operation(
+        &conn,
+        "delete_reimbursement",
+        &format!("作废报销单 {}（原因：{}）", claim.claim_no, comment.trim()),
+        &cashier::current_operator_name(&conn, &current),
+        Some(&format!("claim_id={id}")),
+    )?;
+    Ok(claim)
 }
 
 // ==================== Accounting Commands ====================

@@ -16,6 +16,9 @@ import {
   Statistic,
   Table,
   Tag,
+  Timeline,
+  Tooltip,
+  Typography,
   message,
 } from 'antd';
 import {
@@ -23,27 +26,35 @@ import {
   DeleteOutlined,
   EditOutlined,
   EyeOutlined,
-  PayCircleOutlined,
   PlusOutlined,
   ReloadOutlined,
+  RollbackOutlined,
   SendOutlined,
   StopOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import {
+  approveReimbursementClaim,
   deleteReimbursementClaim,
   getEmployees,
   getInvoiceExpenseTypes,
+  getOperatorProfiles,
   getReimbursementInvoices,
+  listApprovalEvents,
   queryInvoices,
   queryReimbursementClaims,
+  rejectReimbursementClaim,
   saveReimbursementClaim,
-  updateReimbursementClaimStatus,
+  submitReimbursementClaim,
+  unapproveReimbursementClaim,
+  withdrawReimbursementClaim,
 } from '@/api';
 import type {
+  ApprovalEvent,
   Employee,
   Invoice,
   InvoiceExpenseType,
+  OperatorProfile,
   PaymentStatus,
   ReimbursementClaim,
   ReimbursementClaimInput,
@@ -53,8 +64,10 @@ import type {
 import { SensitiveText } from '@/components/SensitiveText';
 import { SensitiveStatistic } from '@/components/SensitiveStatistic';
 import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
+import { useOperator } from '@/contexts/OperatorContext';
 
 const { TextArea } = Input;
+const { Text, Title } = Typography;
 
 const statusMap: Record<ReimbursementStatus, { text: string; color: string }> = {
   draft: { text: '草稿', color: 'default' },
@@ -69,12 +82,33 @@ const paymentMap: Record<PaymentStatus, { text: string; color: string }> = {
   paid: { text: '已付款', color: 'green' },
 };
 
+const approvalActionLabel: Record<string, string> = {
+  submit: '提交',
+  approve: '审批通过',
+  reject: '驳回',
+  withdraw: '撤回',
+  unapprove: '反审批',
+  void: '作废',
+};
+
+// 需要填写意见/原因的审批动作（对应后端 require_comment 校验）
+type CommentAction = 'approve' | 'reject' | 'unapprove' | 'void';
+
+const commentActionMeta: Record<CommentAction, { title: string; label: string; required: string }> = {
+  approve: { title: '审批通过', label: '审批意见', required: '请填写审批意见' },
+  reject: { title: '驳回', label: '驳回意见', required: '请填写驳回意见' },
+  unapprove: { title: '反审批', label: '反审批原因', required: '请填写反审批原因（将作废原计提凭证）' },
+  void: { title: '作废报销单', label: '作废原因', required: '请填写作废原因' },
+};
+
 const Reimbursements: React.FC = () => {
   const [claims, setClaims] = useState<ReimbursementClaim[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [expenseTypes, setExpenseTypes] = useState<InvoiceExpenseType[]>([]);
+  const [operators, setOperators] = useState<OperatorProfile[]>([]);
   const [loading, setLoading] = useState(false);
   const { month, setMonth } = useBusinessMonth();
+  const { operator } = useOperator();
   const [employeeFilter, setEmployeeFilter] = useState<number | undefined>(undefined);
   const [statusFilter, setStatusFilter] = useState<ReimbursementStatus | undefined>(undefined);
   const [paymentFilter, setPaymentFilter] = useState<PaymentStatus | undefined>(undefined);
@@ -89,17 +123,25 @@ const Reimbursements: React.FC = () => {
     belong_month: dayjs().format('YYYY-MM'),
     title: '',
     invoice_ids: [],
-    status: 'draft',
-    payment_status: 'unpaid',
   });
 
   const [detailClaim, setDetailClaim] = useState<ReimbursementClaim | null>(null);
   const [detailInvoices, setDetailInvoices] = useState<ReimbursementInvoice[]>([]);
+  const [detailEvents, setDetailEvents] = useState<ApprovalEvent[]>([]);
+
+  const [commentAction, setCommentAction] = useState<{ type: CommentAction; claim: ReimbursementClaim } | null>(null);
+  const [commentSaving, setCommentSaving] = useState(false);
+  const [commentForm] = Form.useForm<{ comment: string }>();
 
   const employeeOptions = employees.map((employee) => ({
     value: employee.id,
     label: `${employee.name} (${employee.employee_no})`,
   }));
+
+  const operatorName = useCallback(
+    (id: number | null) => operators.find((op) => op.id === id)?.name ?? (id ? `操作人#${id}` : '—'),
+    [operators],
+  );
 
   const fetchClaims = useCallback(async () => {
     setLoading(true);
@@ -125,6 +167,12 @@ const Reimbursements: React.FC = () => {
       setExpenseTypes(expenseData);
     } catch (e: unknown) {
       message.error('基础数据加载失败: ' + (e instanceof Error ? e.message : String(e)));
+    }
+    // 操作人仅用于审批轨迹署名展示，加载失败不影响主流程
+    try {
+      setOperators(await getOperatorProfiles());
+    } catch {
+      setOperators([]);
     }
   }, []);
 
@@ -169,8 +217,6 @@ const Reimbursements: React.FC = () => {
       employee_id: employeeFilter,
       title: `${defaultMonth} 报销单`,
       invoice_ids: [],
-      status: 'draft',
-      payment_status: 'unpaid',
     });
     setSelectedInvoiceIds([]);
     setAvailableInvoices([]);
@@ -186,9 +232,6 @@ const Reimbursements: React.FC = () => {
         belong_month: claim.belong_month,
         title: claim.title,
         invoice_ids: invoices.map((invoice) => invoice.invoice_id),
-        status: claim.status,
-        payment_status: claim.payment_status,
-        payment_date: claim.payment_date,
         remark: claim.remark,
       });
       setSelectedInvoiceIds(invoices.map((invoice) => invoice.invoice_id));
@@ -200,8 +243,14 @@ const Reimbursements: React.FC = () => {
 
   const openDetail = async (claim: ReimbursementClaim) => {
     setDetailClaim(claim);
+    setDetailEvents([]);
     try {
-      setDetailInvoices(await getReimbursementInvoices(claim.id));
+      const [invoices, events] = await Promise.all([
+        getReimbursementInvoices(claim.id),
+        listApprovalEvents('reimbursement_claim', claim.id),
+      ]);
+      setDetailInvoices(invoices);
+      setDetailEvents(events);
     } catch (e: unknown) {
       message.error('获取报销明细失败: ' + (e instanceof Error ? e.message : String(e)));
     }
@@ -223,7 +272,7 @@ const Reimbursements: React.FC = () => {
     setSaving(true);
     try {
       await saveReimbursementClaim({ ...form, invoice_ids: selectedInvoiceIds });
-      message.success(form.id ? '报销单已更新' : '报销单已创建');
+      message.success(form.id ? '报销单已更新' : '报销单已创建（草稿，提交后进入审批）');
       setModalOpen(false);
       fetchClaims();
     } catch (e: unknown) {
@@ -233,29 +282,55 @@ const Reimbursements: React.FC = () => {
     }
   };
 
-  const updateStatus = async (
-    claim: ReimbursementClaim,
-    status?: ReimbursementStatus,
-    paymentStatus?: PaymentStatus,
-    paymentDate?: string,
+  // ---------- 状态机操作（Task 15，spec 5.2） ----------
+
+  const runTransition = async (
+    fn: () => Promise<ReimbursementClaim>,
+    success: string,
   ) => {
     try {
-      await updateReimbursementClaimStatus(claim.id, status, paymentStatus, paymentDate);
-      message.success('状态已更新');
+      await fn();
+      message.success(success);
       fetchClaims();
     } catch (e: unknown) {
-      message.error('更新状态失败: ' + (e instanceof Error ? e.message : String(e)));
+      message.error('操作失败: ' + (e instanceof Error ? e.message : String(e)));
     }
   };
 
-  const handleDelete = async (claim: ReimbursementClaim) => {
+  const handleCommentOk = async () => {
+    if (!commentAction) return;
+    let values: { comment: string };
     try {
-      await deleteReimbursementClaim(claim.id);
-      message.success('报销单已作废');
+      values = await commentForm.validateFields();
+    } catch {
+      return;
+    }
+    setCommentSaving(true);
+    const { type, claim } = commentAction;
+    const comment = values.comment.trim();
+    try {
+      if (type === 'approve') {
+        await approveReimbursementClaim(claim.id, comment);
+      } else if (type === 'reject') {
+        await rejectReimbursementClaim(claim.id, comment);
+      } else if (type === 'unapprove') {
+        await unapproveReimbursementClaim(claim.id, comment);
+      } else {
+        await deleteReimbursementClaim(claim.id, comment);
+      }
+      message.success(`${commentActionMeta[type].title}成功`);
+      setCommentAction(null);
       fetchClaims();
     } catch (e: unknown) {
-      message.error('作废失败: ' + (e instanceof Error ? e.message : String(e)));
+      message.error('操作失败: ' + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setCommentSaving(false);
     }
+  };
+
+  const openCommentModal = (type: CommentAction, claim: ReimbursementClaim) => {
+    setCommentAction({ type, claim });
+    commentForm.resetFields();
   };
 
   const claimColumns = [
@@ -285,50 +360,88 @@ const Reimbursements: React.FC = () => {
       dataIndex: 'payment_status',
       key: 'payment_status',
       width: 90,
-      render: (status: PaymentStatus) => <Tag color={paymentMap[status]?.color}>{paymentMap[status]?.text ?? status}</Tag>,
+      render: (status: PaymentStatus) => (
+        <Tooltip title="付款只能通过付款批次完成（资金出纳 → 付款批次）">
+          <Tag color={paymentMap[status]?.color}>{paymentMap[status]?.text ?? status}</Tag>
+        </Tooltip>
+      ),
     },
     { title: '付款日期', dataIndex: 'payment_date', key: 'payment_date', width: 110 },
     {
       title: '操作',
       key: 'actions',
-      width: 260,
+      width: 280,
       fixed: 'right' as const,
       render: (_: unknown, claim: ReimbursementClaim) => (
         <Space size={4}>
           <Button size="small" icon={<EyeOutlined />} onClick={() => openDetail(claim)} />
-          <Button
-            size="small"
-            icon={<EditOutlined />}
-            disabled={claim.payment_status === 'paid'}
-            onClick={() => openEdit(claim)}
-          />
+          <Tooltip title={claim.status === 'draft' ? '编辑' : '仅草稿可编辑；submitted 后须先撤回/反审批'}>
+            <Button
+              size="small"
+              icon={<EditOutlined />}
+              disabled={claim.status !== 'draft'}
+              onClick={() => openEdit(claim)}
+            />
+          </Tooltip>
           {claim.status === 'draft' && (
-            <Button size="small" icon={<SendOutlined />} onClick={() => updateStatus(claim, 'submitted')}>
+            <Button
+              size="small"
+              icon={<SendOutlined />}
+              onClick={() => runTransition(
+                () => submitReimbursementClaim(claim.id),
+                '报销单已提交，等待审批',
+              )}
+            >
               提交
             </Button>
           )}
-          {(claim.status === 'draft' || claim.status === 'submitted') && (
-            <Button size="small" icon={<CheckCircleOutlined />} onClick={() => updateStatus(claim, 'approved')}>
+          {claim.status === 'submitted' && (
+            <Button
+              size="small"
+              icon={<CheckCircleOutlined />}
+              onClick={() => openCommentModal('approve', claim)}
+            >
               审批
             </Button>
           )}
           {claim.status === 'submitted' && (
-            <Button size="small" danger icon={<StopOutlined />} onClick={() => updateStatus(claim, 'rejected')}>
+            <Button
+              size="small"
+              danger
+              icon={<StopOutlined />}
+              onClick={() => openCommentModal('reject', claim)}
+            >
               驳回
             </Button>
           )}
-          {claim.status === 'approved' && claim.payment_status !== 'paid' && (
+          {(claim.status === 'submitted' || claim.status === 'rejected') && (
+            <Popconfirm
+              title="撤回后将回到草稿，可修改后重新提交，确认撤回？"
+              okText="撤回"
+              cancelText="取消"
+              onConfirm={() => runTransition(
+                () => withdrawReimbursementClaim(claim.id),
+                '报销单已撤回（草稿）',
+              )}
+            >
+              <Button size="small" icon={<RollbackOutlined />}>撤回</Button>
+            </Popconfirm>
+          )}
+          {claim.status === 'approved' && (
+            <Tooltip title="已审批后修改附件/发票须先反审批，将填写原因并作废原计提凭证">
+              <Button size="small" onClick={() => openCommentModal('unapprove', claim)}>
+                反审批
+              </Button>
+            </Tooltip>
+          )}
+          {claim.status !== 'void' && (
             <Button
               size="small"
-              icon={<PayCircleOutlined />}
-              onClick={() => updateStatus(claim, undefined, 'paid', dayjs().format('YYYY-MM-DD'))}
-            >
-              付款
-            </Button>
+              danger
+              icon={<DeleteOutlined />}
+              onClick={() => openCommentModal('void', claim)}
+            />
           )}
-          <Popconfirm title="确认作废该报销单?" onConfirm={() => handleDelete(claim)} okText="确认" cancelText="取消">
-            <Button size="small" danger icon={<DeleteOutlined />} />
-          </Popconfirm>
         </Space>
       ),
     },
@@ -360,6 +473,7 @@ const Reimbursements: React.FC = () => {
       <div className="page-header">
         <span className="page-title">报销管理</span>
         <div className="page-header-actions">
+          {operator && <Text type="secondary">当前操作人：{operator.name}</Text>}
           <Button icon={<ReloadOutlined />} onClick={fetchClaims} loading={loading}>刷新</Button>
           <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>新增报销单</Button>
         </div>
@@ -373,7 +487,13 @@ const Reimbursements: React.FC = () => {
           <Card className="stat-card"><SensitiveStatistic title="报销金额" value={totalAmount} /></Card>
         </Col>
         <Col xs={24} sm={8}>
-          <Card className="stat-card"><Statistic title="待处理" value={pendingCount + unpaidCount} suffix={`审批 ${pendingCount} / 付款 ${unpaidCount}`} /></Card>
+          <Card className="stat-card">
+            <Statistic
+              title="待处理"
+              value={pendingCount + unpaidCount}
+              suffix={`审批 ${pendingCount} / 待付款 ${unpaidCount}`}
+            />
+          </Card>
         </Col>
       </Row>
 
@@ -439,7 +559,7 @@ const Reimbursements: React.FC = () => {
           loading={loading}
           size="small"
           pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
-          scroll={{ x: 1380 }}
+          scroll={{ x: 1400 }}
         />
       </Card>
 
@@ -484,17 +604,9 @@ const Reimbursements: React.FC = () => {
               </Form.Item>
             </Col>
             <Col span={8}>
+              {/* spec 5.2：审批状态不可在表单中编辑，只能经列表操作流转（新增恒为草稿） */}
               <Form.Item label="审批状态">
-                <Select
-                  value={form.status}
-                  onChange={(value) => setForm((prev) => ({ ...prev, status: value }))}
-                  options={[
-                    { value: 'draft', label: '草稿' },
-                    { value: 'submitted', label: '待审批' },
-                    { value: 'approved', label: '已审批' },
-                    { value: 'rejected', label: '已驳回' },
-                  ]}
-                />
+                <Input value="草稿（提交后经审批流转）" disabled />
               </Form.Item>
             </Col>
           </Row>
@@ -530,12 +642,51 @@ const Reimbursements: React.FC = () => {
         </Spin>
       </Modal>
 
+      <Modal
+        title={commentAction ? commentActionMeta[commentAction.type].title : ''}
+        open={!!commentAction}
+        onCancel={() => setCommentAction(null)}
+        onOk={handleCommentOk}
+        okText="确认"
+        cancelText="取消"
+        confirmLoading={commentSaving}
+        destroyOnHidden
+      >
+        {commentAction && (
+          <>
+            <p>
+              <Text type="secondary">
+                报销单 {commentAction.claim.claim_no}（金额 {commentAction.claim.total_amount.toFixed(2)}）
+                {operator && <> · 当前操作人：{operator.name}</>}
+              </Text>
+            </p>
+            {commentAction.type === 'unapprove' && (
+              <p>
+                <Text type="warning">
+                  反审批将作废原计提凭证并使报销单回到草稿；修改附件/发票后须重新提交审批。
+                </Text>
+              </p>
+            )}
+            <Form form={commentForm} layout="vertical">
+              <Form.Item
+                name="comment"
+                label={commentActionMeta[commentAction.type].label}
+                rules={[{ required: true, whitespace: true, message: commentActionMeta[commentAction.type].required }]}
+              >
+                <TextArea rows={3} placeholder={commentActionMeta[commentAction.type].required} />
+              </Form.Item>
+            </Form>
+          </>
+        )}
+      </Modal>
+
       <Drawer
         title={detailClaim ? `报销单 ${detailClaim.claim_no}` : '报销单详情'}
         open={!!detailClaim}
         onClose={() => {
           setDetailClaim(null);
           setDetailInvoices([]);
+          setDetailEvents([]);
         }}
         width={720}
       >
@@ -546,6 +697,11 @@ const Reimbursements: React.FC = () => {
               <Col span={8}><Statistic title="发票张数" value={detailClaim.invoice_count} /></Col>
               <Col span={8}><Statistic title="付款状态" value={paymentMap[detailClaim.payment_status]?.text} /></Col>
             </Row>
+            <p><b>审批状态：</b>
+              <Tag color={statusMap[detailClaim.status]?.color}>
+                {statusMap[detailClaim.status]?.text ?? detailClaim.status}
+              </Tag>
+            </p>
             <p><b>标题：</b>{detailClaim.title}</p>
             <p><b>报销人：</b>{detailClaim.employee_name || '-'} / {detailClaim.department || '-'}</p>
             <p><b>归属月份：</b>{detailClaim.belong_month}</p>
@@ -565,6 +721,38 @@ const Reimbursements: React.FC = () => {
               pagination={false}
               scroll={{ x: 650 }}
             />
+
+            <Title level={5} style={{ marginTop: 24 }}>审批轨迹</Title>
+            {detailEvents.length === 0 ? (
+              <Text type="secondary">尚无审批记录（草稿未提交或历史数据）</Text>
+            ) : (
+              <Timeline
+                items={detailEvents.map((e) => ({
+                  color:
+                    e.action === 'reject' || e.action === 'void'
+                      ? 'red'
+                      : e.action === 'approve'
+                        ? 'green'
+                        : 'blue',
+                  content: (
+                    <div key={e.id}>
+                      <div>
+                        <Text strong>{approvalActionLabel[e.action] ?? e.action}</Text>
+                        <Text type="secondary">
+                          {' '}
+                          {statusMap[(e.from_status ?? 'draft') as ReimbursementStatus]?.text ?? e.from_status ?? '—'} →{' '}
+                          {statusMap[(e.to_status ?? 'draft') as ReimbursementStatus]?.text ?? e.to_status ?? '—'}
+                        </Text>
+                      </div>
+                      <Text type="secondary">
+                        {operatorName(e.operator_id)} · {dayjs(e.created_at).format('YYYY-MM-DD HH:mm')}
+                      </Text>
+                      {e.comment && <div>意见：{e.comment}</div>}
+                    </div>
+                  ),
+                }))}
+              />
+            )}
           </div>
         )}
       </Drawer>
