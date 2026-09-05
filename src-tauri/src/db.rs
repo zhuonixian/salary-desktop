@@ -2875,6 +2875,13 @@ pub fn get_month_close_workbench(conn: &Connection, month: &str) -> AppResult<Mo
         params![month],
         |row| row.get(0),
     )?;
+    // 已付款批次视为未匹配 = 无 active 旧匹配（bank_transaction_matches，迁移后只读保留、
+    // 仍为 active，保护 Task 12 迁移前用户）且批次付款凭证资金分录未被 active 核销全额覆盖。
+    // 资金分录定位口径与 Task 12 迁移一致：工资/报销批次级付款凭证（salary_payment /
+    // reimbursement_payment）与通用付款单结算凭证（fund_document，经 payment_batch_id 关联）
+    // 中挂批次资金账户的贷方分录；只查旧表会导致新对账引擎（bank_reconciliation_allocations）
+    // 核销后该 blocking 检查恒真、月结死锁。部分核销仍有剩余时检查保持命中
+    // （部分核销提醒由 bank_partial_allocation 项单独承接，两者口径互补不冲突）。
     let unmatched_paid_batch_count: i64 = conn.query_row(
         "SELECT COUNT(*)
          FROM payment_batches b
@@ -2882,6 +2889,29 @@ pub fn get_month_close_workbench(conn: &Connection, month: &str) -> AppResult<Mo
            AND NOT EXISTS (
              SELECT 1 FROM bank_transaction_matches m
              WHERE m.payment_batch_id = b.id AND m.status = 'active'
+           )
+           AND NOT EXISTS (
+             SELECT COUNT(*)
+             FROM voucher_lines vl
+             JOIN vouchers v ON v.id = vl.voucher_id
+             LEFT JOIN (
+               SELECT voucher_line_id, SUM(allocated_amount) AS allocated
+               FROM bank_reconciliation_allocations
+               WHERE status = 'active'
+               GROUP BY voucher_line_id
+             ) a ON a.voucher_line_id = vl.id
+             WHERE v.status = 'active'
+               AND vl.fund_account_id = b.fund_account_id
+               AND vl.credit_amount > 0
+               AND (
+                 (v.source_type IN ('salary_payment', 'reimbursement_payment')
+                   AND v.source_id = b.id)
+                 OR (v.source_type = 'fund_document' AND v.source_id IN (
+                   SELECT fd.id FROM fund_documents fd WHERE fd.payment_batch_id = b.id
+                 ))
+               )
+             HAVING COUNT(*) > 0
+                AND COALESCE(SUM(a.allocated), 0) >= SUM(vl.credit_amount) - 0.005
            )",
         params![month],
         |row| row.get(0),
@@ -3493,10 +3523,10 @@ fn build_month_close_checks(summary: &MonthCloseSummary) -> Vec<MonthCloseCheckI
             .to_string(),
             count: summary.unmatched_paid_batch_count,
             description: if summary.unmatched_paid_batch_count == 0 {
-                "已付款批次均已匹配银行流水".to_string()
+                "已付款批次均已匹配银行流水（旧匹配或核销记录覆盖付款凭证资金分录）".to_string()
             } else {
                 format!(
-                    "{} 个已付款批次尚未匹配银行流水",
+                    "{} 个已付款批次尚未匹配银行流水，请到银行对账完成核销",
                     summary.unmatched_paid_batch_count
                 )
             },
@@ -8163,6 +8193,201 @@ pub mod tests {
         let workbench = get_month_close_workbench(&conn, "2026-08").unwrap();
         assert_eq!(workbench.summary.unmatched_paid_batch_count, 0);
         close_month(&conn, "2026-08", "system", None).unwrap();
+    }
+
+    // ===== 最终全分支审查修复：月结「银行流水匹配」检查并入 allocation 口径 =====
+
+    /// 创建工资批次 → 导出 → 标记付款（同事务生成批次级付款凭证），
+    /// 返回 (批次 id, 批次总额, 付款凭证资金贷方分录 id)
+    fn gate_paid_salary_batch(conn: &mut Connection, acc: i64) -> (i64, f64, i64) {
+        let operator = batch_operator();
+        let detail = create_payment_batch(
+            conn,
+            &PaymentBatchInput {
+                belong_month: "2026-08".into(),
+                batch_type: "salary".into(),
+                fund_account_id: Some(acc),
+                source_ids: None,
+                remark: None,
+            },
+            &operator,
+        )
+        .unwrap();
+        mark_payment_batch_exported(conn, detail.batch.id).unwrap();
+        mark_payment_batch_paid(
+            conn,
+            &PaymentBatchPaidInput {
+                id: detail.batch.id,
+                payment_date: "2026-08-31".into(),
+            },
+            &operator,
+        )
+        .unwrap();
+        let fund_line: i64 = conn
+            .query_row(
+                "SELECT vl.id FROM voucher_lines vl
+                 JOIN vouchers v ON v.id = vl.voucher_id
+                 WHERE v.status='active' AND v.source_type='salary_payment'
+                   AND v.source_id=?1 AND vl.fund_account_id=?2 AND vl.credit_amount > 0",
+                params![detail.batch.id, acc],
+                |r| r.get(0),
+            )
+            .unwrap();
+        (detail.batch.id, detail.batch.total_amount, fund_line)
+    }
+
+    /// 种一条未匹配支出流水（已归集指定资金账户），返回流水 id
+    fn gate_insert_expense_tx(conn: &Connection, date: &str, expense: f64, acc: i64) -> i64 {
+        conn.execute(
+            "INSERT INTO bank_transactions
+                (transaction_date, belong_month, summary, income_amount, expense_amount,
+                 balance, status, fund_account_id, created_at, updated_at)
+             VALUES (?1, '2026-08', '银行支出流水', 0, ?2, 10000,
+                     'unmatched', ?3, ?1, ?1)",
+            params![date, expense, acc],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    /// 走新核销引擎真实入口确认一条核销，返回核销记录 id
+    fn gate_confirm_allocation(conn: &Connection, tx_id: i64, line_id: i64, amount: f64) -> i64 {
+        let result = crate::cashier::confirm_bank_allocations(
+            conn,
+            &[BankAllocationInput {
+                transaction_id: tx_id,
+                voucher_line_id: line_id,
+                allocated_amount: amount,
+                score: None,
+                remark: None,
+            }],
+            "manual",
+            "测试出纳",
+        )
+        .unwrap();
+        assert!(result.errors.is_empty(), "核销应成功：{:?}", result.errors);
+        assert_eq!(result.confirmed, 1);
+        result.allocation_ids[0]
+    }
+
+    /// 新路径：批次付款 → 新核销引擎全额核销付款凭证资金分录 →
+    /// 该 blocking 检查不再命中且月结可通过（修复前恒阻塞死锁）
+    #[test]
+    fn test_month_close_bank_check_accepts_full_allocation_from_new_engine() {
+        let mut conn = setup_financial_db();
+        fill_employee_bank_info(&conn);
+        make_august_closable(&conn);
+        let acc = make_batch_fund_account(&conn, "BANK-G1");
+        let (_batch_id, total, fund_line) = gate_paid_salary_batch(&mut conn, acc);
+
+        let workbench = get_month_close_workbench(&conn, "2026-08").unwrap();
+        assert_eq!(workbench.summary.unmatched_paid_batch_count, 1);
+        assert!(matches!(
+            close_month(&conn, "2026-08", "system", None).unwrap_err(),
+            AppError::InvalidParam(_)
+        ));
+
+        let tx_id = gate_insert_expense_tx(&conn, "2026-08-31", total, acc);
+        gate_confirm_allocation(&conn, tx_id, fund_line, total);
+
+        let workbench = get_month_close_workbench(&conn, "2026-08").unwrap();
+        assert_eq!(workbench.summary.unmatched_paid_batch_count, 0);
+        close_month(&conn, "2026-08", "system", None).unwrap();
+    }
+
+    /// 部分核销：资金分录仍有剩余时本检查保持 blocking（口径 = 全额覆盖才算匹配），
+    /// 与 bank_partial_allocation warning 项互补共存；补足或取消后按 active allocation
+    /// 实时口径回到未匹配
+    #[test]
+    fn test_month_close_bank_check_blocks_partial_allocation() {
+        let mut conn = setup_financial_db();
+        fill_employee_bank_info(&conn);
+        make_august_closable(&conn);
+        let acc = make_batch_fund_account(&conn, "BANK-G2");
+        let (_batch_id, total, fund_line) = gate_paid_salary_batch(&mut conn, acc);
+
+        // 第一条流水核销一半：批次仍有剩余 → 本检查命中
+        let half = total / 2.0;
+        let tx1 = gate_insert_expense_tx(&conn, "2026-08-30", half, acc);
+        gate_confirm_allocation(&conn, tx1, fund_line, half);
+
+        let workbench = get_month_close_workbench(&conn, "2026-08").unwrap();
+        assert_eq!(workbench.summary.unmatched_paid_batch_count, 1);
+        let bank_check = workbench
+            .checks
+            .iter()
+            .find(|c| c.key == "bank_transactions_matched")
+            .unwrap();
+        assert_eq!(bank_check.status, "blocking");
+        // 协同不冲突：同一部分核销由 bank_partial_allocation 以 warning 单独承接
+        let partial_check = workbench
+            .checks
+            .iter()
+            .find(|c| c.key == "bank_partial_allocation")
+            .unwrap();
+        assert_eq!(partial_check.status, "warning");
+
+        // 第二条流水补足剩余 → 分录被 active allocation 全额覆盖 → 解除阻塞
+        let tx2 = gate_insert_expense_tx(&conn, "2026-08-31", total - half, acc);
+        let alloc2 = gate_confirm_allocation(&conn, tx2, fund_line, total - half);
+
+        let workbench = get_month_close_workbench(&conn, "2026-08").unwrap();
+        assert_eq!(workbench.summary.unmatched_paid_batch_count, 0);
+
+        // 取消补足那条核销 → 覆盖回到部分 → 检查重新命中（实时口径，无残留状态）
+        assert!(crate::cashier::cancel_bank_allocation(&conn, alloc2, "测试出纳").unwrap());
+        let workbench = get_month_close_workbench(&conn, "2026-08").unwrap();
+        assert_eq!(workbench.summary.unmatched_paid_batch_count, 1);
+    }
+
+    /// 迁移期兼容：旧表 active 匹配仍视为已匹配（保护 Task 12 迁移前用户）；
+    /// 迁移后旧匹配保持 active 只读、新增 migrated allocation，新旧“或”口径
+    /// 不双计（批次级 EXISTS）也不漏计
+    #[test]
+    fn test_month_close_bank_check_legacy_match_survives_migration() {
+        let mut conn = setup_financial_db();
+        fill_employee_bank_info(&conn);
+        make_august_closable(&conn);
+        let acc = make_batch_fund_account(&conn, "BANK-G3");
+        let (batch_id, total, _fund_line) = gate_paid_salary_batch(&mut conn, acc);
+
+        let tx_id = gate_insert_expense_tx(&conn, "2026-08-31", total, acc);
+        confirm_bank_transaction_match(
+            &conn,
+            &BankTransactionMatchInput {
+                transaction_id: tx_id,
+                payment_batch_id: batch_id,
+                remark: Some("旧式手工匹配".into()),
+            },
+            100,
+        )
+        .unwrap();
+        let workbench = get_month_close_workbench(&conn, "2026-08").unwrap();
+        assert_eq!(workbench.summary.unmatched_paid_batch_count, 0);
+
+        // 启动迁移：旧匹配单向转 allocation（迁移额 = 双侧剩余较小值 = 全额），
+        // 旧表记录不翻转状态
+        let report = migrate_legacy_bank_matches_in_tx(&conn).unwrap();
+        assert_eq!(report.migrated, 1);
+        let (legacy_active, migrated_alloc, alloc_amount): (i64, i64, f64) = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM bank_transaction_matches
+                          WHERE payment_batch_id=?1 AND status='active'),
+                        (SELECT COUNT(*) FROM bank_reconciliation_allocations
+                          WHERE legacy_match_id IS NOT NULL AND status='active'),
+                        (SELECT COALESCE(SUM(allocated_amount),0)
+                          FROM bank_reconciliation_allocations)",
+                params![batch_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(legacy_active, 1);
+        assert_eq!(migrated_alloc, 1);
+        assert!((alloc_amount - total).abs() < 0.005);
+
+        // 旧匹配与迁移 allocation 并存：批次级“或”口径仍只计一次已匹配
+        let workbench = get_month_close_workbench(&conn, "2026-08").unwrap();
+        assert_eq!(workbench.summary.unmatched_paid_batch_count, 0);
     }
 
     #[test]
