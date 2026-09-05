@@ -411,6 +411,8 @@ fn bank_transaction_from_values(
         matched_amount: None,
         match_score: None,
         match_remark: None,
+        allocated_amount: None,
+        remaining_amount: None,
         created_at: None,
         updated_at: None,
     }))
@@ -2030,6 +2032,340 @@ pub fn export_trial_balance_excel(report: &TrialBalanceReport, path: &str) -> Ap
     sheet.write_number_with_format(r, 7, total_credit, &money)?;
     for col in 0..9u16 {
         sheet.set_column_width(col, 14)?;
+    }
+    workbook.save(path)?;
+    Ok(())
+}
+
+/// 资金日记账（现金/银行存款/第三方支付日记账，spec 6.1/8）：期初 + 明细 + 合计。
+/// 列：日期/凭证号/来源/摘要/对方单位/收入/支出/余额/对账状态。
+pub fn export_fund_journal_excel(journal: &FundJournal, path: &str) -> AppResult<()> {
+    let mut workbook = Workbook::new();
+    let sheet = workbook.add_worksheet();
+    let title = Format::new().set_bold().set_font_size(14);
+    let header = Format::new()
+        .set_bold()
+        .set_border(rust_xlsxwriter::FormatBorder::Thin);
+    let cell = Format::new().set_border(rust_xlsxwriter::FormatBorder::Thin);
+    let money = Format::new()
+        .set_border(rust_xlsxwriter::FormatBorder::Thin)
+        .set_num_format("#,##0.00");
+    let account_title = match journal.account_type.as_str() {
+        "cash" => "现金日记账",
+        "bank" => "银行存款日记账",
+        _ => "资金日记账",
+    };
+    let range_text = match (&journal.from_month, &journal.to_month) {
+        (Some(f), Some(t)) if f == t => f.clone(),
+        (Some(f), Some(t)) => format!("{f} ~ {t}"),
+        (Some(f), None) => format!("{f} 起"),
+        (None, Some(t)) => format!("至 {t}"),
+        _ => "全部".to_string(),
+    };
+    sheet.merge_range(
+        0,
+        0,
+        0,
+        8,
+        &format!(
+            "{account_title}（{} {}）",
+            journal.fund_account_name, range_text
+        ),
+        &title,
+    )?;
+    let headers = [
+        "日期",
+        "凭证号",
+        "来源",
+        "摘要",
+        "对方单位",
+        "收入",
+        "支出",
+        "余额",
+        "对账状态",
+    ];
+    for (i, h) in headers.iter().enumerate() {
+        sheet.write_with_format(1, i as u16, *h, &header)?;
+    }
+    // 期初行
+    sheet.merge_range(2, 0, 2, 4, "期初余额", &header)?;
+    sheet.write_number_with_format(2, 7, journal.opening_balance, &money)?;
+    for col in [0u16, 1, 2, 3, 4, 5, 6, 8] {
+        sheet.write_with_format(2, col, "", &cell)?;
+    }
+    let mut r: u32 = 3;
+    for row in &journal.rows {
+        sheet.write_with_format(r, 0, &row.voucher_date, &cell)?;
+        sheet.write_with_format(r, 1, &row.voucher_no, &cell)?;
+        sheet.write_with_format(r, 2, &row.source_type, &cell)?;
+        sheet.write_with_format(r, 3, row.summary.as_deref().unwrap_or(""), &cell)?;
+        sheet.write_with_format(r, 4, row.partner_name.as_deref().unwrap_or(""), &cell)?;
+        if row.income_amount > 0.0 {
+            sheet.write_number_with_format(r, 5, row.income_amount, &money)?;
+        } else {
+            sheet.write_with_format(r, 5, "", &cell)?;
+        }
+        if row.expense_amount > 0.0 {
+            sheet.write_number_with_format(r, 6, row.expense_amount, &money)?;
+        } else {
+            sheet.write_with_format(r, 6, "", &cell)?;
+        }
+        sheet.write_number_with_format(r, 7, row.balance, &money)?;
+        sheet.write_with_format(r, 8, journal_reconcile_text(&row.reconcile_status), &cell)?;
+        r += 1;
+    }
+    // 合计行
+    sheet.write_with_format(r, 3, "本期合计", &header)?;
+    sheet.write_number_with_format(r, 5, journal.total_income, &money)?;
+    sheet.write_number_with_format(r, 6, journal.total_expense, &money)?;
+    sheet.write_number_with_format(r, 7, journal.closing_balance, &money)?;
+    for col in [0u16, 1, 2, 4, 8] {
+        sheet.write_with_format(r, col, "", &cell)?;
+    }
+    let widths = [12u16, 14, 16, 24, 14, 14, 14, 14, 10];
+    for (col, w) in widths.iter().enumerate() {
+        sheet.set_column_width(col as u16, *w)?;
+    }
+    workbook.save(path)?;
+    Ok(())
+}
+
+fn journal_reconcile_text(status: &str) -> &str {
+    match status {
+        "allocated" => "已核销",
+        "partial" => "部分核销",
+        "unallocated" => "未核销",
+        _ => status,
+    }
+}
+
+/// 银行余额调节表（spec 4.10）：两侧调节勾稽 + 未达项清单。
+pub fn export_bank_reconciliation_excel(
+    period: &BankReconciliationPeriod,
+    path: &str,
+) -> AppResult<()> {
+    let detail: BankReconciliationDetail = period
+        .detail_json
+        .as_deref()
+        .and_then(|json| serde_json::from_str(json).ok())
+        .unwrap_or_default();
+
+    let mut workbook = Workbook::new();
+    let sheet = workbook.add_worksheet();
+    sheet.set_name("余额调节表")?;
+    let title = Format::new().set_bold().set_font_size(14);
+    let section = Format::new().set_bold();
+    let header = Format::new()
+        .set_bold()
+        .set_border(rust_xlsxwriter::FormatBorder::Thin);
+    let cell = Format::new().set_border(rust_xlsxwriter::FormatBorder::Thin);
+    let money = Format::new()
+        .set_border(rust_xlsxwriter::FormatBorder::Thin)
+        .set_num_format("#,##0.00");
+
+    sheet.merge_range(
+        0,
+        0,
+        0,
+        3,
+        &format!(
+            "银行余额调节表（{} {}月）",
+            period.fund_account_name.as_deref().unwrap_or(""),
+            period.belong_month
+        ),
+        &title,
+    )?;
+
+    let mut r: u32 = 2;
+    let write_item = |sheet: &mut rust_xlsxwriter::Worksheet,
+                      row: &mut u32,
+                      label: &str,
+                      amount: f64,
+                      fmt: &Format|
+     -> AppResult<()> {
+        sheet.write_with_format(*row, 0, label, &cell)?;
+        sheet.merge_range(*row, 1, *row, 2, "", &cell)?;
+        sheet.write_number_with_format(*row, 3, amount, fmt)?;
+        *row += 1;
+        Ok(())
+    };
+
+    sheet.merge_range(r, 0, r, 3, "一、账面侧（企业日记账）", &section)?;
+    r += 1;
+    write_item(
+        sheet,
+        &mut r,
+        "账面期末余额",
+        period.book_closing_balance,
+        &money,
+    )?;
+    let tx_income: f64 = detail
+        .unallocated_transactions
+        .iter()
+        .filter(|t| t.direction == "income")
+        .map(|t| t.remaining_amount)
+        .sum();
+    let tx_expense: f64 = detail
+        .unallocated_transactions
+        .iter()
+        .filter(|t| t.direction == "expense")
+        .map(|t| t.remaining_amount)
+        .sum();
+    write_item(sheet, &mut r, "加：银行已收、企业未入账", tx_income, &money)?;
+    write_item(
+        sheet,
+        &mut r,
+        "减：银行已付、企业未入账",
+        tx_expense,
+        &money,
+    )?;
+    write_item(
+        sheet,
+        &mut r,
+        "账面侧调节后余额",
+        period.adjusted_book_balance,
+        &header,
+    )?;
+
+    sheet.merge_range(r, 0, r, 3, "二、银行侧（对账单）", &section)?;
+    r += 1;
+    write_item(
+        sheet,
+        &mut r,
+        "对账单期末余额",
+        period.statement_closing_balance,
+        &money,
+    )?;
+    let line_debit: f64 = detail
+        .unallocated_lines
+        .iter()
+        .filter(|l| l.direction == "debit")
+        .map(|l| l.remaining_amount)
+        .sum();
+    let line_credit: f64 = detail
+        .unallocated_lines
+        .iter()
+        .filter(|l| l.direction == "credit")
+        .map(|l| l.remaining_amount)
+        .sum();
+    write_item(
+        sheet,
+        &mut r,
+        "加：企业已收、银行未收付",
+        line_debit,
+        &money,
+    )?;
+    write_item(
+        sheet,
+        &mut r,
+        "减：企业已付、银行未收付",
+        line_credit,
+        &money,
+    )?;
+    write_item(
+        sheet,
+        &mut r,
+        "银行侧调节后余额",
+        period.adjusted_bank_balance,
+        &header,
+    )?;
+
+    sheet.merge_range(r, 0, r, 3, "三、勾稽", &section)?;
+    r += 1;
+    write_item(
+        sheet,
+        &mut r,
+        "对账单期初余额",
+        period.statement_opening_balance,
+        &money,
+    )?;
+    write_item(
+        sheet,
+        &mut r,
+        "调节差额（应为 0）",
+        period.difference,
+        &money,
+    )?;
+    sheet.write_with_format(r, 0, "确认状态", &cell)?;
+    sheet.merge_range(
+        r,
+        1,
+        r,
+        3,
+        &format!(
+            "{}{}",
+            if period.status == "confirmed" {
+                "已确认"
+            } else {
+                "草稿"
+            },
+            period
+                .confirmed_by
+                .as_deref()
+                .map(|by| format!("（{by}）"))
+                .unwrap_or_default()
+        ),
+        &cell,
+    )?;
+    r += 2;
+
+    // 未达项清单
+    sheet.merge_range(
+        r,
+        0,
+        r,
+        3,
+        "四、未达项——银行已收付、账面未对应（未核销流水）",
+        &section,
+    )?;
+    r += 1;
+    sheet.write_with_format(r, 0, "日期", &header)?;
+    sheet.write_with_format(r, 1, "流水号", &header)?;
+    sheet.write_with_format(r, 2, "摘要/对方", &header)?;
+    sheet.write_with_format(r, 3, "未核销金额", &header)?;
+    r += 1;
+    for tx in &detail.unallocated_transactions {
+        sheet.write_with_format(r, 0, &tx.transaction_date, &cell)?;
+        sheet.write_with_format(r, 1, &format!("ID={}", tx.transaction_id), &cell)?;
+        sheet.write_with_format(
+            r,
+            2,
+            &format!(
+                "{}{}",
+                tx.summary.as_deref().unwrap_or(""),
+                tx.counterparty_name
+                    .as_deref()
+                    .map(|s| format!(" {s}"))
+                    .unwrap_or_default()
+            ),
+            &cell,
+        )?;
+        sheet.write_number_with_format(r, 3, tx.remaining_amount, &money)?;
+        r += 1;
+    }
+    sheet.merge_range(
+        r,
+        0,
+        r,
+        3,
+        "五、未达项——账面已记账、银行未对应（未核销分录）",
+        &section,
+    )?;
+    r += 1;
+    sheet.write_with_format(r, 0, "凭证号", &header)?;
+    sheet.write_with_format(r, 1, "日期", &header)?;
+    sheet.write_with_format(r, 2, "摘要", &header)?;
+    sheet.write_with_format(r, 3, "未核销金额", &header)?;
+    r += 1;
+    for line in &detail.unallocated_lines {
+        sheet.write_with_format(r, 0, &line.voucher_no, &cell)?;
+        sheet.write_with_format(r, 1, &line.voucher_date, &cell)?;
+        sheet.write_with_format(r, 2, line.summary.as_deref().unwrap_or(""), &cell)?;
+        sheet.write_number_with_format(r, 3, line.remaining_amount, &money)?;
+        r += 1;
+    }
+    for col in 0..4u16 {
+        sheet.set_column_width(col, if col == 0 { 26 } else { 18 })?;
     }
     workbook.save(path)?;
     Ok(())

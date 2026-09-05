@@ -629,13 +629,14 @@ const STAGE7_NEW_TABLES: &[&str] = &[
     "approval_events",
     "business_attachments",
     "bank_reconciliation_allocations",
+    "bank_reconciliation_periods",
 ];
 
 /// 第七阶段 schema 迁移入口（幂等，可在新旧库上重复执行）：
 /// 0. 重建 `vouchers` 表扩展 `source_type` 白名单（`'fund_document'`，spec 4.7），保留原 id、
 ///    分录外键关系与全部索引；新库 DDL 已含该类型时跳过；
 /// 0b. 重建 `approval_events` 表扩展 `action` 白名单（`'unbatch'`，批次释放资金单，spec 5.3）；
-/// 1. 建六张资金领域新表（资金账户/往来单位/操作人/资金单据/审批事件/业务附件）；
+/// 1. 建七张资金领域新表（资金账户/往来单位/操作人/资金单据/审批事件/业务附件/多对多核销/余额调节表）；
 /// 2. 为凭证分录、付款批次、银行流水补可空 `fund_account_id`（历史数据保持 NULL 进待归集，不猜测归属）；
 /// 3. 银行流水去重唯一索引重建为含账户维度，避免不同账户同日同金额流水误判重复；
 /// 4. 迁移结束运行 `PRAGMA foreign_key_check`，发现悬空引用整体回滚；
@@ -1051,6 +1052,32 @@ fn create_stage7_tables(conn: &Connection) -> AppResult<()> {
             ON bank_reconciliation_allocations(voucher_line_id, status);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_bank_alloc_legacy
             ON bank_reconciliation_allocations(legacy_match_id) WHERE legacy_match_id IS NOT NULL;
+
+        -- 银行余额调节表快照（spec 4.10，Task 13）：账户+月份唯一；
+        -- 重新生成即覆盖快照并回到 draft，确认后记录确认人与时间
+        CREATE TABLE IF NOT EXISTS bank_reconciliation_periods (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fund_account_id INTEGER NOT NULL REFERENCES fund_accounts(id),
+            belong_month TEXT NOT NULL,
+            statement_opening_balance REAL NOT NULL DEFAULT 0,
+            statement_closing_balance REAL NOT NULL DEFAULT 0,
+            statement_source TEXT NOT NULL DEFAULT 'derived',
+            book_closing_balance REAL NOT NULL DEFAULT 0,
+            outstanding_tx_amount REAL NOT NULL DEFAULT 0,
+            outstanding_line_amount REAL NOT NULL DEFAULT 0,
+            adjusted_book_balance REAL NOT NULL DEFAULT 0,
+            adjusted_bank_balance REAL NOT NULL DEFAULT 0,
+            difference REAL NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','confirmed')),
+            detail_json TEXT,
+            confirmed_by TEXT,
+            confirmed_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(fund_account_id, belong_month)
+        );
+        CREATE INDEX IF NOT EXISTS idx_bank_recon_periods_account
+            ON bank_reconciliation_periods(fund_account_id, belong_month);
         ",
     )?;
     Ok(())
@@ -2841,6 +2868,93 @@ pub fn get_month_close_workbench(conn: &Connection, month: &str) -> AppResult<Mo
             action_route: None,
         });
     }
+    // 部分核销流水/资金分录（spec 8 warning 项；严格模式可配置阻塞归 7D）。
+    // 流水侧已核销含 active allocation 与未迁移旧式批次匹配（与核销引擎 bank_tx_allocated 同口径）；
+    // 仅统计"部分核销"（已核销>0 且有剩余），完全未核销不提醒。
+    let partial_tx_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM (
+           SELECT t.id,
+             (CASE WHEN t.income_amount > 0.005 THEN t.income_amount ELSE t.expense_amount END)
+               AS side_amount,
+             (SELECT COALESCE(SUM(a.allocated_amount),0) FROM bank_reconciliation_allocations a
+               WHERE a.transaction_id = t.id AND a.status = 'active')
+             + (SELECT COALESCE(SUM(b.total_amount),0) FROM bank_transaction_matches m
+                JOIN payment_batches b ON b.id = m.payment_batch_id
+                WHERE m.transaction_id = t.id AND m.status = 'active'
+                  AND NOT EXISTS (SELECT 1 FROM bank_reconciliation_allocations x
+                                  WHERE x.legacy_match_id = m.id)) AS allocated
+           FROM bank_transactions t
+           WHERE t.belong_month = ?1 AND t.status != 'ignored' AND t.fund_account_id IS NOT NULL
+         ) WHERE side_amount - allocated > 0.005 AND allocated > 0.005",
+        params![month],
+        |row| row.get(0),
+    )?;
+    let partial_line_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM (
+           SELECT vl.id,
+             (CASE WHEN vl.debit_amount > 0.005 THEN vl.debit_amount ELSE vl.credit_amount END)
+               AS side_amount,
+             (SELECT COALESCE(SUM(a.allocated_amount),0) FROM bank_reconciliation_allocations a
+               WHERE a.voucher_line_id = vl.id AND a.status = 'active') AS allocated
+           FROM voucher_lines vl
+           JOIN vouchers v ON v.id = vl.voucher_id
+           WHERE v.status = 'active' AND vl.fund_account_id IS NOT NULL AND v.belong_month = ?1
+         ) WHERE side_amount - allocated > 0.005 AND allocated > 0.005",
+        params![month],
+        |row| row.get(0),
+    )?;
+    let partial_allocation_count = partial_tx_count + partial_line_count;
+    checks.push(MonthCloseCheckItem {
+        key: "bank_partial_allocation".to_string(),
+        title: "银行流水核销完整".to_string(),
+        status: if partial_allocation_count == 0 { "ok" } else { "warning" }.to_string(),
+        count: partial_allocation_count as i32,
+        description: if partial_allocation_count == 0 {
+            "本月流水与账面分录不存在部分核销".to_string()
+        } else {
+            format!(
+                "存在 {partial_allocation_count} 条部分核销的流水/账面分录，建议到银行对账完成核销或取消重对"
+            )
+        },
+        action_route: Some("/bank-transactions".to_string()),
+    });
+    // 待归集银行流水（spec 8 阻塞项 / spec 9.6 迁移完成前降级 warning）。
+    // 判别口径：历史归集向导执行过（stage7_fund_assignment_last_applied_at 存在）后，
+    // 仍出现待归集流水 → blocking；向导未执行（schema 迁移在启动时即自动完成，
+    // 不能作为用户确认信号，spec 13 节「严格月结检查只能在历史归集向导完成后启用」）→ warning。
+    let unassigned_tx_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM bank_transactions
+         WHERE belong_month = ?1 AND status != 'ignored' AND fund_account_id IS NULL",
+        params![month],
+        |row| row.get(0),
+    )?;
+    let fund_assignment_applied =
+        get_setting(conn, "stage7_fund_assignment_last_applied_at")?.is_some();
+    checks.push(MonthCloseCheckItem {
+        key: "fund_unassigned_bank_tx".to_string(),
+        title: "待归集银行流水".to_string(),
+        status: if unassigned_tx_count == 0 {
+            "ok"
+        } else if fund_assignment_applied {
+            "blocking"
+        } else {
+            "warning"
+        }
+        .to_string(),
+        count: unassigned_tx_count as i32,
+        description: if unassigned_tx_count == 0 {
+            "本月银行流水均已归集资金账户".to_string()
+        } else if fund_assignment_applied {
+            format!(
+                "归集向导执行后仍存在 {unassigned_tx_count} 条待归集流水，请先完成归集再月结"
+            )
+        } else {
+            format!(
+                "存在 {unassigned_tx_count} 条待归集流水（历史迁移期仅提醒）；执行资金归集向导后此项将阻塞月结"
+            )
+        },
+        action_route: Some("/fund-accounts".to_string()),
+    });
     let month_close = get_month_close_record(conn, month)?;
     Ok(MonthCloseWorkbench {
         summary,
@@ -4224,6 +4338,8 @@ fn row_to_bank_transaction(row: &rusqlite::Row<'_>) -> rusqlite::Result<BankTran
         match_remark: row.get(20)?,
         fund_account_id: row.get(21)?,
         fund_account_name: row.get(22)?,
+        allocated_amount: row.get(23)?,
+        remaining_amount: row.get(24)?,
     })
 }
 
@@ -4284,11 +4400,25 @@ pub fn query_bank_transactions(
                 t.counterparty_account, t.income_amount, t.expense_amount, t.balance, t.status,
                 t.ignore_reason, t.imported_file, t.raw_json, t.created_at, t.updated_at,
                 b.id, b.batch_no, b.batch_type, b.total_amount, m.match_score, m.remark,
-                t.fund_account_id, fa.name
+                t.fund_account_id, fa.name,
+                COALESCE(al.s, 0) + COALESCE(lg.s, 0),
+                (CASE WHEN t.income_amount > 0.005 THEN t.income_amount
+                      WHEN t.expense_amount > 0.005 THEN t.expense_amount ELSE 0 END)
+                    - (COALESCE(al.s, 0) + COALESCE(lg.s, 0))
          FROM bank_transactions t
          LEFT JOIN bank_transaction_matches m ON m.transaction_id = t.id AND m.status = 'active'
          LEFT JOIN payment_batches b ON b.id = m.payment_batch_id
          LEFT JOIN fund_accounts fa ON fa.id = t.fund_account_id
+         LEFT JOIN (SELECT transaction_id AS tid, SUM(allocated_amount) AS s
+                    FROM bank_reconciliation_allocations WHERE status = 'active'
+                    GROUP BY transaction_id) al ON al.tid = t.id
+         LEFT JOIN (SELECT m2.transaction_id AS tid, SUM(b2.total_amount) AS s
+                    FROM bank_transaction_matches m2
+                    JOIN payment_batches b2 ON b2.id = m2.payment_batch_id
+                    WHERE m2.status = 'active' AND NOT EXISTS (
+                        SELECT 1 FROM bank_reconciliation_allocations x
+                        WHERE x.legacy_match_id = m2.id)
+                    GROUP BY m2.transaction_id) lg ON lg.tid = t.id
          WHERE {}
          ORDER BY t.transaction_date DESC, t.id DESC",
         where_clauses.join(" AND ")
@@ -4564,6 +4694,15 @@ pub fn confirm_bank_transaction_match(
             "该流水已生成入账凭证，请先取消凭证或取消流水匹配后再匹配付款批次".into(),
         ));
     }
+    // 退役拦截（Task 13，spec 4.9 双路径防重）：流水已在新对账引擎（allocation 或未迁移旧匹配）
+    // 占用核销额时，旧批次匹配不得再写入——旧引擎不感知 allocation，双向并存会把流水侧
+    // 已核销金额计到 200%。旧匹配表只读保留一个版本周期，写入口统一收敛到银行对账页。
+    let tx_allocated = crate::cashier::bank_tx_allocated(conn, input.transaction_id)?;
+    if tx_allocated > 0.005 {
+        return Err(AppError::General(format!(
+            "该流水已通过银行对账核销 {tx_allocated:.2}，请到「银行对账」页处理，不能重复匹配付款批次"
+        )));
+    }
 
     let now = Utc::now().to_rfc3339();
     conn.execute(
@@ -4667,6 +4806,13 @@ pub fn auto_match_bank_transactions(
     .filter(|tx| tx.fund_account_id.is_some())
     // 查询失败时保守排除（与下方 active_bank_match_* 的 unwrap_or(true) 口径一致）
     .filter(|tx| !active_bank_manual_voucher_exists(conn, tx.id).unwrap_or(true))
+    // 退役拦截（Task 13）：流水已被新对账引擎/旧匹配占用核销额时跳过，
+    // 不再进入旧 confirm（其内部同样有 bank_tx_allocated 拦截，双保险）
+    .filter(|tx| {
+        crate::cashier::bank_tx_allocated(conn, tx.id)
+            .map(|allocated| allocated <= 0.005)
+            .unwrap_or(true)
+    })
     .collect::<Vec<_>>();
     let batches = query_payment_batches(
         conn,
@@ -7589,6 +7735,8 @@ pub mod tests {
                 matched_amount: None,
                 match_score: None,
                 match_remark: None,
+                allocated_amount: None,
+                remaining_amount: None,
                 created_at: None,
                 updated_at: None,
             }
@@ -7694,6 +7842,8 @@ pub mod tests {
                 matched_amount: None,
                 match_score: None,
                 match_remark: None,
+                allocated_amount: None,
+                remaining_amount: None,
                 created_at: None,
                 updated_at: None,
             }
@@ -7880,6 +8030,8 @@ pub mod tests {
                 matched_amount: Some(10.0),
                 match_score: Some(50),
                 match_remark: Some("旧批次匹配".into()),
+                allocated_amount: None,
+                remaining_amount: None,
                 created_at: None,
                 updated_at: None,
             }
@@ -8186,6 +8338,8 @@ pub mod tests {
             matched_amount: None,
             match_score: None,
             match_remark: None,
+            allocated_amount: None,
+            remaining_amount: None,
             created_at: None,
             updated_at: None,
         }
@@ -8444,6 +8598,8 @@ pub mod tests {
                 matched_amount: None,
                 match_score: None,
                 match_remark: None,
+                allocated_amount: None,
+                remaining_amount: None,
                 created_at: None,
                 updated_at: None,
             }

@@ -46,6 +46,9 @@ import type {
   BankTransactionMatchInput,
   BankTransactionQuery,
   LegacyBankMatchReport,
+  FundJournal,
+  FundJournalQuery,
+  BankReconciliationPeriod,
   Budget,
   BudgetInput,
   BudgetQuery,
@@ -1068,6 +1071,45 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
         already_migrated: 0,
         unconverted: [],
       };
+    case 'get_fund_journal': {
+      const jq = (args?.query ?? {}) as FundJournalQuery;
+      return {
+        fund_account_id: Number(jq.fund_account_id ?? 0),
+        fund_account_name: '预览账户',
+        account_type: 'bank',
+        from_month: jq.from_month ?? null,
+        to_month: jq.to_month ?? null,
+        opening_balance: 0,
+        closing_balance: 0,
+        total_income: 0,
+        total_expense: 0,
+        rows: [],
+      };
+    }
+    case 'generate_bank_reconciliation_period':
+      return {
+        id: 0,
+        fund_account_id: Number(args?.fundAccountId ?? 0),
+        fund_account_name: '预览账户',
+        belong_month: String(args?.month ?? ''),
+        statement_opening_balance: 0,
+        statement_closing_balance: 0,
+        statement_source: 'empty',
+        book_closing_balance: 0,
+        outstanding_tx_amount: 0,
+        outstanding_line_amount: 0,
+        adjusted_book_balance: 0,
+        adjusted_bank_balance: 0,
+        difference: 0,
+        status: 'draft',
+        detail_json: null,
+        confirmed_by: null,
+        confirmed_at: null,
+        created_at: '',
+        updated_at: '',
+      };
+    case 'confirm_bank_reconciliation_period':
+      throw new Error('预览模式不支持该操作，请在桌面应用中操作');
     case 'query_budgets':
       return [];
     case 'save_budget':
@@ -1526,6 +1568,50 @@ export async function batchConfirmBankAutoMatches(
 /** 旧 bank_transaction_matches 迁移为 allocation（spec 4.9/9.4，幂等可重跑） */
 export async function migrateLegacyBankMatches(): Promise<LegacyBankMatchReport> {
   return invoke<LegacyBankMatchReport>('migrate_legacy_bank_matches');
+}
+
+// ==================== Task 13：资金日记账与银行余额调节表（spec 6.1/4.10） ====================
+
+export async function getFundJournal(query: FundJournalQuery): Promise<FundJournal> {
+  return invoke<FundJournal>('get_fund_journal', { query });
+}
+
+export async function exportFundJournal(query: FundJournalQuery, path: string): Promise<string> {
+  return invoke<string>('export_fund_journal', { query, path });
+}
+
+export async function generateBankReconciliationPeriod(
+  fundAccountId: number,
+  month: string,
+  statementOpening?: number,
+  statementClosing?: number,
+): Promise<BankReconciliationPeriod> {
+  return invoke<BankReconciliationPeriod>('generate_bank_reconciliation_period', {
+    fundAccountId,
+    month,
+    statementOpening: statementOpening ?? null,
+    statementClosing: statementClosing ?? null,
+  });
+}
+
+export async function confirmBankReconciliationPeriod(
+  id: number,
+): Promise<BankReconciliationPeriod> {
+  return invoke<BankReconciliationPeriod>('confirm_bank_reconciliation_period', { id });
+}
+
+export async function listBankReconciliationPeriods(
+  fundAccountId?: number,
+  month?: string,
+): Promise<BankReconciliationPeriod[]> {
+  return invoke<BankReconciliationPeriod[]>('list_bank_reconciliation_periods', {
+    fundAccountId: fundAccountId ?? null,
+    month: month ?? null,
+  });
+}
+
+export async function exportBankReconciliationPeriod(id: number, path: string): Promise<string> {
+  return invoke<string>('export_bank_reconciliation_period', { id, path });
 }
 
 export async function ignoreBankTransaction(data: BankTransactionIgnoreInput): Promise<boolean> {

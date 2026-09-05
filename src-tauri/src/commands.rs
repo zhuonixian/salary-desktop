@@ -1287,6 +1287,131 @@ pub fn migrate_legacy_bank_matches(
     Ok(report)
 }
 
+// ==================== Task 13：资金日记账与银行余额调节表（spec 6.1/4.10） ====================
+
+#[tauri::command]
+pub fn get_fund_journal(
+    query: FundJournalQuery,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<FundJournal, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    cashier::get_fund_journal(&conn, &query)
+}
+
+#[tauri::command]
+pub fn export_fund_journal(
+    query: FundJournalQuery,
+    path: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<String, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let journal = cashier::get_fund_journal(&conn, &query)?;
+    excel::export_fund_journal_excel(&journal, &path)?;
+    db::log_operation(
+        &conn,
+        "export_fund_journal",
+        &format!(
+            "导出资金日记账（{} {}~{}）到{path}",
+            journal.fund_account_name,
+            journal.from_month.as_deref().unwrap_or("期初"),
+            journal.to_month.as_deref().unwrap_or("最新")
+        ),
+        "system",
+        None,
+    )?;
+    Ok(path)
+}
+
+#[tauri::command]
+pub fn generate_bank_reconciliation_period(
+    fund_account_id: i64,
+    month: String,
+    statement_opening: Option<f64>,
+    statement_closing: Option<f64>,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<BankReconciliationPeriod, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let period = cashier::generate_bank_reconciliation_period(
+        &conn,
+        fund_account_id,
+        &month,
+        statement_opening,
+        statement_closing,
+    )?;
+    db::log_operation(
+        &conn,
+        "generate_bank_reconciliation_period",
+        &format!(
+            "生成{}{}余额调节表：账面期末 {:.2}，对账单期末 {:.2}，调节差额 {:.2}",
+            period.fund_account_name.as_deref().unwrap_or(""),
+            period.belong_month,
+            period.book_closing_balance,
+            period.statement_closing_balance,
+            period.difference
+        ),
+        "system",
+        None,
+    )?;
+    Ok(period)
+}
+
+#[tauri::command]
+pub fn confirm_bank_reconciliation_period(
+    id: i64,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<BankReconciliationPeriod, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let operator = cashier::current_operator_name(&conn, &current);
+    let period = cashier::confirm_bank_reconciliation_period(&conn, id, &operator)?;
+    db::log_operation(
+        &conn,
+        "confirm_bank_reconciliation_period",
+        &format!(
+            "确认{}{}余额调节表（调节差额 {:.2}）",
+            period.fund_account_name.as_deref().unwrap_or(""),
+            period.belong_month,
+            period.difference
+        ),
+        &operator,
+        None,
+    )?;
+    Ok(period)
+}
+
+#[tauri::command]
+pub fn list_bank_reconciliation_periods(
+    fund_account_id: Option<i64>,
+    month: Option<String>,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<BankReconciliationPeriod>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    cashier::list_bank_reconciliation_periods(&conn, fund_account_id, month.as_deref())
+}
+
+#[tauri::command]
+pub fn export_bank_reconciliation_period(
+    id: i64,
+    path: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<String, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let period = cashier::get_bank_reconciliation_period(&conn, id)?;
+    excel::export_bank_reconciliation_excel(&period, &path)?;
+    db::log_operation(
+        &conn,
+        "export_bank_reconciliation_period",
+        &format!(
+            "导出{}{}银行余额调节表到{path}",
+            period.fund_account_name.as_deref().unwrap_or(""),
+            period.belong_month
+        ),
+        "system",
+        None,
+    )?;
+    Ok(path)
+}
+
 #[tauri::command]
 pub fn query_budgets(
     query: BudgetQuery,

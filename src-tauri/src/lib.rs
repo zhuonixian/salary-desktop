@@ -177,6 +177,13 @@ pub fn run() {
         commands::list_bank_allocations,
         commands::batch_confirm_bank_auto_matches,
         commands::migrate_legacy_bank_matches,
+        // ===== Cashier Task 13（资金日记账/银行余额调节表） =====
+        commands::get_fund_journal,
+        commands::export_fund_journal,
+        commands::generate_bank_reconciliation_period,
+        commands::confirm_bank_reconciliation_period,
+        commands::list_bank_reconciliation_periods,
+        commands::export_bank_reconciliation_period,
         commands::query_budgets,
         commands::save_budget,
         commands::delete_budget,

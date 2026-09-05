@@ -435,6 +435,12 @@ pub struct BankTransaction {
     pub matched_amount: Option<f64>,
     pub match_score: Option<i32>,
     pub match_remark: Option<String>,
+    /// 流水侧已核销额（active allocation + 未迁移旧匹配，与核销引擎 bank_tx_allocated 同口径）
+    #[serde(default)]
+    pub allocated_amount: Option<f64>,
+    /// 未核销余额（方向侧金额 − 已核销；对账工作台与月结部分核销口径）
+    #[serde(default)]
+    pub remaining_amount: Option<f64>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
 }
@@ -600,6 +606,132 @@ pub struct LegacyBankMatchReport {
     /// 已有 allocation 的幂等跳过数
     pub already_migrated: i32,
     pub unconverted: Vec<LegacyBankMatchUnconverted>,
+}
+
+// ==================== 第七阶段 Task 13：资金日记账（spec 6.1） ====================
+
+/// 日记账查询条件：账户必选；月份区间可空（None=自账户期初起 / 至最新）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FundJournalQuery {
+    pub fund_account_id: i64,
+    pub from_month: Option<String>,
+    pub to_month: Option<String>,
+}
+
+/// 日记账单行：一条带资金辅助核算的 active 凭证分录 + 滚动余额与对账状态
+#[derive(Debug, Clone, Serialize)]
+pub struct FundJournalRow {
+    pub voucher_line_id: i64,
+    pub voucher_id: i64,
+    pub voucher_date: String,
+    pub belong_month: String,
+    pub voucher_no: String,
+    pub source_type: String,
+    pub source_id: i64,
+    /// 分录挂接的总账科目（账户行科目，如 1002）
+    pub account_code: String,
+    pub summary: Option<String>,
+    /// 对方单位（来源单据为资金单且挂往来单位时回显）
+    pub partner_name: Option<String>,
+    /// 借方发生 = 收入
+    pub income_amount: f64,
+    /// 贷方发生 = 支出
+    pub expense_amount: f64,
+    /// 滚动余额（期初起按 日期+凭证号+分录顺序 累计 借−贷）
+    pub balance: f64,
+    /// 该分录已被核销的金额（仅 active allocation；旧式匹配不指向分录）
+    pub allocated_amount: f64,
+    /// unallocated / partial / allocated
+    pub reconcile_status: String,
+}
+
+/// 资金日记账（现金/银行/第三方）：期初滚入 + 区间明细 + 合计
+#[derive(Debug, Clone, Serialize)]
+pub struct FundJournal {
+    pub fund_account_id: i64,
+    pub fund_account_name: String,
+    /// bank / cash / third_party（决定导出标题：银行存款/库存现金日记账）
+    pub account_type: String,
+    pub from_month: Option<String>,
+    pub to_month: Option<String>,
+    /// 期初余额（账户期初 + 区间前月份净发生滚入）
+    pub opening_balance: f64,
+    pub closing_balance: f64,
+    pub total_income: f64,
+    pub total_expense: f64,
+    pub rows: Vec<FundJournalRow>,
+}
+
+// ==================== 第七阶段 Task 13：银行余额调节表（spec 4.10） ====================
+
+/// 未达项：银行已收付、账面未对应的流水（未核销部分）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BankReconciliationOutstandingTx {
+    pub transaction_id: i64,
+    pub transaction_date: String,
+    pub summary: Option<String>,
+    pub counterparty_name: Option<String>,
+    /// income / expense
+    pub direction: String,
+    pub remaining_amount: f64,
+}
+
+/// 未达项：账面已记账、银行未对应的资金分录（未核销部分）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BankReconciliationOutstandingLine {
+    pub voucher_line_id: i64,
+    pub voucher_no: String,
+    pub voucher_date: String,
+    pub belong_month: String,
+    pub account_code: String,
+    pub summary: Option<String>,
+    /// debit（企业已收银行未收）/ credit（企业已付银行未付）
+    pub direction: String,
+    pub remaining_amount: f64,
+}
+
+/// 未达项明细（快照存 period.detail_json，前端展示与 Excel 导出共用）
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BankReconciliationDetail {
+    pub unallocated_transactions: Vec<BankReconciliationOutstandingTx>,
+    pub unallocated_lines: Vec<BankReconciliationOutstandingLine>,
+}
+
+/// 银行余额调节表快照（bank_reconciliation_periods 行 + 联表回显）。
+///
+/// 调节口径（本任务定义，两栏调节）：
+/// - 账面侧调节后 = 账面期末 + Σ未核销流水净额（银行已收未记加 / 银行已付未记减）
+/// - 银行侧调节后 = 对账单期末 + Σ未核销分录净额（企业已收银行未收加 / 已付未付减）
+/// - 两侧调节后差额应 < 0.005；不为零时差额可由未达项清单解释
+#[derive(Debug, Clone, Serialize)]
+pub struct BankReconciliationPeriod {
+    pub id: i64,
+    pub fund_account_id: i64,
+    pub fund_account_name: Option<String>,
+    pub belong_month: String,
+    /// 对账单期初余额（流水余额列推算 / 上期确认结转 / 人工录入）
+    pub statement_opening_balance: f64,
+    pub statement_closing_balance: f64,
+    /// derived（流水推算）/ manual（人工覆盖）/ carried（无流水结转上期）/ empty（无任何来源）
+    pub statement_source: String,
+    /// 账面期末余额（账户期初 + ≤当月 active 资金分录净额，与日记账口径一致）
+    pub book_closing_balance: f64,
+    /// 账面侧调节额 = Σ未核销流水净额（收入余 − 支出余）
+    pub outstanding_tx_amount: f64,
+    /// 银行侧调节额 = Σ未核销分录净额（借方余 − 贷方余，含当月及以前月份）
+    pub outstanding_line_amount: f64,
+    pub adjusted_book_balance: f64,
+    pub adjusted_bank_balance: f64,
+    /// 银行侧调节后 − 账面侧调节后；|差额| < 0.005 才允许确认
+    pub difference: f64,
+    /// draft / confirmed
+    pub status: String,
+    /// 未达项明细快照（BankReconciliationDetail JSON）
+    pub detail_json: Option<String>,
+    pub confirmed_by: Option<String>,
+    pub confirmed_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 // ==================== 第七阶段 Task 11：银行流水导入预览（spec 4.8） ====================

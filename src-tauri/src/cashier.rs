@@ -3148,7 +3148,8 @@ fn get_bank_tx_core(conn: &Connection, id: i64) -> AppResult<BankTxCore> {
 /// 流水侧已核销额 = active allocation 合计 + 未迁移的 active 旧式批次匹配合计
 /// （旧匹配金额=批次额，confirm_bank_transaction_match 校验与流水支出相等）。
 /// 已迁移的旧匹配由其 allocation 接管计量，不再重复计入，保证迁移过渡期金额守恒。
-fn bank_tx_allocated(conn: &Connection, transaction_id: i64) -> AppResult<f64> {
+/// `pub(crate)` 供 db.rs 月结部分核销检查与旧 confirm 退役拦截复用（Task 13）。
+pub(crate) fn bank_tx_allocated(conn: &Connection, transaction_id: i64) -> AppResult<f64> {
     let allocations: f64 = conn.query_row(
         "SELECT COALESCE(SUM(allocated_amount),0) FROM bank_reconciliation_allocations
          WHERE transaction_id = ?1 AND status = 'active'",
@@ -3789,6 +3790,579 @@ pub fn batch_confirm_bank_auto_matches(
     let mut result = confirm_bank_allocations(conn, &inputs, "auto", operator)?;
     result.skipped += preview_skipped as i32;
     Ok(result)
+}
+
+// ==================== 资金日记账（Task 13，spec 6.1） ====================
+
+/// 月份入参规整：去空白，空串视为 None
+fn clean_month_param(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(str::to_string)
+}
+
+/// 资金日记账（spec 6.1）：按账户查询带资金辅助核算的 active 凭证分录，
+/// 输出日期、凭证号、来源单号、摘要、对方单位、收入、支出、滚动余额、对账状态。
+/// 余额从账户期初开始（from_month 之前月份净发生滚入期初），按 日期+凭证号+凭证 id+分录顺序
+/// 稳定排序累计 借−贷（收入−支出）。
+pub fn get_fund_journal(conn: &Connection, query: &FundJournalQuery) -> AppResult<FundJournal> {
+    let account = get_fund_account(conn, query.fund_account_id)?;
+    let from = clean_month_param(query.from_month.as_deref());
+    let to = clean_month_param(query.to_month.as_deref());
+
+    // 期初滚入：账户期初 + from 之前月份净发生（跨月衔接，spec 6.1「从账户期初开始」）
+    let mut opening_balance = account.opening_balance;
+    if let Some(fm) = &from {
+        let carry: f64 = conn.query_row(
+            "SELECT COALESCE(SUM(vl.debit_amount - vl.credit_amount),0)
+             FROM voucher_lines vl
+             JOIN vouchers v ON v.id = vl.voucher_id
+             WHERE v.status = 'active' AND vl.fund_account_id = ?1 AND v.belong_month < ?2",
+            params![account.id, fm],
+            |r| r.get(0),
+        )?;
+        opening_balance += carry;
+    }
+
+    let mut where_clauses = vec![
+        "v.status = 'active'".to_string(),
+        "vl.fund_account_id = ?1".to_string(),
+    ];
+    let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(account.id)];
+    let mut idx = 2usize;
+    if let Some(fm) = &from {
+        where_clauses.push(format!("v.belong_month >= ?{idx}"));
+        params_vec.push(Box::new(fm.clone()));
+        idx += 1;
+    }
+    if let Some(tm) = &to {
+        where_clauses.push(format!("v.belong_month <= ?{idx}"));
+        params_vec.push(Box::new(tm.clone()));
+    }
+
+    // 分录侧已核销额仅统计 active allocation（旧式匹配不指向分录，不参与分录侧计量）；
+    // 对方单位在来源单据为资金单且挂往来单位时回显（spec 6.1「对方单位」）
+    let sql = format!(
+        "SELECT vl.id, v.id, v.voucher_date, v.belong_month, v.voucher_no, v.source_type,
+                v.source_id, vl.account_code, vl.summary, vl.debit_amount, vl.credit_amount,
+                COALESCE(al.s, 0), bp.name
+         FROM voucher_lines vl
+         JOIN vouchers v ON v.id = vl.voucher_id
+         LEFT JOIN (SELECT voucher_line_id, SUM(allocated_amount) AS s
+                    FROM bank_reconciliation_allocations WHERE status = 'active'
+                    GROUP BY voucher_line_id) al ON al.voucher_line_id = vl.id
+         LEFT JOIN fund_documents fd ON v.source_type = 'fund_document' AND fd.id = v.source_id
+         LEFT JOIN business_partners bp ON bp.id = fd.partner_id
+         WHERE {}
+         ORDER BY v.voucher_date, v.voucher_no, v.id, vl.line_order",
+        where_clauses.join(" AND ")
+    );
+    let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let mapped = stmt.query_map(params_refs.as_slice(), |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, String>(4)?,
+            r.get::<_, String>(5)?,
+            r.get::<_, i64>(6)?,
+            r.get::<_, String>(7)?,
+            r.get::<_, Option<String>>(8)?,
+            r.get::<_, f64>(9)?,
+            r.get::<_, f64>(10)?,
+            r.get::<_, f64>(11)?,
+            r.get::<_, Option<String>>(12)?,
+        ))
+    })?;
+
+    let mut balance = opening_balance;
+    let mut rows = Vec::new();
+    let mut total_income = 0.0;
+    let mut total_expense = 0.0;
+    for item in mapped {
+        let (
+            line_id,
+            voucher_id,
+            voucher_date,
+            belong_month,
+            voucher_no,
+            source_type,
+            source_id,
+            account_code,
+            summary,
+            debit,
+            credit,
+            allocated,
+            partner_name,
+        ) = item?;
+        balance += debit - credit;
+        total_income += debit;
+        total_expense += credit;
+        // 对账状态：方向侧金额对比已核销额（unallocated / partial / allocated）
+        let side = if debit > AMOUNT_TOLERANCE {
+            debit
+        } else {
+            credit
+        };
+        let remaining = side - allocated;
+        let reconcile_status = if allocated <= AMOUNT_TOLERANCE {
+            "unallocated"
+        } else if remaining <= AMOUNT_TOLERANCE {
+            "allocated"
+        } else {
+            "partial"
+        };
+        rows.push(FundJournalRow {
+            voucher_line_id: line_id,
+            voucher_id,
+            voucher_date,
+            belong_month,
+            voucher_no,
+            source_type,
+            source_id,
+            account_code,
+            summary,
+            partner_name,
+            income_amount: debit,
+            expense_amount: credit,
+            balance,
+            allocated_amount: allocated,
+            reconcile_status: reconcile_status.to_string(),
+        });
+    }
+
+    Ok(FundJournal {
+        fund_account_id: account.id,
+        fund_account_name: account.name,
+        account_type: account.account_type,
+        from_month: from,
+        to_month: to,
+        opening_balance,
+        closing_balance: balance,
+        total_income,
+        total_expense,
+        rows,
+    })
+}
+
+// ==================== 银行余额调节表（Task 13，spec 4.10） ====================
+
+/// 对账单余额解析优先级：人工录入 > 当月流水余额列推算 > 上期确认结转 > 0（无任何来源）
+fn resolve_statement_balance(
+    manual: Option<f64>,
+    derived: Option<f64>,
+    carried: Option<f64>,
+) -> (f64, &'static str) {
+    if let Some(v) = manual {
+        return (v, "manual");
+    }
+    if let Some(v) = derived {
+        return (v, "derived");
+    }
+    if let Some(v) = carried {
+        return (v, "carried");
+    }
+    (0.0, "empty")
+}
+
+/// 生成（或重新生成）账户某月的余额调节表快照：账面期末、对账单期初/期末、
+/// 未达项（未核销流水/分录）、调节后两侧余额与差额。重新生成覆盖旧快照并回到 draft。
+///
+/// 对账单余额来源：入参覆盖（导入流水无余额列或期初衔接修正时由前端传入）优先；
+/// 否则按 (交易日期, id) 排序用流水 `balance` 列推算（期初=首行余额−首行收入+首行支出，
+/// 期末=末行余额）；当月无流水时结转上一确认期期末；再无则 0。
+pub fn generate_bank_reconciliation_period(
+    conn: &Connection,
+    fund_account_id: i64,
+    month: &str,
+    statement_opening: Option<f64>,
+    statement_closing: Option<f64>,
+) -> AppResult<BankReconciliationPeriod> {
+    let month = month.trim();
+    if month.len() != 7 || month.as_bytes().get(4) != Some(&b'-') {
+        return Err(AppError::InvalidParam("月份格式应为 YYYY-MM".into()));
+    }
+    let account = get_fund_account(conn, fund_account_id)?;
+
+    // 账面期末：账户期初 + ≤当月 active 资金分录净额（与日记账口径一致，可复算）
+    let book_net: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(vl.debit_amount - vl.credit_amount),0)
+         FROM voucher_lines vl
+         JOIN vouchers v ON v.id = vl.voucher_id
+         WHERE v.status = 'active' AND vl.fund_account_id = ?1 AND v.belong_month <= ?2",
+        params![account.id, month],
+        |r| r.get(0),
+    )?;
+    let book_closing_balance = account.opening_balance + book_net;
+
+    // 对账单期初/期末：全部流水（含 ignored，余额列反映真实银行余额）按日期排序推算
+    let tx_balances: Vec<(f64, f64, Option<f64>)> = conn
+        .prepare(
+            "SELECT income_amount, expense_amount, balance FROM bank_transactions
+             WHERE fund_account_id = ?1 AND belong_month = ?2
+             ORDER BY transaction_date, id",
+        )?
+        .query_map(params![account.id, month], |r| {
+            Ok((
+                r.get::<_, f64>(0)?,
+                r.get::<_, f64>(1)?,
+                r.get::<_, Option<f64>>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let (derived_opening, derived_closing) = match tx_balances.first().zip(tx_balances.last()) {
+        Some((first, last)) => (first.2.map(|b| b - first.0 + first.1), last.2),
+        None => (None, None),
+    };
+    let carried: Option<f64> = conn
+        .query_row(
+            "SELECT statement_closing_balance FROM bank_reconciliation_periods
+             WHERE fund_account_id = ?1 AND belong_month < ?2 AND status = 'confirmed'
+             ORDER BY belong_month DESC LIMIT 1",
+            params![account.id, month],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    let (statement_opening_balance, opening_src) =
+        resolve_statement_balance(statement_opening, derived_opening, carried);
+    let (statement_closing_balance, closing_src) =
+        resolve_statement_balance(statement_closing, derived_closing, carried);
+    let statement_source = if statement_opening.is_some() || statement_closing.is_some() {
+        "manual"
+    } else if opening_src == "derived" || closing_src == "derived" {
+        "derived"
+    } else if opening_src == "carried" || closing_src == "carried" {
+        "carried"
+    } else {
+        "empty"
+    };
+
+    // 未达项一：银行已收付、账面未对应的流水（当月本账户未核销部分；已忽略流水不参与）
+    let mut detail = BankReconciliationDetail::default();
+    let mut outstanding_tx_amount = 0.0;
+    let tx_sides: Vec<(i64, String, Option<String>, Option<String>, f64, f64)> = conn
+        .prepare(
+            "SELECT id, transaction_date, summary, counterparty_name, income_amount, expense_amount
+             FROM bank_transactions
+             WHERE fund_account_id = ?1 AND belong_month = ?2 AND status != 'ignored'
+             ORDER BY transaction_date, id",
+        )?
+        .query_map(params![account.id, month], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, f64>(4)?,
+                r.get::<_, f64>(5)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    for (id, date, summary, counterparty, income, expense) in tx_sides {
+        let income_on = income > AMOUNT_TOLERANCE;
+        let expense_on = expense > AMOUNT_TOLERANCE;
+        if !income_on && !expense_on {
+            continue;
+        }
+        let (direction, side_amount) = bank_tx_direction(income, expense)?;
+        let remaining = (side_amount - bank_tx_allocated(conn, id)?).max(0.0);
+        if remaining <= AMOUNT_TOLERANCE {
+            continue;
+        }
+        outstanding_tx_amount += if direction == "income" {
+            remaining
+        } else {
+            -remaining
+        };
+        detail
+            .unallocated_transactions
+            .push(BankReconciliationOutstandingTx {
+                transaction_id: id,
+                transaction_date: date,
+                summary,
+                counterparty_name: counterparty,
+                direction: direction.to_string(),
+                remaining_amount: remaining,
+            });
+    }
+
+    // 未达项二：账面已记账、银行未对应的资金分录（≤当月全部未核销部分，跨月未达同样列出）
+    let lines: Vec<(i64, String, String, String, String, Option<String>, f64, f64, f64)> = conn
+        .prepare(
+            "SELECT vl.id, v.voucher_no, v.voucher_date, v.belong_month, vl.account_code,
+                    vl.summary, vl.debit_amount, vl.credit_amount,
+                    (SELECT COALESCE(SUM(a.allocated_amount),0) FROM bank_reconciliation_allocations a
+                     WHERE a.voucher_line_id = vl.id AND a.status = 'active')
+             FROM voucher_lines vl
+             JOIN vouchers v ON v.id = vl.voucher_id
+             WHERE v.status = 'active' AND vl.fund_account_id = ?1 AND v.belong_month <= ?2
+             ORDER BY v.voucher_date, v.voucher_no, v.id, vl.line_order",
+        )?
+        .query_map(params![account.id, month], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, Option<String>>(5)?,
+                r.get::<_, f64>(6)?,
+                r.get::<_, f64>(7)?,
+                r.get::<_, f64>(8)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut outstanding_line_amount = 0.0;
+    for (
+        line_id,
+        voucher_no,
+        voucher_date,
+        belong_month,
+        account_code,
+        summary,
+        debit,
+        credit,
+        allocated,
+    ) in lines
+    {
+        let debit_on = debit > AMOUNT_TOLERANCE;
+        let credit_on = credit > AMOUNT_TOLERANCE;
+        if !debit_on && !credit_on {
+            continue;
+        }
+        let (side, direction) = if debit_on {
+            (debit, "debit")
+        } else {
+            (credit, "credit")
+        };
+        let remaining = (side - allocated).max(0.0);
+        if remaining <= AMOUNT_TOLERANCE {
+            continue;
+        }
+        outstanding_line_amount += if direction == "debit" {
+            remaining
+        } else {
+            -remaining
+        };
+        detail
+            .unallocated_lines
+            .push(BankReconciliationOutstandingLine {
+                voucher_line_id: line_id,
+                voucher_no,
+                voucher_date,
+                belong_month,
+                account_code,
+                summary,
+                direction: direction.to_string(),
+                remaining_amount: remaining,
+            });
+    }
+
+    let adjusted_book_balance = book_closing_balance + outstanding_tx_amount;
+    let adjusted_bank_balance = statement_closing_balance + outstanding_line_amount;
+    let difference = adjusted_bank_balance - adjusted_book_balance;
+    let detail_json = serde_json::to_string(&detail)?;
+
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO bank_reconciliation_periods
+            (fund_account_id, belong_month, statement_opening_balance, statement_closing_balance,
+             statement_source, book_closing_balance, outstanding_tx_amount, outstanding_line_amount,
+             adjusted_book_balance, adjusted_bank_balance, difference, status, detail_json,
+             created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'draft', ?12, ?13, ?13)
+         ON CONFLICT(fund_account_id, belong_month) DO UPDATE SET
+            statement_opening_balance = excluded.statement_opening_balance,
+            statement_closing_balance = excluded.statement_closing_balance,
+            statement_source = excluded.statement_source,
+            book_closing_balance = excluded.book_closing_balance,
+            outstanding_tx_amount = excluded.outstanding_tx_amount,
+            outstanding_line_amount = excluded.outstanding_line_amount,
+            adjusted_book_balance = excluded.adjusted_book_balance,
+            adjusted_bank_balance = excluded.adjusted_bank_balance,
+            difference = excluded.difference,
+            status = 'draft',
+            detail_json = excluded.detail_json,
+            confirmed_by = NULL,
+            confirmed_at = NULL,
+            updated_at = excluded.updated_at",
+        params![
+            account.id,
+            month,
+            statement_opening_balance,
+            statement_closing_balance,
+            statement_source,
+            book_closing_balance,
+            outstanding_tx_amount,
+            outstanding_line_amount,
+            adjusted_book_balance,
+            adjusted_bank_balance,
+            difference,
+            detail_json,
+            now
+        ],
+    )?;
+    // upsert 走 DO UPDATE 分支时 last_insert_rowid 不可靠（保留的是连接上一次成功 INSERT 的
+    // rowid，可能是其他表的），按唯一键回查
+    let period_id: i64 = conn.query_row(
+        "SELECT id FROM bank_reconciliation_periods
+         WHERE fund_account_id = ?1 AND belong_month = ?2",
+        params![account.id, month],
+        |r| r.get(0),
+    )?;
+    get_bank_reconciliation_period(conn, period_id)
+}
+
+/// 读取单个调节表快照（含账户名回显）
+pub fn get_bank_reconciliation_period(
+    conn: &Connection,
+    id: i64,
+) -> AppResult<BankReconciliationPeriod> {
+    conn.query_row(
+        "SELECT p.id, p.fund_account_id, fa.name, p.belong_month, p.statement_opening_balance,
+                p.statement_closing_balance, p.statement_source, p.book_closing_balance,
+                p.outstanding_tx_amount, p.outstanding_line_amount, p.adjusted_book_balance,
+                p.adjusted_bank_balance, p.difference, p.status, p.detail_json,
+                p.confirmed_by, p.confirmed_at, p.created_at, p.updated_at
+         FROM bank_reconciliation_periods p
+         JOIN fund_accounts fa ON fa.id = p.fund_account_id
+         WHERE p.id = ?1",
+        params![id],
+        row_to_reconciliation_period,
+    )
+    .optional()?
+    .ok_or_else(|| AppError::NotFound(format!("余额调节表 ID={id} 不存在")))
+}
+
+fn row_to_reconciliation_period(
+    r: &rusqlite::Row<'_>,
+) -> rusqlite::Result<BankReconciliationPeriod> {
+    Ok(BankReconciliationPeriod {
+        id: r.get(0)?,
+        fund_account_id: r.get(1)?,
+        fund_account_name: r.get(2)?,
+        belong_month: r.get(3)?,
+        statement_opening_balance: r.get(4)?,
+        statement_closing_balance: r.get(5)?,
+        statement_source: r.get(6)?,
+        book_closing_balance: r.get(7)?,
+        outstanding_tx_amount: r.get(8)?,
+        outstanding_line_amount: r.get(9)?,
+        adjusted_book_balance: r.get(10)?,
+        adjusted_bank_balance: r.get(11)?,
+        difference: r.get(12)?,
+        status: r.get(13)?,
+        detail_json: r.get(14)?,
+        confirmed_by: r.get(15)?,
+        confirmed_at: r.get(16)?,
+        created_at: r.get(17)?,
+        updated_at: r.get(18)?,
+    })
+}
+
+/// 调节表快照列表（按账户/月份过滤，月份降序）
+pub fn list_bank_reconciliation_periods(
+    conn: &Connection,
+    fund_account_id: Option<i64>,
+    month: Option<&str>,
+) -> AppResult<Vec<BankReconciliationPeriod>> {
+    let mut where_clauses = vec!["1=1".to_string()];
+    let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    let mut idx = 1usize;
+    if let Some(account_id) = fund_account_id {
+        where_clauses.push(format!("p.fund_account_id = ?{idx}"));
+        params_vec.push(Box::new(account_id));
+        idx += 1;
+    }
+    if let Some(m) = clean_month_param(month) {
+        where_clauses.push(format!("p.belong_month = ?{idx}"));
+        params_vec.push(Box::new(m));
+    }
+    let sql = format!(
+        "SELECT p.id, p.fund_account_id, fa.name, p.belong_month, p.statement_opening_balance,
+                p.statement_closing_balance, p.statement_source, p.book_closing_balance,
+                p.outstanding_tx_amount, p.outstanding_line_amount, p.adjusted_book_balance,
+                p.adjusted_bank_balance, p.difference, p.status, p.detail_json,
+                p.confirmed_by, p.confirmed_at, p.created_at, p.updated_at
+         FROM bank_reconciliation_periods p
+         JOIN fund_accounts fa ON fa.id = p.fund_account_id
+         WHERE {}
+         ORDER BY p.belong_month DESC, p.fund_account_id",
+        where_clauses.join(" AND ")
+    );
+    let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(params_refs.as_slice(), row_to_reconciliation_period)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// 确认余额调节表（spec 4.10 确认条件，全部通过才落 confirmed）：
+/// 1) 调节后两侧差额 < 0.005；2) 对账单期初与上一确认期期末衔接；3) 当月无待归集流水。
+/// 已确认期间重复确认幂等返回原快照，不重复写确认信息。
+pub fn confirm_bank_reconciliation_period(
+    conn: &Connection,
+    id: i64,
+    operator: &str,
+) -> AppResult<BankReconciliationPeriod> {
+    let period = get_bank_reconciliation_period(conn, id)?;
+    if period.status == "confirmed" {
+        return Ok(period);
+    }
+
+    // 门槛 1：调节后差额
+    if period.difference.abs() > AMOUNT_TOLERANCE {
+        return Err(AppError::InvalidParam(format!(
+            "调节后差额 {:.2} 超过容差 0.005，请先处理未达项或修正对账单余额（详见未达项清单）",
+            period.difference
+        )));
+    }
+
+    // 门槛 2：期初衔接（与上一确认期对账单期末比对；无上一确认期视为首期跳过）
+    let prev: Option<(String, f64)> = conn
+        .query_row(
+            "SELECT belong_month, statement_closing_balance FROM bank_reconciliation_periods
+             WHERE fund_account_id = ?1 AND belong_month < ?2 AND status = 'confirmed'
+             ORDER BY belong_month DESC LIMIT 1",
+            params![period.fund_account_id, period.belong_month],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?)),
+        )
+        .optional()?;
+    if let Some((prev_month, prev_closing)) = prev {
+        if (prev_closing - period.statement_opening_balance).abs() > AMOUNT_TOLERANCE {
+            return Err(AppError::InvalidParam(format!(
+                "对账单期初不衔接：{prev_month} 确认期末 {prev_closing:.2}，本期期初 {:.2}",
+                period.statement_opening_balance
+            )));
+        }
+    }
+
+    // 门槛 3：当月无待归集流水（未归集账户的流水无法与账面勾稽，spec 4.10）
+    let unassigned: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM bank_transactions
+         WHERE belong_month = ?1 AND status != 'ignored' AND fund_account_id IS NULL",
+        params![period.belong_month],
+        |r| r.get(0),
+    )?;
+    if unassigned > 0 {
+        return Err(AppError::InvalidParam(format!(
+            "当月存在 {unassigned} 条待归集银行流水，请先完成历史归集再确认调节表"
+        )));
+    }
+
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE bank_reconciliation_periods
+         SET status = 'confirmed', confirmed_by = ?1, confirmed_at = ?2, updated_at = ?2
+         WHERE id = ?3 AND status = 'draft'",
+        params![operator, now, id],
+    )?;
+    get_bank_reconciliation_period(conn, id)
 }
 
 // ==================== 测试 ====================
@@ -7582,5 +8156,702 @@ mod tests {
         )
         .unwrap()
         .id
+    }
+
+    // ==================== 资金日记账（Task 13，spec 6.1） ====================
+
+    /// 跨月滚入与稳定排序：期初=账户期初+区间前月份合计；同日按凭证号排序；void 凭证排除
+    #[test]
+    fn test_fund_journal_rolling_balance_cross_month() {
+        let (conn, acc) = alloc_env();
+        // 7 月：收入 400
+        insert_fund_line(
+            &conn,
+            "JZ-07-001",
+            "2026-07-10",
+            "2026-07",
+            "fund_document",
+            1,
+            acc,
+            400.0,
+            0.0,
+            "7月收款",
+            "active",
+        );
+        // 8 月：同日两笔，凭证号决定顺序；再加一笔 void 凭证应被排除
+        insert_fund_line(
+            &conn,
+            "JZ-08-002",
+            "2026-08-05",
+            "2026-08",
+            "bank_manual",
+            2,
+            acc,
+            600.0,
+            0.0,
+            "8月收款",
+            "active",
+        );
+        insert_fund_line(
+            &conn,
+            "JZ-08-001",
+            "2026-08-05",
+            "2026-08",
+            "bank_manual",
+            3,
+            acc,
+            0.0,
+            250.0,
+            "8月付款",
+            "active",
+        );
+        insert_fund_line(
+            &conn,
+            "JZ-08-003",
+            "2026-08-06",
+            "2026-08",
+            "bank_manual",
+            4,
+            acc,
+            999.0,
+            0.0,
+            "作废凭证",
+            "void",
+        );
+
+        // 8 月区间：期初滚入 7 月（1000 + 400 = 1400）
+        let journal = get_fund_journal(
+            &conn,
+            &FundJournalQuery {
+                fund_account_id: acc,
+                from_month: Some("2026-08".into()),
+                to_month: Some("2026-08".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(journal.rows.len(), 2, "void 凭证不入日记账");
+        assert!(
+            (journal.opening_balance - 1400.0).abs() < 0.005,
+            "期初应滚入 7 月：{journal:?}"
+        );
+        assert_eq!(
+            journal.rows[0].voucher_no, "JZ-08-001",
+            "同日按凭证号稳定排序"
+        );
+        assert!((journal.rows[0].balance - 1150.0).abs() < 0.005);
+        assert_eq!(journal.rows[1].voucher_no, "JZ-08-002");
+        assert!((journal.rows[1].balance - 1750.0).abs() < 0.005);
+        assert!((journal.closing_balance - 1750.0).abs() < 0.005);
+        assert!((journal.total_income - 600.0).abs() < 0.005);
+        assert!((journal.total_expense - 250.0).abs() < 0.005);
+        assert_eq!(journal.rows[0].reconcile_status, "unallocated");
+
+        // 全区间：期初即账户期初
+        let all = get_fund_journal(
+            &conn,
+            &FundJournalQuery {
+                fund_account_id: acc,
+                from_month: None,
+                to_month: Some("2026-08".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(all.rows.len(), 3);
+        assert!((all.opening_balance - 1000.0).abs() < 0.005);
+        assert!((all.closing_balance - 1750.0).abs() < 0.005);
+
+        // 部分核销状态：对 8 月收入行核销 300（借方 600 剩 300）
+        let income_line_id: i64 = all
+            .rows
+            .iter()
+            .find(|r| r.voucher_no == "JZ-08-002")
+            .unwrap()
+            .voucher_line_id;
+        let tx = insert_tx(
+            &conn,
+            "2026-08-05",
+            "2026-08",
+            "收款300",
+            "客户甲",
+            "62220099",
+            300.0,
+            0.0,
+            Some(acc),
+            "unmatched",
+        );
+        confirm_bank_allocations(
+            &conn,
+            &[BankAllocationInput {
+                transaction_id: tx,
+                voucher_line_id: income_line_id,
+                allocated_amount: 300.0,
+                score: None,
+                remark: None,
+            }],
+            "manual",
+            "出纳",
+        )
+        .unwrap();
+        let after = get_fund_journal(
+            &conn,
+            &FundJournalQuery {
+                fund_account_id: acc,
+                from_month: Some("2026-08".into()),
+                to_month: Some("2026-08".into()),
+            },
+        )
+        .unwrap();
+        let row = after
+            .rows
+            .iter()
+            .find(|r| r.voucher_line_id == income_line_id)
+            .unwrap();
+        assert_eq!(row.reconcile_status, "partial", "部分核销应标记 partial");
+        assert!((row.allocated_amount - 300.0).abs() < 0.005);
+    }
+
+    // ==================== 银行余额调节表（Task 13，spec 4.10） ====================
+
+    /// 生成→确认→次月期初衔接：调节后两方勾稽、差额 0、确认链可用
+    #[test]
+    fn test_bank_reconciliation_period_generate_confirm_chain() {
+        let (conn, acc) = alloc_env();
+        // 7 月：收款 400 全额核销（账面 1400 = 对账单 1400）
+        let line7 = insert_fund_line(
+            &conn,
+            "JZ-07-001",
+            "2026-07-10",
+            "2026-07",
+            "bank_manual",
+            1,
+            acc,
+            400.0,
+            0.0,
+            "7月收款",
+            "active",
+        );
+        let tx7 = insert_tx(
+            &conn,
+            "2026-07-10",
+            "2026-07",
+            "收款400",
+            "客户甲",
+            "62220001",
+            400.0,
+            0.0,
+            Some(acc),
+            "unmatched",
+        );
+        insert_tx_balance(&conn, tx7, 1400.0);
+        confirm_bank_allocations(&conn, &[alloc_input(tx7, line7, 400.0)], "manual", "出纳")
+            .unwrap();
+
+        let july = generate_bank_reconciliation_period(&conn, acc, "2026-07", None, None).unwrap();
+        assert!(
+            (july.book_closing_balance - 1400.0).abs() < 0.005,
+            "{july:?}"
+        );
+        assert!((july.statement_opening_balance - 1000.0).abs() < 0.005);
+        assert!((july.statement_closing_balance - 1400.0).abs() < 0.005);
+        assert_eq!(july.statement_source, "derived");
+        assert!((july.difference).abs() < 0.005, "无未达项时调节后应相等");
+        assert_eq!(july.status, "draft");
+        let july = confirm_bank_reconciliation_period(&conn, july.id, "出纳").unwrap();
+        assert_eq!(july.status, "confirmed");
+        assert_eq!(july.confirmed_by.as_deref(), Some("出纳"));
+
+        // 8 月：收款 300 全额核销 + 支出 500 未核销（银行已付账面未对上）
+        let line8 = insert_fund_line(
+            &conn,
+            "JZ-08-001",
+            "2026-08-05",
+            "2026-08",
+            "bank_manual",
+            2,
+            acc,
+            300.0,
+            0.0,
+            "8月收款",
+            "active",
+        );
+        let tx8a = insert_tx(
+            &conn,
+            "2026-08-05",
+            "2026-08",
+            "收款300",
+            "客户甲",
+            "62220001",
+            300.0,
+            0.0,
+            Some(acc),
+            "unmatched",
+        );
+        insert_tx_balance(&conn, tx8a, 1700.0);
+        confirm_bank_allocations(&conn, &[alloc_input(tx8a, line8, 300.0)], "manual", "出纳")
+            .unwrap();
+        let tx8b = insert_tx(
+            &conn,
+            "2026-08-20",
+            "2026-08",
+            "银行已付未入账",
+            "供应商乙",
+            "62220002",
+            0.0,
+            500.0,
+            Some(acc),
+            "unmatched",
+        );
+        insert_tx_balance(&conn, tx8b, 1200.0);
+
+        let aug = generate_bank_reconciliation_period(&conn, acc, "2026-08", None, None).unwrap();
+        assert!(
+            (aug.statement_opening_balance - 1400.0).abs() < 0.005,
+            "期初取首行流水推算"
+        );
+        assert!(
+            (aug.statement_closing_balance - 1200.0).abs() < 0.005,
+            "期末取末行流水余额"
+        );
+        assert!((aug.book_closing_balance - 1700.0).abs() < 0.005);
+        assert!(
+            (aug.outstanding_tx_amount + 500.0).abs() < 0.005,
+            "未核销流水净额 -500"
+        );
+        assert!((aug.outstanding_line_amount).abs() < 0.005);
+        assert!((aug.adjusted_book_balance - 1200.0).abs() < 0.005);
+        assert!((aug.adjusted_bank_balance - 1200.0).abs() < 0.005);
+        assert!(aug.difference.abs() < 0.005);
+        // 未达项明细包含未核销流水
+        let detail = aug.detail_json.clone().unwrap_or_default();
+        assert!(
+            detail.contains("银行已付未入账"),
+            "未达项明细应含未核销流水：{detail}"
+        );
+        let confirmed_aug = confirm_bank_reconciliation_period(&conn, aug.id, "出纳").unwrap();
+        assert_eq!(confirmed_aug.status, "confirmed");
+
+        // 确认幂等：已确认期间重复确认返回原快照，不重复写确认信息
+        let again = confirm_bank_reconciliation_period(&conn, aug.id, "出纳").unwrap();
+        assert_eq!(again.id, aug.id);
+        assert_eq!(again.status, "confirmed");
+        assert_eq!(again.confirmed_at, confirmed_aug.confirmed_at);
+
+        // 查询：按账户两期
+        let periods = list_bank_reconciliation_periods(&conn, Some(acc), None).unwrap();
+        assert_eq!(periods.len(), 2);
+        let by_month =
+            list_bank_reconciliation_periods(&conn, Some(acc), Some("2026-08".into())).unwrap();
+        assert_eq!(by_month.len(), 1);
+        assert_eq!(by_month[0].status, "confirmed");
+    }
+
+    /// 确认门槛：调节差额 > 0.005、期初不衔接、存在待归集流水均阻断确认（spec 4.10）
+    #[test]
+    fn test_bank_reconciliation_confirm_gates() {
+        let (conn, acc) = alloc_env();
+        let line7 = insert_fund_line(
+            &conn,
+            "JZ-07-001",
+            "2026-07-10",
+            "2026-07",
+            "bank_manual",
+            1,
+            acc,
+            400.0,
+            0.0,
+            "7月收款",
+            "active",
+        );
+        let tx7 = insert_tx(
+            &conn,
+            "2026-07-10",
+            "2026-07",
+            "收款400",
+            "客户甲",
+            "62220001",
+            400.0,
+            0.0,
+            Some(acc),
+            "unmatched",
+        );
+        insert_tx_balance(&conn, tx7, 1400.0);
+        confirm_bank_allocations(&conn, &[alloc_input(tx7, line7, 400.0)], "manual", "出纳")
+            .unwrap();
+        confirm_bank_reconciliation_period(
+            &conn,
+            generate_bank_reconciliation_period(&conn, acc, "2026-07", None, None)
+                .unwrap()
+                .id,
+            "出纳",
+        )
+        .unwrap();
+
+        // 8 月：支出 500 未核销 + 账面在途收入 100（有分录无流水）
+        let tx8 = insert_tx(
+            &conn,
+            "2026-08-20",
+            "2026-08",
+            "银行已付未入账",
+            "供应商乙",
+            "62220002",
+            0.0,
+            500.0,
+            Some(acc),
+            "unmatched",
+        );
+        insert_tx_balance(&conn, tx8, 900.0);
+        insert_fund_line(
+            &conn,
+            "JZ-08-901",
+            "2026-08-21",
+            "2026-08",
+            "bank_manual",
+            9,
+            acc,
+            100.0,
+            0.0,
+            "在途收款",
+            "active",
+        );
+
+        // 门槛 1：手工改对账单期末制造差额 → 拒绝确认
+        let drifted =
+            generate_bank_reconciliation_period(&conn, acc, "2026-08", None, Some(800.0)).unwrap();
+        assert_eq!(drifted.statement_source, "manual");
+        assert!(
+            drifted.difference.abs() > 0.005,
+            "差额应反映对账单改动：{drifted:?}"
+        );
+        let err = confirm_bank_reconciliation_period(&conn, drifted.id, "出纳")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("差额"), "差额超容差应拦截：{err}");
+
+        // 门槛 2：对账单期初与上月确认期末不衔接 → 拒绝确认
+        //   （期末取流水余额 900 → 期初 = 900+500 = 1400 正确衔接；改期末为期初让衔接检查失败）
+        let mismatched =
+            generate_bank_reconciliation_period(&conn, acc, "2026-08", Some(1300.0), Some(900.0))
+                .unwrap();
+        assert!((mismatched.difference).abs() < 0.005, "两侧调节应勾稽平衡");
+        let err = confirm_bank_reconciliation_period(&conn, mismatched.id, "出纳")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("期初"), "期初不衔接应拦截：{err}");
+
+        // 门槛 3：当月存在待归集流水 → 拒绝确认（流水金额不影响本账户余额也要先归集）
+        let _ = insert_tx(
+            &conn,
+            "2026-08-25",
+            "2026-08",
+            "待归集流水",
+            "未知户",
+            "62220003",
+            0.0,
+            10.0,
+            None,
+            "unmatched",
+        );
+        let ok_numbers =
+            generate_bank_reconciliation_period(&conn, acc, "2026-08", None, None).unwrap();
+        let err = confirm_bank_reconciliation_period(&conn, ok_numbers.id, "出纳")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("待归集"), "存在待归集流水应拦截：{err}");
+
+        // 重新生成把 confirmed 期间拉回 draft（数据可能已变化）
+        let regenerated =
+            generate_bank_reconciliation_period(&conn, acc, "2026-07", None, None).unwrap();
+        assert_eq!(regenerated.status, "draft", "重新生成应回到 draft");
+    }
+
+    // ==================== 旧匹配命令退役（Task 13，spec 4.9 双路径防重） ====================
+
+    /// 流水已在新对账引擎核销（allocation>0）时，旧 confirm_bank_transaction_match 必须拦截，
+    /// 否则旧引擎不感知 allocation 会造成流水侧已核销虚高（双向双路径）
+    #[test]
+    fn test_legacy_confirm_intercepted_when_tx_allocated() {
+        let (conn, acc) = alloc_env();
+        // source_id 用大数避开与流水自增 id 撞车（旧 confirm 会拦截已有 bank_manual 凭证的流水）
+        let line = insert_fund_line(
+            &conn,
+            "JZ-LG-001",
+            "2026-08-05",
+            "2026-08",
+            "bank_manual",
+            99001,
+            acc,
+            0.0,
+            500.0,
+            "付款500",
+            "active",
+        );
+        let tx = insert_tx(
+            &conn,
+            "2026-08-05",
+            "2026-08",
+            "付款500",
+            "供应商丙",
+            "62220011",
+            0.0,
+            500.0,
+            Some(acc),
+            "unmatched",
+        );
+        conn.execute(
+            "INSERT INTO payment_batches (batch_no, belong_month, batch_type, status,
+                total_amount, item_count, fund_account_id, created_at, updated_at)
+             VALUES ('PB-LEG-1', '2026-08', 'general', 'paid', 500, 1, ?1,
+                     '2026-08-05', '2026-08-05')",
+            params![acc],
+        )
+        .unwrap();
+        let batch_id = conn.last_insert_rowid();
+
+        // 未核销时旧路径仍可用（历史兼容：旧匹配只读保留一个版本周期）
+        crate::db::confirm_bank_transaction_match(
+            &conn,
+            &BankTransactionMatchInput {
+                transaction_id: tx,
+                payment_batch_id: batch_id,
+                remark: None,
+            },
+            100,
+        )
+        .unwrap();
+        // 旧匹配占用后流水侧已有核销额，再走新引擎核销同流水属双路径，同样拦截
+        let err = confirm_expect_error(&conn, &alloc_input(tx, line, 500.0));
+        assert!(
+            err.contains("可核销余额"),
+            "流水侧已被旧匹配占用应拦截：{err}"
+        );
+
+        // 反向：新引擎核销在前，旧 confirm 必须拦截（防 200% 虚高的核心场景）
+        let (conn2, acc2) = alloc_env();
+        let line2 = insert_fund_line(
+            &conn2,
+            "JZ-LG-002",
+            "2026-08-05",
+            "2026-08",
+            "bank_manual",
+            99002,
+            acc2,
+            0.0,
+            500.0,
+            "付款500",
+            "active",
+        );
+        let tx2 = insert_tx(
+            &conn2,
+            "2026-08-05",
+            "2026-08",
+            "付款500",
+            "供应商丙",
+            "62220011",
+            0.0,
+            500.0,
+            Some(acc2),
+            "unmatched",
+        );
+        confirm_bank_allocations(&conn2, &[alloc_input(tx2, line2, 500.0)], "manual", "出纳")
+            .unwrap();
+        conn2
+            .execute(
+                "INSERT INTO payment_batches (batch_no, belong_month, batch_type, status,
+                total_amount, item_count, fund_account_id, created_at, updated_at)
+             VALUES ('PB-LEG-2', '2026-08', 'general', 'paid', 500, 1, ?1,
+                     '2026-08-05', '2026-08-05')",
+                params![acc2],
+            )
+            .unwrap();
+        let batch2 = conn2.last_insert_rowid();
+        let err = crate::db::confirm_bank_transaction_match(
+            &conn2,
+            &BankTransactionMatchInput {
+                transaction_id: tx2,
+                payment_batch_id: batch2,
+                remark: None,
+            },
+            100,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("银行对账"),
+            "新引擎核销后旧 confirm 应拦截：{err}"
+        );
+        // 自动匹配（内部调用旧 confirm）同样不得写入
+        let result = crate::db::auto_match_bank_transactions(&conn2, "2026-08").unwrap();
+        assert_eq!(result.matched, 0, "旧自动匹配不得再写已核销流水");
+        let legacy_rows: i64 = conn2
+            .query_row("SELECT COUNT(*) FROM bank_transaction_matches", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(legacy_rows, 0, "旧匹配表不得新增行");
+    }
+
+    // ==================== 月结检查项（Task 13，spec 8/9.6） ====================
+
+    /// 部分核销流水/分录 → warning；待归集流水 → 迁移完成前 warning、完成后 blocking
+    #[test]
+    fn test_month_close_bank_partial_allocation_and_unassigned_checks() {
+        let (conn, acc) = alloc_env();
+        let line = insert_fund_line(
+            &conn,
+            "JZ-MC-001",
+            "2026-08-05",
+            "2026-08",
+            "bank_manual",
+            1,
+            acc,
+            1000.0,
+            0.0,
+            "收款1000",
+            "active",
+        );
+        let tx = insert_tx(
+            &conn,
+            "2026-08-05",
+            "2026-08",
+            "收款1000",
+            "客户甲",
+            "62220001",
+            1000.0,
+            0.0,
+            Some(acc),
+            "unmatched",
+        );
+        // 部分核销 400/1000
+        confirm_bank_allocations(&conn, &[alloc_input(tx, line, 400.0)], "manual", "出纳").unwrap();
+
+        let workbench = crate::db::get_month_close_workbench(&conn, "2026-08").unwrap();
+        let partial = workbench
+            .checks
+            .iter()
+            .find(|c| c.key == "bank_partial_allocation")
+            .expect("月结检查应包含部分核销项");
+        assert_eq!(
+            partial.status, "warning",
+            "部分核销为 warning（严格阻塞归 7D）"
+        );
+        assert!(
+            partial.count >= 1,
+            "应检出部分核销的流水与分录：{}",
+            partial.count
+        );
+
+        // 待归集流水：迁移完成前 warning
+        let _unassigned = insert_tx(
+            &conn,
+            "2026-08-06",
+            "2026-08",
+            "待归集流水",
+            "未知户",
+            "62220003",
+            0.0,
+            50.0,
+            None,
+            "unmatched",
+        );
+        let workbench = crate::db::get_month_close_workbench(&conn, "2026-08").unwrap();
+        let unassigned = workbench
+            .checks
+            .iter()
+            .find(|c| c.key == "fund_unassigned_bank_tx")
+            .expect("月结检查应包含待归集流水项");
+        assert_eq!(unassigned.status, "warning", "归集向导未执行时应为 warning");
+        assert_eq!(unassigned.count, 1);
+
+        // 归集向导执行后（用户确认信号）→ blocking
+        conn.execute(
+            "INSERT OR REPLACE INTO app_settings (key, value) VALUES
+                ('stage7_fund_assignment_last_applied_at', '2026-09-05T00:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+        let workbench = crate::db::get_month_close_workbench(&conn, "2026-08").unwrap();
+        let unassigned = workbench
+            .checks
+            .iter()
+            .find(|c| c.key == "fund_unassigned_bank_tx")
+            .unwrap();
+        assert_eq!(
+            unassigned.status, "blocking",
+            "归集完成后应为 blocking（spec 9.6）"
+        );
+    }
+
+    /// 直插流水的对账单余额列（调节表推算期初/期末用）
+    fn insert_tx_balance(conn: &Connection, tx_id: i64, balance: f64) {
+        conn.execute(
+            "UPDATE bank_transactions SET balance = ?1 WHERE id = ?2",
+            params![balance, tx_id],
+        )
+        .unwrap();
+    }
+
+    /// 日记账与余额调节表 Excel 冒烟：文件生成且非空
+    #[test]
+    fn test_fund_journal_and_reconciliation_excel_export_smoke() {
+        let (conn, acc) = alloc_env();
+        let line = insert_fund_line(
+            &conn,
+            "JZ-EX-001",
+            "2026-08-05",
+            "2026-08",
+            "bank_manual",
+            1,
+            acc,
+            300.0,
+            0.0,
+            "收款300",
+            "active",
+        );
+        let tx = insert_tx(
+            &conn,
+            "2026-08-05",
+            "2026-08",
+            "收款300",
+            "客户甲",
+            "62220001",
+            300.0,
+            0.0,
+            Some(acc),
+            "unmatched",
+        );
+        insert_tx_balance(&conn, tx, 1300.0);
+        confirm_bank_allocations(&conn, &[alloc_input(tx, line, 300.0)], "manual", "出纳").unwrap();
+
+        let journal = get_fund_journal(
+            &conn,
+            &FundJournalQuery {
+                fund_account_id: acc,
+                from_month: Some("2026-08".into()),
+                to_month: Some("2026-08".into()),
+            },
+        )
+        .unwrap();
+        let journal_path =
+            std::env::temp_dir().join(format!("fund-journal-{}.xlsx", std::process::id()));
+        crate::excel::export_fund_journal_excel(&journal, journal_path.to_str().unwrap()).unwrap();
+        assert!(
+            journal_path.metadata().unwrap().len() > 0,
+            "日记账导出文件非空"
+        );
+
+        generate_bank_reconciliation_period(&conn, acc, "2026-08", None, None).unwrap();
+        let period_path =
+            std::env::temp_dir().join(format!("bank-recon-{}.xlsx", std::process::id()));
+        crate::excel::export_bank_reconciliation_excel(
+            &list_bank_reconciliation_periods(&conn, Some(acc), Some("2026-08".into()))
+                .unwrap()
+                .remove(0),
+            period_path.to_str().unwrap(),
+        )
+        .unwrap();
+        assert!(
+            period_path.metadata().unwrap().len() > 0,
+            "调节表导出文件非空"
+        );
     }
 }

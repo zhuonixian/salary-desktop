@@ -58,6 +58,7 @@ import FinancialReports from '@/pages/FinancialReports';
 import SecurityCenter from '@/pages/SecurityCenter';
 import FundAccounts from '@/pages/FundAccounts';
 import FundDocuments from '@/pages/FundDocuments';
+import FundJournals from '@/pages/FundJournals';
 import LockScreen from '@/components/LockScreen';
 import SetupSecurity from '@/components/SetupSecurity';
 import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
@@ -115,7 +116,8 @@ const menuItems: MenuProps['items'] = [
       { key: '/fund-accounts', label: '资金账户', icon: <BankOutlined /> },
       { key: '/fund-documents', label: '收付款单', icon: <MoneyCollectOutlined /> },
       { key: '/payments', label: '付款批次', icon: <WalletOutlined /> },
-      { key: '/bank-transactions', label: '银行流水', icon: <TransactionOutlined /> },
+      { key: '/bank-transactions', label: '银行对账', icon: <TransactionOutlined /> },
+      { key: '/fund-journals', label: '资金日记账', icon: <ProfileOutlined /> },
     ],
   },
   {
@@ -340,6 +342,7 @@ const AppLayout: React.FC = () => {
               <Route path="/social-insurance" element={<SocialInsurance />} />
               <Route path="/fund-accounts" element={<FundAccounts />} />
               <Route path="/fund-documents" element={<FundDocuments />} />
+              <Route path="/fund-journals" element={<FundJournals />} />
               <Route path="/accounts" element={<ChartOfAccounts />} />
               <Route path="/vouchers" element={<Vouchers />} />
               <Route path="/reports" element={<FinancialReports />} />

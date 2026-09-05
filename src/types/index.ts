@@ -451,6 +451,10 @@ export interface BankTransaction {
   matched_amount?: number;
   match_score?: number;
   match_remark?: string;
+  /** 流水侧已核销额（active allocation + 未迁移旧匹配） */
+  allocated_amount?: number;
+  /** 未核销余额（方向侧金额 − 已核销） */
+  remaining_amount?: number;
   created_at?: string;
   updated_at?: string;
 }
@@ -587,6 +591,100 @@ export interface LegacyBankMatchReport {
   migrated: number;
   already_migrated: number;
   unconverted: LegacyBankMatchUnconverted[];
+}
+
+// ==================== 资金日记账（Task 13，spec 6.1） ====================
+
+export interface FundJournalQuery {
+  fund_account_id: number;
+  from_month?: string;
+  to_month?: string;
+}
+
+export interface FundJournalRow {
+  voucher_line_id: number;
+  voucher_id: number;
+  voucher_date: string;
+  belong_month: string;
+  voucher_no: string;
+  source_type: string;
+  source_id: number;
+  account_code: string;
+  summary?: string;
+  partner_name?: string | null;
+  income_amount: number;
+  expense_amount: number;
+  balance: number;
+  allocated_amount: number;
+  /** unallocated / partial / allocated */
+  reconcile_status: string;
+}
+
+export interface FundJournal {
+  fund_account_id: number;
+  fund_account_name: string;
+  /** bank / cash / third_party */
+  account_type: string;
+  from_month?: string;
+  to_month?: string;
+  opening_balance: number;
+  closing_balance: number;
+  total_income: number;
+  total_expense: number;
+  rows: FundJournalRow[];
+}
+
+// ==================== 银行余额调节表（Task 13，spec 4.10） ====================
+
+export interface BankReconciliationOutstandingTx {
+  transaction_id: number;
+  transaction_date: string;
+  summary?: string;
+  counterparty_name?: string;
+  /** income / expense */
+  direction: string;
+  remaining_amount: number;
+}
+
+export interface BankReconciliationOutstandingLine {
+  voucher_line_id: number;
+  voucher_no: string;
+  voucher_date: string;
+  belong_month: string;
+  account_code: string;
+  summary?: string;
+  /** debit / credit */
+  direction: string;
+  remaining_amount: number;
+}
+
+export interface BankReconciliationDetail {
+  unallocated_transactions: BankReconciliationOutstandingTx[];
+  unallocated_lines: BankReconciliationOutstandingLine[];
+}
+
+export interface BankReconciliationPeriod {
+  id: number;
+  fund_account_id: number;
+  fund_account_name?: string;
+  belong_month: string;
+  statement_opening_balance: number;
+  statement_closing_balance: number;
+  /** derived / manual / carried / empty */
+  statement_source: string;
+  book_closing_balance: number;
+  outstanding_tx_amount: number;
+  outstanding_line_amount: number;
+  adjusted_book_balance: number;
+  adjusted_bank_balance: number;
+  difference: number;
+  /** draft / confirmed */
+  status: string;
+  detail_json?: string;
+  confirmed_by?: string;
+  confirmed_at?: string;
+  created_at: string;
+  updated_at: string;
 }
 
 // ==================== 银行流水导入预览（Task 11） ====================
