@@ -295,7 +295,7 @@ fn ensure_other_active_operator(conn: &Connection, exclude_id: Option<i64>) -> A
 
 // ==================== 资金账户 ====================
 
-const FUND_ACCOUNT_COLS: &str = "id, account_code, name, account_type, bank_name, account_no, currency, gl_account_code, opening_date, opening_balance, is_default, is_active, remark, created_at, updated_at";
+const FUND_ACCOUNT_COLS: &str = "id, account_code, name, account_type, bank_name, account_no, currency, gl_account_code, opening_date, opening_balance, is_default, is_active, COALESCE(strict_reconciliation, 0), remark, created_at, updated_at";
 
 fn fund_account_from_row(r: &rusqlite::Row) -> rusqlite::Result<FundAccount> {
     Ok(FundAccount {
@@ -311,9 +311,10 @@ fn fund_account_from_row(r: &rusqlite::Row) -> rusqlite::Result<FundAccount> {
         opening_balance: r.get(9)?,
         is_default: r.get::<_, i64>(10)? != 0,
         is_active: r.get::<_, i64>(11)? != 0,
-        remark: r.get(12)?,
-        created_at: r.get(13)?,
-        updated_at: r.get(14)?,
+        strict_reconciliation: r.get::<_, i64>(12)? != 0,
+        remark: r.get(13)?,
+        created_at: r.get(14)?,
+        updated_at: r.get(15)?,
     })
 }
 
@@ -396,12 +397,14 @@ pub fn save_fund_account(conn: &Connection, input: &FundAccountInput) -> AppResu
         Some(id) => Some(get_fund_account(conn, id)?),
         None => None,
     };
-    let (prev_default, prev_active) = match &existing {
-        Some(e) => (e.is_default, e.is_active),
-        None => (false, true),
+    let (prev_default, prev_active, prev_strict) = match &existing {
+        Some(e) => (e.is_default, e.is_active, e.strict_reconciliation),
+        None => (false, true, false),
     };
     let is_default = input.is_default.unwrap_or(prev_default);
     let is_active = input.is_active.unwrap_or(prev_active);
+    // 严格对账开关（spec 8/9.6）：patch 语义，None 保留原值
+    let strict_reconciliation = input.strict_reconciliation.unwrap_or(prev_strict);
     if is_default && !is_active {
         return Err(AppError::InvalidParam("默认账户不能同时停用".into()));
     }
@@ -491,7 +494,8 @@ pub fn save_fund_account(conn: &Connection, input: &FundAccountInput) -> AppResu
             tx.execute(
                 "UPDATE fund_accounts SET account_code = ?2, name = ?3, account_type = ?4,
                  bank_name = ?5, account_no = ?6, gl_account_code = ?7, opening_date = ?8,
-                 opening_balance = ?9, is_default = ?10, is_active = ?11, remark = ?12, updated_at = ?13
+                 opening_balance = ?9, is_default = ?10, is_active = ?11,
+                 strict_reconciliation = ?12, remark = ?13, updated_at = ?14
                  WHERE id = ?1",
                 params![
                     id,
@@ -505,6 +509,7 @@ pub fn save_fund_account(conn: &Connection, input: &FundAccountInput) -> AppResu
                     opening_balance,
                     is_default as i64,
                     is_active as i64,
+                    strict_reconciliation as i64,
                     remark,
                     Utc::now().to_rfc3339()
                 ],
@@ -517,8 +522,9 @@ pub fn save_fund_account(conn: &Connection, input: &FundAccountInput) -> AppResu
             }
             tx.execute(
                 "INSERT INTO fund_accounts (account_code, name, account_type, bank_name, account_no,
-                 currency, gl_account_code, opening_date, opening_balance, is_default, is_active, remark, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 'CNY', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
+                 currency, gl_account_code, opening_date, opening_balance, is_default, is_active,
+                 strict_reconciliation, remark, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'CNY', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)",
                 params![
                     account_code,
                     name,
@@ -530,6 +536,7 @@ pub fn save_fund_account(conn: &Connection, input: &FundAccountInput) -> AppResu
                     opening_balance,
                     is_default as i64,
                     is_active as i64,
+                    strict_reconciliation as i64,
                     remark,
                     Utc::now().to_rfc3339()
                 ],
@@ -3418,7 +3425,11 @@ fn reimbursement_action_label(action: &str) -> &'static str {
 
 /// 报销单已纳入在途付款批次时禁止反审批/作废（批次只收 approved+unpaid 单；
 /// 释放必须先经付款批次作废，防止批次明细与计提凭证脱钩，spec 5.2/5.3）
-fn ensure_reimbursement_not_batched(conn: &Connection, claim_id: i64, action: &str) -> AppResult<()> {
+fn ensure_reimbursement_not_batched(
+    conn: &Connection,
+    claim_id: i64,
+    action: &str,
+) -> AppResult<()> {
     if db::active_payment_item_exists(conn, "reimbursement_claim", claim_id)? {
         return Err(AppError::InvalidParam(format!(
             "报销单已纳入付款批次，请先在付款批次中作废释放后再{}",
@@ -3444,8 +3455,8 @@ fn last_reimbursement_submitter(conn: &Connection, claim_id: i64) -> AppResult<O
 
 /// 报销单关联发票 ID 列表
 fn reimbursement_claim_invoice_ids(conn: &Connection, claim_id: i64) -> AppResult<Vec<i64>> {
-    let mut stmt = conn
-        .prepare("SELECT invoice_id FROM reimbursement_claim_invoices WHERE claim_id = ?1")?;
+    let mut stmt =
+        conn.prepare("SELECT invoice_id FROM reimbursement_claim_invoices WHERE claim_id = ?1")?;
     let rows = stmt.query_map(params![claim_id], |r| r.get(0))?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
@@ -5381,6 +5392,7 @@ mod tests {
             opening_balance: Some(1000.0),
             is_default: Some(false),
             is_active: Some(true),
+            strict_reconciliation: None,
             remark: None,
         }
     }
@@ -10670,7 +10682,15 @@ mod tests {
 
         assert_eq!(
             claim_actions(&conn, claim.id),
-            vec!["submit", "approve", "unapprove", "submit", "reject", "withdraw", "void"]
+            vec![
+                "submit",
+                "approve",
+                "unapprove",
+                "submit",
+                "reject",
+                "withdraw",
+                "void"
+            ]
         );
     }
 
@@ -10737,19 +10757,15 @@ mod tests {
     #[test]
     fn test_reimbursement_maker_checker_blocks_self_approval() {
         let (conn, current, submitter_id) = reimbursement_env();
-        let reviewer = save_operator_profile(
-            &conn,
-            &current,
-            &operator_input("李审批", "approver"),
-        )
-        .unwrap()
-        .0;
+        let reviewer =
+            save_operator_profile(&conn, &current, &operator_input("李审批", "approver"))
+                .unwrap()
+                .0;
         set_maker_checker_enabled(&conn, true).unwrap();
 
         let claim = fresh_draft_claim(&conn, "9002");
         submit_reimbursement_claim(&conn, &current, claim.id, None).unwrap();
-        let err =
-            approve_reimbursement_claim(&conn, &current, claim.id, "自己批自己").unwrap_err();
+        let err = approve_reimbursement_claim(&conn, &current, claim.id, "自己批自己").unwrap_err();
         assert!(
             err.to_string().contains("不能是同一人"),
             "maker_checker 开启时应拦截提交人自审批: {err}"
@@ -10830,8 +10846,11 @@ mod tests {
         assert!(void_reimbursement_claim(&conn, &current, 1, "作废").is_err());
         // 失败命令不得改状态
         let status: String = conn
-            .query_row("SELECT status FROM reimbursement_claims WHERE id=1", [], |r| r
-                .get(0))
+            .query_row(
+                "SELECT status FROM reimbursement_claims WHERE id=1",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(status, "approved");
     }
@@ -10843,8 +10862,11 @@ mod tests {
         let err = unapprove_reimbursement_claim(&conn, &current, 1, "已付款反审批").unwrap_err();
         assert!(matches!(err, AppError::InvalidParam(_)));
         assert_eq!(
-            conn.query_row("SELECT status FROM reimbursement_claims WHERE id=1", [], |r| r
-                .get::<_, String>(0))
+            conn.query_row(
+                "SELECT status FROM reimbursement_claims WHERE id=1",
+                [],
+                |r| r.get::<_, String>(0)
+            )
             .unwrap(),
             "approved"
         );

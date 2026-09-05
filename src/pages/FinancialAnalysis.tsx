@@ -410,6 +410,11 @@ const FinancialAnalysis: React.FC = () => {
                       新增预算
                     </Button>
                   </div>
+                  <Alert
+                    type="info"
+                    showIcon
+                    message="实际发生口径：未入已批报销的发票 + 已批报销金额 + 已审批付款资金单（按费用类型/部门匹配）；同一笔费用不会因同时挂发票与报销而重复计入。"
+                  />
                   <Card>
                     <Table
                       rowKey={(row) => row.budget.id}

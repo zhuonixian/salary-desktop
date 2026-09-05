@@ -212,6 +212,21 @@ export interface DashboardSummary {
   total_gross_salary: number;
   total_deduction: number;
   total_net_salary: number;
+  // 第七阶段资金联动卡片（spec 8 仪表盘入口）
+  /** 待审批资金单 */
+  fund_pending_approval_count: number;
+  /** 已审批未付款/未结算资金单 */
+  fund_unpaid_count: number;
+  /** 当月待归集银行流水 */
+  unassigned_bank_tx_count: number;
+  /** 当月未核销流水（含部分核销） */
+  unreconciled_tx_count: number;
+  /** 逾期未结清借款笔数 */
+  advance_overdue_count: number;
+  /** 逾期未结清借款未清余额合计 */
+  advance_overdue_amount: number;
+  /** 启用资金账户余额合计 */
+  fund_total_balance: number;
 }
 
 // ==================== 操作日志 ====================
@@ -230,6 +245,8 @@ export interface OperationLogQuery {
   keyword?: string;
   start_date?: string;
   end_date?: string;
+  /** 操作人精确筛选（Task 4 挂账承接：后端参数） */
+  operator?: string;
   limit?: number;
 }
 
@@ -253,6 +270,19 @@ export interface DataSafetyStatus {
   last_backup_path?: string;
   last_restore_at?: string;
   table_counts: DataTableCount[];
+  // 第七阶段安全联动统计（spec 8）
+  /** 业务附件总数（business_attachments 行数） */
+  attachment_count: number;
+  /** 已加密附件数 */
+  attachment_encrypted_count: number;
+  /** 磁盘孤儿附件文件数（有文件无记录） */
+  attachment_orphan_count: number;
+  /** 缺失附件文件数（有记录无文件） */
+  attachment_missing_count: number;
+  /** 第七阶段 schema 迁移状态 */
+  stage7_migration_status?: string | null;
+  /** 当前待归集数量 */
+  stage7_pending_count?: number | null;
 }
 
 export interface DataBackupResult {
@@ -306,6 +336,13 @@ export interface MonthCloseSummary {
   total_invoice_amount: number;
   approved_reimbursement_amount: number;
   paid_reimbursement_amount: number;
+  // 第七阶段资金月结汇总（spec 8）
+  fund_pending_approval_count: number;
+  fund_unpaid_count: number;
+  unassigned_bank_tx_count: number;
+  partial_allocation_count: number;
+  advance_overdue_count: number;
+  advance_overdue_amount: number;
 }
 
 export type MonthCloseCheckStatus = 'ok' | 'warning' | 'blocking';
@@ -1215,6 +1252,8 @@ export interface FundAccount {
   opening_balance: number;
   is_default: boolean;
   is_active: boolean;
+  /** 严格对账（spec 8/9.6）：开启后月结调节表/部分核销检查升级 blocking */
+  strict_reconciliation: boolean;
   remark: string | null;
   created_at: string | null;
   updated_at: string | null;
@@ -1232,6 +1271,7 @@ export interface FundAccountInput {
   opening_balance?: number;
   is_default?: boolean;
   is_active?: boolean;
+  strict_reconciliation?: boolean;
   remark?: string | null;
 }
 

@@ -679,6 +679,7 @@ mod tests {
                 opening_balance: None,
                 is_default: None,
                 is_active: None,
+                strict_reconciliation: None,
                 remark: None,
             },
         )

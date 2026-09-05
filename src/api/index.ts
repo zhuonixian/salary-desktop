@@ -122,6 +122,13 @@ type BackendDashboardSummary = {
   total_housing_fund?: number;
   total_tax?: number;
   attendance_count?: number;
+  fund_pending_approval_count?: number;
+  fund_unpaid_count?: number;
+  unassigned_bank_tx_count?: number;
+  unreconciled_tx_count?: number;
+  advance_overdue_count?: number;
+  advance_overdue_amount?: number;
+  fund_total_balance?: number;
 };
 
 type BackendEmployee = Omit<Employee, 'status'> & {
@@ -226,6 +233,12 @@ const emptyMonthCloseSummary = (month = '') => ({
   total_invoice_amount: 0,
   approved_reimbursement_amount: 0,
   paid_reimbursement_amount: 0,
+  fund_pending_approval_count: 0,
+  fund_unpaid_count: 0,
+  unassigned_bank_tx_count: 0,
+  partial_allocation_count: 0,
+  advance_overdue_count: 0,
+  advance_overdue_amount: 0,
 });
 
 // ==================== 出纳基础资料预览数据（第七阶段） ====================
@@ -244,6 +257,7 @@ const mockFundAccounts: FundAccount[] = [
     opening_balance: 50000,
     is_default: true,
     is_active: true,
+    strict_reconciliation: false,
     remark: null,
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
@@ -261,6 +275,7 @@ const mockFundAccounts: FundAccount[] = [
     opening_balance: 3000,
     is_default: true,
     is_active: true,
+    strict_reconciliation: false,
     remark: null,
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
@@ -624,6 +639,7 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
         opening_balance: 0,
         is_default: false,
         is_active: true,
+        strict_reconciliation: false,
         bank_name: null,
         account_no: null,
         opening_date: null,
@@ -1372,6 +1388,12 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
         invoice_dir_exists: true,
         invoice_dir_size: 0,
         table_counts: [],
+        attachment_count: 0,
+        attachment_encrypted_count: 0,
+        attachment_orphan_count: 0,
+        attachment_missing_count: 0,
+        stage7_migration_status: 'done',
+        stage7_pending_count: 0,
       };
     case 'backup_database':
       return {
@@ -1646,6 +1668,13 @@ export function normalizeDashboardSummary(raw: BackendDashboardSummary, month: s
     total_gross_salary: totalGrossSalary,
     total_deduction: Math.max(totalGrossSalary - totalNetSalary, 0),
     total_net_salary: totalNetSalary,
+    fund_pending_approval_count: numberOrZero(raw.fund_pending_approval_count),
+    fund_unpaid_count: numberOrZero(raw.fund_unpaid_count),
+    unassigned_bank_tx_count: numberOrZero(raw.unassigned_bank_tx_count),
+    unreconciled_tx_count: numberOrZero(raw.unreconciled_tx_count),
+    advance_overdue_count: numberOrZero(raw.advance_overdue_count),
+    advance_overdue_amount: numberOrZero(raw.advance_overdue_amount),
+    fund_total_balance: numberOrZero(raw.fund_total_balance),
   };
 }
 

@@ -10,7 +10,12 @@ import {
   FileTextOutlined,
   WalletOutlined,
   AuditOutlined,
+  FundOutlined,
+  ScheduleOutlined,
+  AccountBookOutlined,
+  SwapOutlined,
 } from '@ant-design/icons';
+import { useNavigate } from 'react-router-dom';
 import { getDashboardSummary, getMonthCloseWorkbench } from '@/api';
 import { SensitiveText } from '@/components/SensitiveText';
 import { SensitiveStatistic } from '@/components/SensitiveStatistic';
@@ -125,6 +130,7 @@ const RingChart: React.FC<{
 
 const Dashboard: React.FC = () => {
   const { month, setMonth } = useBusinessMonth();
+  const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [workbench, setWorkbench] = useState<MonthCloseWorkbench | null>(null);
@@ -160,6 +166,13 @@ const Dashboard: React.FC = () => {
     total_gross_salary: 0,
     total_deduction: 0,
     total_net_salary: 0,
+    fund_pending_approval_count: 0,
+    fund_unpaid_count: 0,
+    unassigned_bank_tx_count: 0,
+    unreconciled_tx_count: 0,
+    advance_overdue_count: 0,
+    advance_overdue_amount: 0,
+    fund_total_balance: 0,
   };
   const closeSummary = workbench?.summary;
   const checks = useMemo(() => workbench?.checks ?? [], [workbench?.checks]);
@@ -264,6 +277,98 @@ const Dashboard: React.FC = () => {
           <Col xs={24} sm={12} lg={6}>
             <Card className="stat-card">
               <SensitiveStatistic title="已付款报销" value={closeSummary?.paid_reimbursement_amount ?? 0} prefix={<WalletOutlined />} valueStyle={{ color: '#389e0d' }} />
+            </Card>
+          </Col>
+        </Row>
+
+        <Row gutter={[16, 16]} className="mb-16">
+          <Col xs={24} sm={12} lg={4}>
+            <Card
+              hoverable
+              className="stat-card"
+              onClick={() => navigate('/fund-documents')}
+            >
+              <Statistic
+                title="待审批资金单"
+                value={data.fund_pending_approval_count}
+                suffix="张"
+                prefix={<ScheduleOutlined />}
+                valueStyle={{ color: data.fund_pending_approval_count > 0 ? '#faad14' : '#52c41a' }}
+              />
+            </Card>
+          </Col>
+          <Col xs={24} sm={12} lg={4}>
+            <Card
+              hoverable
+              className="stat-card"
+              onClick={() => navigate('/fund-documents')}
+            >
+              <Statistic
+                title="待付款/结算"
+                value={data.fund_unpaid_count}
+                suffix="张"
+                prefix={<PayCircleOutlined />}
+                valueStyle={{ color: data.fund_unpaid_count > 0 ? '#ff4d4f' : '#52c41a' }}
+              />
+            </Card>
+          </Col>
+          <Col xs={24} sm={12} lg={4}>
+            <Card
+              hoverable
+              className="stat-card"
+              onClick={() => navigate('/fund-accounts')}
+            >
+              <Statistic
+                title="待归集流水"
+                value={data.unassigned_bank_tx_count}
+                suffix="条"
+                prefix={<FundOutlined />}
+                valueStyle={{ color: data.unassigned_bank_tx_count > 0 ? '#faad14' : '#52c41a' }}
+              />
+            </Card>
+          </Col>
+          <Col xs={24} sm={12} lg={4}>
+            <Card
+              hoverable
+              className="stat-card"
+              onClick={() => navigate('/bank-transactions')}
+            >
+              <Statistic
+                title="未核销流水"
+                value={data.unreconciled_tx_count}
+                suffix="条"
+                prefix={<SwapOutlined />}
+                valueStyle={{ color: data.unreconciled_tx_count > 0 ? '#faad14' : '#52c41a' }}
+              />
+            </Card>
+          </Col>
+          <Col xs={24} sm={12} lg={4}>
+            <Card
+              hoverable
+              className="stat-card"
+              onClick={() => navigate('/advances')}
+            >
+              <Statistic
+                title="借款逾期"
+                value={data.advance_overdue_count}
+                suffix="笔"
+                prefix={<WarningOutlined />}
+                valueStyle={{ color: data.advance_overdue_count > 0 ? '#ff4d4f' : '#52c41a' }}
+              />
+            </Card>
+          </Col>
+          <Col xs={24} sm={12} lg={4}>
+            <Card
+              hoverable
+              className="stat-card"
+              onClick={() => navigate('/fund-journals')}
+            >
+              <SensitiveStatistic
+                title="账户余额合计"
+                value={data.fund_total_balance}
+                prefix={<AccountBookOutlined />}
+                valueStyle={{ color: '#1677ff' }}
+              />
             </Card>
           </Col>
         </Row>

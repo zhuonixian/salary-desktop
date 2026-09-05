@@ -392,6 +392,7 @@ interface FundAccountFormValues {
   opening_balance?: number;
   is_default: boolean;
   is_active: boolean;
+  strict_reconciliation: boolean;
   remark?: string;
 }
 
@@ -435,6 +436,7 @@ const FundAccountTab: React.FC = () => {
       gl_account_code: '1002',
       is_default: false,
       is_active: true,
+      strict_reconciliation: false,
     });
     setModalOpen(true);
   };
@@ -453,6 +455,7 @@ const FundAccountTab: React.FC = () => {
       opening_balance: record.opening_balance,
       is_default: record.is_default,
       is_active: record.is_active,
+      strict_reconciliation: record.strict_reconciliation,
       remark: record.remark ?? undefined,
     });
     setModalOpen(true);
@@ -475,6 +478,7 @@ const FundAccountTab: React.FC = () => {
         opening_balance: values.opening_balance ?? 0,
         is_default: values.is_default,
         is_active: values.is_active,
+        strict_reconciliation: values.strict_reconciliation,
         remark: values.remark?.trim() ?? '',
       };
       await saveFundAccount(data);
@@ -527,6 +531,7 @@ const FundAccountTab: React.FC = () => {
         <Space size={4}>
           <span>{value}</span>
           {record.is_default && <Tag color="gold">默认</Tag>}
+          {record.strict_reconciliation && <Tag color="purple">严格</Tag>}
         </Space>
       ),
     },
@@ -712,6 +717,14 @@ const FundAccountTab: React.FC = () => {
               <Switch />
             </Form.Item>
             <Form.Item name="is_active" label="启用" valuePropName="checked">
+              <Switch />
+            </Form.Item>
+            <Form.Item
+              name="strict_reconciliation"
+              label="严格对账"
+              valuePropName="checked"
+              tooltip="开启后，该账户当月余额调节表未确认或流水/分录存在部分核销时，月结检查由提醒升级为阻塞"
+            >
               <Switch />
             </Form.Item>
           </Space>

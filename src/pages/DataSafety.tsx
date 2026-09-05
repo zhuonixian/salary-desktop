@@ -220,6 +220,18 @@ const DataSafety: React.FC = () => {
                 <Descriptions.Item label="最近恢复">
                   {fmtTime(status?.last_restore_at)}
                 </Descriptions.Item>
+                <Descriptions.Item label="第七阶段迁移">
+                  {status?.stage7_migration_status ? (
+                    <Space size={8}>
+                      <Tag color={status.stage7_migration_status === 'done' ? 'green' : 'gold'}>
+                        {status.stage7_migration_status === 'done' ? '已完成' : status.stage7_migration_status}
+                      </Tag>
+                      <span>待归集 {status.stage7_pending_count ?? 0} 项</span>
+                    </Space>
+                  ) : (
+                    '-'
+                  )}
+                </Descriptions.Item>
               </Descriptions>
             </Card>
           </Col>
@@ -261,6 +273,36 @@ const DataSafety: React.FC = () => {
                   压缩整理数据库
                 </Button>
               </Space>
+            </Card>
+          </Col>
+        </Row>
+
+        <Row gutter={[16, 16]} className="mb-16">
+          <Col xs={24} xl={14}>
+            <Card title="业务附件与资金数据">
+              <Descriptions column={2} size="small" bordered>
+                <Descriptions.Item label="附件总数">
+                  {status?.attachment_count ?? 0}
+                </Descriptions.Item>
+                <Descriptions.Item label="已加密附件">
+                  {status?.attachment_encrypted_count ?? 0}
+                </Descriptions.Item>
+                <Descriptions.Item
+                  label="磁盘孤儿文件"
+                  contentStyle={{ color: (status?.attachment_orphan_count ?? 0) > 0 ? '#cf1322' : undefined }}
+                >
+                  {status?.attachment_orphan_count ?? 0}
+                </Descriptions.Item>
+                <Descriptions.Item
+                  label="缺失文件"
+                  contentStyle={{ color: (status?.attachment_missing_count ?? 0) > 0 ? '#cf1322' : undefined }}
+                >
+                  {status?.attachment_missing_count ?? 0}
+                </Descriptions.Item>
+              </Descriptions>
+              <Text type="secondary" style={{ display: 'block', marginTop: 8 }}>
+                孤儿文件：磁盘上有、数据库无引用（可手动清理）；缺失文件：有记录、磁盘上没有（建议从备份恢复）。
+              </Text>
             </Card>
           </Col>
         </Row>

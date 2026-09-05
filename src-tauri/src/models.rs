@@ -209,6 +209,21 @@ pub struct DashboardSummary {
     pub total_housing_fund: f64,
     pub total_tax: f64,
     pub attendance_count: i32,
+    // ---- 第七阶段资金联动卡片（spec 8 仪表盘入口）----
+    /// 待审批资金单（submitted）
+    pub fund_pending_approval_count: i32,
+    /// 已审批未付款/未结算资金单（approved + batched）
+    pub fund_unpaid_count: i32,
+    /// 当月待归集银行流水（未指定资金账户）
+    pub unassigned_bank_tx_count: i32,
+    /// 当月未核销流水（有账户且剩余未核销，含部分核销）
+    pub unreconciled_tx_count: i32,
+    /// 逾期未结清借款笔数
+    pub advance_overdue_count: i32,
+    /// 逾期未结清借款未清余额合计
+    pub advance_overdue_amount: f64,
+    /// 启用资金账户余额合计（期初 + active 资金分录净额）
+    pub fund_total_balance: f64,
 }
 
 // ==================== Operation Log ====================
@@ -245,6 +260,8 @@ pub struct OperationLogQuery {
     pub keyword: Option<String>,
     pub start_date: Option<String>,
     pub end_date: Option<String>,
+    /// 操作人精确筛选（Task 4 挂账承接：后端参数替代前端过滤）
+    pub operator: Option<String>,
     pub limit: Option<i64>,
 }
 
@@ -274,6 +291,19 @@ pub struct MonthCloseSummary {
     pub total_invoice_amount: f64,
     pub approved_reimbursement_amount: f64,
     pub paid_reimbursement_amount: f64,
+    // ---- 第七阶段资金月结汇总（spec 8）----
+    /// 待审批资金单
+    pub fund_pending_approval_count: i32,
+    /// 已审批未付款/未结算资金单（approved + batched）
+    pub fund_unpaid_count: i32,
+    /// 当月待归集银行流水
+    pub unassigned_bank_tx_count: i32,
+    /// 部分核销流水/资金分录
+    pub partial_allocation_count: i32,
+    /// 逾期未结清借款笔数
+    pub advance_overdue_count: i32,
+    /// 逾期未结清借款未清余额合计
+    pub advance_overdue_amount: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1063,6 +1093,19 @@ pub struct DataSafetyStatus {
     pub last_backup_path: Option<String>,
     pub last_restore_at: Option<String>,
     pub table_counts: Vec<DataTableCount>,
+    // ---- 第七阶段安全联动统计（spec 8）----
+    /// 业务附件总数（business_attachments 行数）
+    pub attachment_count: i64,
+    /// 已加密附件数
+    pub attachment_encrypted_count: i64,
+    /// 磁盘孤儿附件文件数（有文件无记录）
+    pub attachment_orphan_count: i64,
+    /// 缺失附件文件数（有记录无文件）
+    pub attachment_missing_count: i64,
+    /// 第七阶段 schema 迁移状态（app_settings.stage7_migration_status）
+    pub stage7_migration_status: Option<String>,
+    /// 当前待归集数量（app_settings.stage7_migration_pending_count）
+    pub stage7_pending_count: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1410,6 +1453,9 @@ pub struct FundAccount {
     pub opening_balance: f64,
     pub is_default: bool,
     pub is_active: bool,
+    /// 严格对账（spec 8/9.6，Task 13 挂账承接）：开启后该账户当月余额调节表未确认
+    /// 或流水/分录存在部分核销时，月结检查由 warning 升级为 blocking
+    pub strict_reconciliation: bool,
     pub remark: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
@@ -1429,6 +1475,7 @@ pub struct FundAccountInput {
     pub opening_balance: Option<f64>,
     pub is_default: Option<bool>,
     pub is_active: Option<bool>,
+    pub strict_reconciliation: Option<bool>,
     pub remark: Option<String>,
 }
 

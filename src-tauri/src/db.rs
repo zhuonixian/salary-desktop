@@ -675,6 +675,14 @@ pub fn migrate_stage7_schema(conn: &Connection) -> AppResult<Stage7MigrationRepo
         // Task 14（spec 4.11）：借款核销方式与预计归还日（可空，历史数据保持 NULL 兼容）
         ensure_column(c, "fund_documents", "settlement_mode", "TEXT")?;
         ensure_column(c, "fund_documents", "due_date", "TEXT")?;
+        // Task 16（spec 8/9.6，Task 13 挂账承接）：账户级严格对账开关（历史账户默认关闭，
+        // 月结严格检查不突然阻断旧用户）
+        ensure_column(
+            c,
+            "fund_accounts",
+            "strict_reconciliation",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
         rebuild_stage7_indexes(c)?;
 
         // 新表自检：防止部分建表被静默吞掉
@@ -696,12 +704,10 @@ pub fn migrate_stage7_schema(conn: &Connection) -> AppResult<Stage7MigrationRepo
         // 在外层迁移事务内执行，整体回滚语义与 DDL 一致；归集向导补充账户后重跑可转换更多。
         migrate_legacy_bank_matches_in_tx(c)?;
 
-        // 外键一致性校验：存量脏数据（悬空引用）视为升级阻断项，整体回滚
+        // 外键一致性校验：存量脏数据（悬空引用）视为升级阻断项，整体回滚。
         let fk_errors = count_fk_check_violations(c)?;
         if fk_errors > 0 {
-            return Err(AppError::General(format!(
-                "第七阶段迁移中止：发现 {fk_errors} 处外键悬空引用（PRAGMA foreign_key_check），请先通过数据安全中心备份数据并修复后重试"
-            )));
+            return Err(fk_gate_error("第七阶段迁移", fk_errors, c));
         }
 
         let mut report = build_stage7_report(c)?;
@@ -791,9 +797,7 @@ fn rebuild_vouchers_source_type_check(conn: &Connection) -> AppResult<()> {
         // 提交前全量外键校验：悬空引用（含 vouchers 之外的表）视为升级阻断项，整体回滚
         let violations = count_fk_check_violations(c)?;
         if violations > 0 {
-            return Err(AppError::General(format!(
-                "vouchers 表重建中止：发现 {violations} 处外键悬空引用（PRAGMA foreign_key_check），请先通过数据安全中心备份数据并修复后重试"
-            )));
+            return Err(fk_gate_error("vouchers 表重建", violations, c));
         }
         Ok(())
     });
@@ -909,6 +913,8 @@ fn create_stage7_tables(conn: &Connection) -> AppResult<()> {
             opening_balance REAL NOT NULL DEFAULT 0,
             is_default INTEGER NOT NULL DEFAULT 0,
             is_active INTEGER NOT NULL DEFAULT 1,
+            -- 严格对账（spec 8/9.6，Task 13 挂账承接）：开启后月结调节表/部分核销检查升级 blocking
+            strict_reconciliation INTEGER NOT NULL DEFAULT 0,
             remark TEXT,
             created_at TEXT,
             updated_at TEXT,
@@ -1154,6 +1160,45 @@ fn count_fk_check_violations(conn: &Connection) -> AppResult<i64> {
         count += 1;
     }
     Ok(count)
+}
+
+/// 收集 PRAGMA foreign_key_check 违规明细（最多 max 条）：
+/// "子表 第 行id 行 → 缺失引用 父表"。Task 2 挂账承接（最小改善）：
+/// 启动阻断保留全库范围（收窄会让 vouchers 表重建在悬空数据下级联丢分录），
+/// 但报错给出具体表名/行号与处理指引，用户 UI 不可达时也能定位修复。
+fn fk_check_violation_details(conn: &Connection, max: usize) -> AppResult<Vec<String>> {
+    let mut stmt = conn.prepare("PRAGMA foreign_key_check")?;
+    let mut rows = stmt.query([])?;
+    let mut details = Vec::new();
+    while let Some(row) = rows.next()? {
+        let table: String = row.get(0)?;
+        let rowid: i64 = row.get(1)?;
+        let parent: String = row.get(2)?;
+        if details.len() < max {
+            details.push(format!("{table} 第 {rowid} 行 → 缺失引用 {parent}"));
+        } else {
+            break;
+        }
+    }
+    Ok(details)
+}
+
+/// 外键悬空引用统一报错：列出具体表名/行号明细与备份/修复处理指引。
+/// Task 2 挂账承接（最小改善）：阻断范围保留全库（spec 9.1 单事务回滚语义不变），
+/// 报错文案从"先备份后重试"升级为可定位、可执行的指引。
+fn fk_gate_error(context: &str, violations: i64, conn: &Connection) -> AppError {
+    let details = fk_check_violation_details(conn, 10).unwrap_or_default();
+    let mut msg = format!(
+        "{context}中止：发现 {violations} 处外键悬空引用（PRAGMA foreign_key_check），涉及：{}",
+        details.join("；")
+    );
+    if details.len() < violations as usize {
+        msg.push_str(" 等");
+    }
+    msg.push_str(
+        "。请先通过数据安全中心备份数据，再用 SQLite 工具删除或修复这些悬空行后重启应用重试",
+    );
+    AppError::General(msg)
 }
 
 /// 统计待归集数量：无资金账户的银行流水、付款批次与资金科目（1001/1002/1012）凭证分录。
@@ -2537,6 +2582,12 @@ pub fn query_operation_logs(
         params_vec.push(Box::new(op_type.clone()));
         idx += 1;
     }
+    if let Some(operator) = q.operator.as_ref().filter(|v| !v.trim().is_empty()) {
+        // Task 4 挂账承接：操作人后端精确筛选（此前仅前端过滤，受 limit 截断影响有盲区）
+        where_clauses.push(format!("operator = ?{idx}"));
+        params_vec.push(Box::new(operator.clone()));
+        idx += 1;
+    }
     if let Some(keyword) = q.keyword.as_ref().filter(|v| !v.trim().is_empty()) {
         where_clauses.push(format!(
             "(operation_type LIKE ?{idx} OR description LIKE ?{idx} OR detail LIKE ?{idx} OR operator LIKE ?{idx})"
@@ -2641,6 +2692,57 @@ pub fn get_dashboard_summary(conn: &Connection, month: &str) -> AppResult<Dashbo
         |row| row.get(0),
     )?;
 
+    // ---- 第七阶段资金联动卡片（spec 8：待审批/待付款/待归集/未核销/借款逾期入口）----
+    let fund_pending_approval_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM fund_documents WHERE belong_month = ?1 AND status = 'submitted'",
+        params![month],
+        |row| row.get(0),
+    )?;
+    let fund_unpaid_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM fund_documents WHERE belong_month = ?1 AND status IN ('approved','batched')",
+        params![month],
+        |row| row.get(0),
+    )?;
+    let unassigned_bank_tx_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM bank_transactions
+         WHERE belong_month = ?1 AND status != 'ignored' AND fund_account_id IS NULL",
+        params![month],
+        |row| row.get(0),
+    )?;
+    // 未核销流水：有资金账户且方向侧剩余未核销（含部分核销；旧式未迁移匹配按核销引擎口径计入已核销）
+    let unreconciled_tx_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM (
+           SELECT t.id,
+             (CASE WHEN t.income_amount > 0.005 THEN t.income_amount ELSE t.expense_amount END)
+               AS side_amount,
+             (SELECT COALESCE(SUM(a.allocated_amount),0) FROM bank_reconciliation_allocations a
+               WHERE a.transaction_id = t.id AND a.status = 'active')
+             + (SELECT COALESCE(SUM(b.total_amount),0) FROM bank_transaction_matches m
+                JOIN payment_batches b ON b.id = m.payment_batch_id
+                WHERE m.transaction_id = t.id AND m.status = 'active'
+                  AND NOT EXISTS (SELECT 1 FROM bank_reconciliation_allocations x
+                                  WHERE x.legacy_match_id = m.id)) AS allocated
+           FROM bank_transactions t
+           WHERE t.belong_month = ?1 AND t.status != 'ignored' AND t.fund_account_id IS NOT NULL
+         ) WHERE side_amount - allocated > 0.005",
+        params![month],
+        |row| row.get(0),
+    )?;
+    // 借款逾期：口径与借款台账一致（排除 void/reversed，未清 = 金额 − active 核销合计）
+    let (advance_overdue_count, advance_overdue_amount) = advance_overdue_stats(conn)?;
+    // 启用账户余额合计 = 期初 + active 资金分录净额（与日记账滚存口径一致）
+    let fund_total_balance: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(bal), 0) FROM (
+           SELECT fa.opening_balance + COALESCE((
+             SELECT SUM(vl.debit_amount - vl.credit_amount) FROM voucher_lines vl
+             JOIN vouchers v ON v.id = vl.voucher_id
+             WHERE v.status = 'active' AND vl.fund_account_id = fa.id), 0) AS bal
+           FROM fund_accounts fa WHERE fa.is_active = 1
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+
     Ok(DashboardSummary {
         employee_count: employee_count as i32,
         active_employee_count: active_employee_count as i32,
@@ -2652,7 +2754,39 @@ pub fn get_dashboard_summary(conn: &Connection, month: &str) -> AppResult<Dashbo
         total_housing_fund,
         total_tax,
         attendance_count: attendance_count as i32,
+        fund_pending_approval_count: fund_pending_approval_count as i32,
+        fund_unpaid_count: fund_unpaid_count as i32,
+        unassigned_bank_tx_count: unassigned_bank_tx_count as i32,
+        unreconciled_tx_count: unreconciled_tx_count as i32,
+        advance_overdue_count,
+        advance_overdue_amount,
+        fund_total_balance,
     })
+}
+
+/// 逾期未结清借款统计（笔数 + 未清余额合计）：
+/// 排除 void/reversed；有到期日且已过期；未清余额 = 金额 − active 核销合计 > 0.005。
+/// 全局口径（借款逾期与单月无关），月结检查与仪表盘共用。
+pub(crate) fn advance_overdue_stats(conn: &Connection) -> AppResult<(i32, f64)> {
+    let today = Utc::now().date_naive().format("%Y-%m-%d").to_string();
+    Ok(conn.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(outstanding), 0) FROM (
+           SELECT a.amount - (
+             SELECT COALESCE(SUM(l.allocated_amount), 0) FROM advance_settlement_links l
+             WHERE l.advance_id = a.id AND l.status = 'active'
+           ) AS outstanding
+           FROM fund_documents a
+           WHERE a.document_type = 'advance'
+             AND a.status NOT IN ('void', 'reversed')
+             AND a.due_date IS NOT NULL AND a.due_date != '' AND a.due_date < ?1
+         ) WHERE outstanding > 0.005",
+        params![today],
+        |row| {
+            let count: i64 = row.get(0)?;
+            let amount: f64 = row.get(1)?;
+            Ok((count as i32, amount))
+        },
+    )?)
 }
 
 pub fn get_month_close_workbench(conn: &Connection, month: &str) -> AppResult<MonthCloseWorkbench> {
@@ -2821,7 +2955,7 @@ pub fn get_month_close_workbench(conn: &Connection, month: &str) -> AppResult<Mo
         |row| row.get(0),
     )?;
 
-    let summary = MonthCloseSummary {
+    let mut summary = MonthCloseSummary {
         month: month.to_string(),
         active_employee_count: active_employee_count as i32,
         attendance_count: attendance_count as i32,
@@ -2844,6 +2978,12 @@ pub fn get_month_close_workbench(conn: &Connection, month: &str) -> AppResult<Mo
         total_invoice_amount,
         approved_reimbursement_amount,
         paid_reimbursement_amount,
+        fund_pending_approval_count: 0,
+        fund_unpaid_count: 0,
+        unassigned_bank_tx_count: 0,
+        partial_allocation_count: 0,
+        advance_overdue_count: 0,
+        advance_overdue_amount: 0.0,
     };
     let mut checks = build_month_close_checks(&summary);
     checks.push(MonthCloseCheckItem {
@@ -2894,9 +3034,10 @@ pub fn get_month_close_workbench(conn: &Connection, month: &str) -> AppResult<Mo
             action_route: None,
         });
     }
-    // 部分核销流水/资金分录（spec 8 warning 项；严格模式可配置阻塞归 7D）。
+    // 部分核销流水/资金分录（spec 8 warning 项；严格模式可配置阻塞，Task 13 挂账承接）。
     // 流水侧已核销含 active allocation 与未迁移旧式批次匹配（与核销引擎 bank_tx_allocated 同口径）；
     // 仅统计"部分核销"（已核销>0 且有剩余），完全未核销不提醒。
+    // 严格模式：部分核销涉开启 strict_reconciliation 的账户时升级为 blocking。
     let partial_tx_count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM (
            SELECT t.id,
@@ -2930,13 +3071,56 @@ pub fn get_month_close_workbench(conn: &Connection, month: &str) -> AppResult<Mo
         |row| row.get(0),
     )?;
     let partial_allocation_count = partial_tx_count + partial_line_count;
+    // 严格账户涉入的部分核销数（流水/分录任一侧挂严格账户）
+    let strict_partial_count: i64 = conn.query_row(
+        "SELECT
+           (SELECT COUNT(*) FROM (
+             SELECT t.id,
+               (CASE WHEN t.income_amount > 0.005 THEN t.income_amount ELSE t.expense_amount END)
+                 AS side_amount,
+               (SELECT COALESCE(SUM(a.allocated_amount),0) FROM bank_reconciliation_allocations a
+                 WHERE a.transaction_id = t.id AND a.status = 'active')
+               + (SELECT COALESCE(SUM(b.total_amount),0) FROM bank_transaction_matches m
+                  JOIN payment_batches b ON b.id = m.payment_batch_id
+                  WHERE m.transaction_id = t.id AND m.status = 'active'
+                    AND NOT EXISTS (SELECT 1 FROM bank_reconciliation_allocations x
+                                    WHERE x.legacy_match_id = m.id)) AS allocated
+             FROM bank_transactions t
+             WHERE t.belong_month = ?1 AND t.status != 'ignored' AND t.fund_account_id IN
+               (SELECT id FROM fund_accounts WHERE strict_reconciliation = 1)
+           ) WHERE side_amount - allocated > 0.005 AND allocated > 0.005)
+         + (SELECT COUNT(*) FROM (
+             SELECT vl.id,
+               (CASE WHEN vl.debit_amount > 0.005 THEN vl.debit_amount ELSE vl.credit_amount END)
+                 AS side_amount,
+               (SELECT COALESCE(SUM(a.allocated_amount),0) FROM bank_reconciliation_allocations a
+                 WHERE a.voucher_line_id = vl.id AND a.status = 'active') AS allocated
+             FROM voucher_lines vl
+             JOIN vouchers v ON v.id = vl.voucher_id
+             WHERE v.status = 'active' AND v.belong_month = ?1 AND vl.fund_account_id IN
+               (SELECT id FROM fund_accounts WHERE strict_reconciliation = 1)
+           ) WHERE side_amount - allocated > 0.005 AND allocated > 0.005)",
+        params![month],
+        |row| row.get(0),
+    )?;
     checks.push(MonthCloseCheckItem {
         key: "bank_partial_allocation".to_string(),
         title: "银行流水核销完整".to_string(),
-        status: if partial_allocation_count == 0 { "ok" } else { "warning" }.to_string(),
+        status: if partial_allocation_count == 0 {
+            "ok"
+        } else if strict_partial_count > 0 {
+            "blocking"
+        } else {
+            "warning"
+        }
+        .to_string(),
         count: partial_allocation_count as i32,
         description: if partial_allocation_count == 0 {
             "本月流水与账面分录不存在部分核销".to_string()
+        } else if strict_partial_count > 0 {
+            format!(
+                "存在 {partial_allocation_count} 条部分核销的流水/账面分录（其中 {strict_partial_count} 条涉严格对账账户），严格模式下阻塞月结，请完成核销或取消重对"
+            )
         } else {
             format!(
                 "存在 {partial_allocation_count} 条部分核销的流水/账面分录，建议到银行对账完成核销或取消重对"
@@ -2981,6 +3165,144 @@ pub fn get_month_close_workbench(conn: &Connection, month: &str) -> AppResult<Mo
         },
         action_route: Some("/fund-accounts".to_string()),
     });
+
+    // ---- spec 8 月结新增检查（Task 16，7D 联动收口）----
+
+    // 待审批资金单（阻塞）
+    let fund_pending_approval_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM fund_documents WHERE belong_month = ?1 AND status = 'submitted'",
+        params![month],
+        |row| row.get(0),
+    )?;
+    checks.push(MonthCloseCheckItem {
+        key: "fund_documents_pending_approval".to_string(),
+        title: "资金单审批完整".to_string(),
+        status: if fund_pending_approval_count == 0 {
+            "ok"
+        } else {
+            "blocking"
+        }
+        .to_string(),
+        count: fund_pending_approval_count as i32,
+        description: if fund_pending_approval_count == 0 {
+            "本月资金单均已审批处理".to_string()
+        } else {
+            format!("存在 {fund_pending_approval_count} 张待审批资金单，请先完成审批或驳回后再月结")
+        },
+        action_route: Some("/fund-documents".to_string()),
+    });
+    // 已审批未付款/未结算资金单（阻塞；batched=已进入未付款批次，同样属于资金未落地）
+    let fund_unpaid_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM fund_documents
+         WHERE belong_month = ?1 AND status IN ('approved','batched')",
+        params![month],
+        |row| row.get(0),
+    )?;
+    checks.push(MonthCloseCheckItem {
+        key: "fund_documents_unsettled".to_string(),
+        title: "资金单付款结算".to_string(),
+        status: if fund_unpaid_count == 0 {
+            "ok"
+        } else {
+            "blocking"
+        }
+        .to_string(),
+        count: fund_unpaid_count as i32,
+        description: if fund_unpaid_count == 0 {
+            "本月已审批资金单均已付款/结算".to_string()
+        } else {
+            format!(
+                "存在 {fund_unpaid_count} 张已审批未付款/未结算资金单，请完成付款批次与结算后再月结"
+            )
+        },
+        action_route: Some("/fund-documents".to_string()),
+    });
+    // 已付款但无有效资金辅助凭证（阻塞）：结算/冲正的凭证生成失败会破坏资金日记账
+    let fund_settled_no_voucher_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM fund_documents d
+         WHERE d.belong_month = ?1 AND d.status = 'settled'
+           AND NOT EXISTS (
+             SELECT 1 FROM vouchers v
+             WHERE v.source_type = 'fund_document' AND v.source_id = d.id AND v.status = 'active'
+           )",
+        params![month],
+        |row| row.get(0),
+    )?;
+    checks.push(MonthCloseCheckItem {
+        key: "fund_settled_without_voucher".to_string(),
+        title: "资金辅助凭证完整".to_string(),
+        status: if fund_settled_no_voucher_count == 0 {
+            "ok"
+        } else {
+            "blocking"
+        }
+        .to_string(),
+        count: fund_settled_no_voucher_count as i32,
+        description: if fund_settled_no_voucher_count == 0 {
+            "本月已结算资金单均有有效资金辅助凭证".to_string()
+        } else {
+            format!(
+                "存在 {fund_settled_no_voucher_count} 张已结算但缺少有效资金辅助凭证的资金单，请先补齐凭证再月结"
+            )
+        },
+        action_route: Some("/fund-documents".to_string()),
+    });
+    // 严格对账账户未确认余额调节表（阻塞；spec 8/9.6，Task 13 挂账承接——配置项本任务建）
+    // 历史账户默认关闭严格开关，旧用户月结不受影响（spec 13 节：严格检查只在用户主动开启后生效）
+    let strict_unconfirmed_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM fund_accounts fa
+         WHERE fa.is_active = 1 AND fa.strict_reconciliation = 1
+           AND NOT EXISTS (
+             SELECT 1 FROM bank_reconciliation_periods p
+             WHERE p.fund_account_id = fa.id AND p.belong_month = ?1 AND p.status = 'confirmed'
+           )",
+        params![month],
+        |row| row.get(0),
+    )?;
+    checks.push(MonthCloseCheckItem {
+        key: "strict_reconciliation_unconfirmed".to_string(),
+        title: "严格对账调节表确认".to_string(),
+        status: if strict_unconfirmed_count == 0 {
+            "ok"
+        } else {
+            "blocking"
+        }
+        .to_string(),
+        count: strict_unconfirmed_count as i32,
+        description: if strict_unconfirmed_count == 0 {
+            "严格对账账户本月余额调节表均已确认".to_string()
+        } else {
+            format!(
+                "存在 {strict_unconfirmed_count} 个严格对账账户本月余额调节表未确认，请先到银行对账确认后再月结"
+            )
+        },
+        action_route: Some("/bank-transactions".to_string()),
+    });
+    // 员工借款逾期（warning；全局口径，与借款台账一致）
+    let (advance_overdue_count, advance_overdue_amount) = advance_overdue_stats(conn)?;
+    checks.push(MonthCloseCheckItem {
+        key: "advance_overdue".to_string(),
+        title: "员工借款逾期".to_string(),
+        status: if advance_overdue_count == 0 { "ok" } else { "warning" }.to_string(),
+        count: advance_overdue_count,
+        description: if advance_overdue_count == 0 {
+            "无逾期未结清员工借款".to_string()
+        } else {
+            format!(
+                "存在 {advance_overdue_count} 笔逾期未结清员工借款（未清余额合计 {advance_overdue_amount:.2} 元），建议尽快催收核销"
+            )
+        },
+        action_route: Some("/advances".to_string()),
+    });
+
+    // 回填汇总字段（spec 8 月结汇总增加资金维度）
+    summary.fund_pending_approval_count = fund_pending_approval_count as i32;
+    summary.fund_unpaid_count = fund_unpaid_count as i32;
+    summary.unassigned_bank_tx_count = unassigned_tx_count as i32;
+    summary.partial_allocation_count = partial_allocation_count as i32;
+    summary.advance_overdue_count = advance_overdue_count;
+    summary.advance_overdue_amount = advance_overdue_amount;
+
     let month_close = get_month_close_record(conn, month)?;
     Ok(MonthCloseWorkbench {
         summary,
@@ -5140,10 +5462,16 @@ pub fn get_budget_executions(conn: &Connection, month: &str) -> AppResult<Vec<Bu
     )?;
     let department_costs = get_department_cost_analysis(conn, month)?;
     let expense_trends = get_expense_type_trends(conn, &[month.to_string()])?;
+    let fund_expense_totals = get_approved_fund_payment_totals(conn, month)?;
 
     let mut result = Vec::new();
     for budget in budgets {
-        let actual_amount = budget_actual_amount(&budget, &department_costs, &expense_trends);
+        let actual_amount = budget_actual_amount(
+            &budget,
+            &department_costs,
+            &expense_trends,
+            &fund_expense_totals,
+        );
         let usage_percent = if budget.budget_amount <= 0.0 {
             0.0
         } else {
@@ -5171,26 +5499,68 @@ pub fn get_budget_executions(conn: &Connection, month: &str) -> AppResult<Vec<Bu
     Ok(result)
 }
 
+/// 预算实际发生（spec 8 口径）：
+/// 发票 + 已批报销（已进入已批报销的发票去重，避免双计）+ 已审批付款类资金单
+/// （approved/batched/settled，按费用类型或部门精确匹配；收入/借款/内部转账不计费用）。
+/// 有效凭证已由发票/报销计提凭证在源头代表，不重复汇总。
 fn budget_actual_amount(
     budget: &Budget,
     department_costs: &[DepartmentCostAnalysis],
     expense_trends: &[ExpenseTypeTrend],
+    fund_expense_totals: &[(Option<String>, Option<String>, f64)],
 ) -> f64 {
     if let Some(expense_type_code) = budget.expense_type_code.as_deref() {
-        return expense_trends
+        let trends_total: f64 = expense_trends
             .iter()
             .filter(|item| item.expense_type_code == expense_type_code)
             .map(|item| item.invoice_amount + item.reimbursement_amount)
             .sum();
+        let fund_total: f64 = fund_expense_totals
+            .iter()
+            .filter(|(expense_type, _, _)| expense_type.as_deref() == Some(expense_type_code))
+            .map(|(_, _, amount)| *amount)
+            .sum();
+        return trends_total + fund_total;
     }
     if let Some(department) = budget.department.as_deref() {
-        return department_costs
+        let dept_cost = department_costs
             .iter()
             .find(|item| item.department == department)
             .map(|item| item.total_cost)
             .unwrap_or(0.0);
+        let fund_total: f64 = fund_expense_totals
+            .iter()
+            .filter(|(_, dept, _)| dept.as_deref() == Some(department))
+            .map(|(_, _, amount)| *amount)
+            .sum();
+        return dept_cost + fund_total;
     }
-    department_costs.iter().map(|item| item.total_cost).sum()
+    let dept_total: f64 = department_costs.iter().map(|item| item.total_cost).sum();
+    let fund_total: f64 = fund_expense_totals
+        .iter()
+        .map(|(_, _, amount)| *amount)
+        .sum();
+    dept_total + fund_total
+}
+
+/// 已审批付款类资金单（approved/batched/settled）按 (费用类型, 部门) 聚合金额。
+/// spec 8：预算实际发生统一纳入已审批资金单；收入/借款/核销/内部转账不属于费用发生。
+fn get_approved_fund_payment_totals(
+    conn: &Connection,
+    month: &str,
+) -> AppResult<Vec<(Option<String>, Option<String>, f64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT NULLIF(TRIM(expense_type), ''), NULLIF(TRIM(department), ''),
+                COALESCE(SUM(amount), 0)
+         FROM fund_documents
+         WHERE belong_month = ?1 AND document_type = 'payment'
+           AND status IN ('approved', 'batched', 'settled')
+         GROUP BY NULLIF(TRIM(expense_type), ''), NULLIF(TRIM(department), '')",
+    )?;
+    let rows = stmt.query_map(params![month], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
 }
 
 fn get_department_cost_analysis(
@@ -5234,6 +5604,7 @@ fn get_department_cost_analysis(
     }
 
     {
+        // spec 8 预算口径：已进入已批报销的发票不再按发票口径重复计入（费用由报销单代表）
         let mut stmt = conn.prepare(
             "SELECT
                 COALESCE(NULLIF(TRIM(e.department), ''), '未分配') AS department,
@@ -5241,6 +5612,11 @@ fn get_department_cost_analysis(
              FROM invoices i
              LEFT JOIN employees e ON e.id = i.employee_id
              WHERE i.belong_month = ?1 AND i.status != 'void'
+               AND NOT EXISTS (
+                 SELECT 1 FROM reimbursement_claim_invoices ri
+                 JOIN reimbursement_claims rc ON rc.id = ri.claim_id
+                 WHERE ri.invoice_id = i.id AND rc.status = 'approved'
+               )
              GROUP BY COALESCE(NULLIF(TRIM(e.department), ''), '未分配')",
         )?;
         let rows = stmt.query_map(params![month], |row| {
@@ -5328,6 +5704,7 @@ fn get_expense_type_trends(
     }
 
     if let (Some(start_month), Some(end_month)) = (months.first(), months.last()) {
+        // spec 8 预算口径：已进入已批报销的发票不再按发票口径重复计入（费用由报销单代表）
         let mut stmt = conn.prepare(
             "SELECT
                 i.belong_month,
@@ -5338,6 +5715,11 @@ fn get_expense_type_trends(
              FROM invoices i
              LEFT JOIN invoice_expense_types t ON t.code = i.expense_type_code
              WHERE i.belong_month >= ?1 AND i.belong_month <= ?2 AND i.status != 'void'
+               AND NOT EXISTS (
+                 SELECT 1 FROM reimbursement_claim_invoices ri
+                 JOIN reimbursement_claims rc ON rc.id = ri.claim_id
+                 WHERE ri.invoice_id = i.id AND rc.status = 'approved'
+               )
              GROUP BY i.belong_month, COALESCE(NULLIF(TRIM(i.expense_type_code), ''), 'uncategorized'), COALESCE(t.name, '未归类')",
         )?;
         let rows = stmt.query_map(params![start_month, end_month], |row| {
@@ -5559,10 +5941,16 @@ fn get_employee_cost_views(conn: &Connection, month: &str) -> AppResult<Vec<Empl
     }
 
     {
+        // spec 8 口径：已进入已批报销的发票不再按发票口径重复计入（与部门成本/费用趋势一致）
         let mut stmt = conn.prepare(
             "SELECT employee_id, COALESCE(SUM(total_amount), 0)
              FROM invoices
              WHERE belong_month = ?1 AND status != 'void' AND employee_id IS NOT NULL
+               AND NOT EXISTS (
+                 SELECT 1 FROM reimbursement_claim_invoices ri
+                 JOIN reimbursement_claims rc ON rc.id = ri.claim_id
+                 WHERE ri.invoice_id = invoices.id AND rc.status = 'approved'
+               )
              GROUP BY employee_id",
         )?;
         let rows = stmt.query_map(params![month], |row| {
@@ -6341,8 +6729,7 @@ pub fn save_reimbursement_claim(
         if existing.status != "draft" {
             return Err(AppError::InvalidParam(format!(
                 "报销单 {} 当前状态「{}」，仅草稿可编辑；请先撤回/反审批",
-                existing.claim_no,
-                existing.status
+                existing.claim_no, existing.status
             )));
         }
         if active_payment_item_exists(conn, "reimbursement_claim", id)? {
@@ -6489,7 +6876,6 @@ fn compensate_claim_vouchers(
 /// 凭证联动 + approval_events 追加同事务（spec 5.2）。
 /// 旧的 `update_reimbursement_claim_status` 直写通道与 `soft_delete_reimbursement_claim`
 /// 已移除，防止绕过审批轨迹。
-
 
 fn ensure_invoice_not_claimed(
     conn: &Connection,
@@ -6813,7 +7199,8 @@ pub mod tests {
         assert_eq!(sales.gross_salary, 10000.0);
         assert_eq!(sales.social_security, 1000.0);
         assert_eq!(sales.housing_fund, 1200.0);
-        assert_eq!(sales.invoice_amount, 300.0);
+        // spec 8 口径：inv1(300) 已进入已批报销单 1，发票侧去重为 0，费用由报销侧代表
+        assert_eq!(sales.invoice_amount, 0.0);
         assert_eq!(sales.reimbursement_amount, 300.0);
 
         let employee = report
@@ -6823,7 +7210,7 @@ pub mod tests {
             .unwrap();
         assert_eq!(employee.attendance_deduction, 200.0);
         assert_eq!(employee.abnormal_attendance_count, 1);
-        assert_eq!(employee.invoice_amount, 300.0);
+        assert_eq!(employee.invoice_amount, 0.0);
         assert_eq!(employee.reimbursement_amount, 300.0);
 
         let office_august = report
@@ -6831,8 +7218,9 @@ pub mod tests {
             .iter()
             .find(|row| row.month == "2026-08" && row.expense_type_code == "office")
             .unwrap();
-        assert_eq!(office_august.invoice_count, 1);
-        assert_eq!(office_august.invoice_amount, 300.0);
+        // 发票 1 已入已批报销单 → 发票口径计数/金额归零，报销侧保留
+        assert_eq!(office_august.invoice_count, 0);
+        assert_eq!(office_august.invoice_amount, 0.0);
         assert_eq!(office_august.reimbursement_amount, 300.0);
 
         assert_eq!(report.monthly_comparison.len(), 2);
@@ -6876,7 +7264,8 @@ pub mod tests {
             .iter()
             .find(|row| row.department == "销售部")
             .unwrap();
-        assert_eq!(sales.invoice_amount, 1000.0);
+        // inv1(300，已批报销单 1) 去重剔除；inv4(700) 所在报销单被驳回，仍按发票口径计入
+        assert_eq!(sales.invoice_amount, 700.0);
         assert_eq!(sales.reimbursement_amount, 300.0);
 
         let employee = report
@@ -6884,7 +7273,7 @@ pub mod tests {
             .iter()
             .find(|row| row.employee_no == "E001")
             .unwrap();
-        assert_eq!(employee.invoice_amount, 1000.0);
+        assert_eq!(employee.invoice_amount, 700.0);
         assert_eq!(employee.reimbursement_amount, 300.0);
 
         let office_august = report
@@ -6892,8 +7281,9 @@ pub mod tests {
             .iter()
             .find(|row| row.month == "2026-08" && row.expense_type_code == "office")
             .unwrap();
-        assert_eq!(office_august.invoice_count, 2);
-        assert_eq!(office_august.invoice_amount, 1000.0);
+        // inv1 去重剔除；inv4(驳回单) 保留 → office 发票 1 张 700
+        assert_eq!(office_august.invoice_count, 1);
+        assert_eq!(office_august.invoice_amount, 700.0);
         assert_eq!(office_august.reimbursement_amount, 300.0);
 
         let august = report
@@ -6945,8 +7335,9 @@ pub mod tests {
         )
         .unwrap();
         assert_eq!(report.budget_executions.len(), 1);
-        assert_eq!(report.budget_executions[0].actual_amount, 12_800.0);
-        assert_eq!(report.budget_executions[0].over_amount, 1_800.0);
+        // spec 8 口径：发票 1(300) 已入已批报销单 1 去重 → 工资 12200 + 发票 0 + 报销 300 = 12500
+        assert_eq!(report.budget_executions[0].actual_amount, 12_500.0);
+        assert_eq!(report.budget_executions[0].over_amount, 1_500.0);
         assert_eq!(report.budget_executions[0].status, "over");
 
         conn.execute(
@@ -7009,8 +7400,8 @@ pub mod tests {
     fn test_month_close_excludes_void_paid_reimbursements() {
         let conn = setup_financial_db();
         let operator = seed_claim_operator(&conn);
-        let voided = crate::cashier::void_reimbursement_claim(&conn, &operator, 1, "测试作废")
-            .unwrap();
+        let voided =
+            crate::cashier::void_reimbursement_claim(&conn, &operator, 1, "测试作废").unwrap();
         assert_eq!(voided.status, "void");
 
         let workbench = get_month_close_workbench(&conn, "2026-08").unwrap();
@@ -9235,8 +9626,8 @@ pub mod tests {
     fn test_update_void_reimbursement_claim_is_rejected_without_relinking() {
         let conn = setup_financial_db();
         let operator = seed_claim_operator(&conn);
-        let voided = crate::cashier::void_reimbursement_claim(&conn, &operator, 1, "测试作废")
-            .unwrap();
+        let voided =
+            crate::cashier::void_reimbursement_claim(&conn, &operator, 1, "测试作废").unwrap();
         assert_eq!(voided.status, "void");
 
         let err = save_reimbursement_claim(
@@ -10244,6 +10635,17 @@ mod stage7_tests {
         .unwrap();
         let result = migrate_stage7_schema(&conn);
         assert!(result.is_err(), "存在外键悬空引用时迁移应中止");
+        // Task 2 挂账承接（最小改善）：报错文案必须给出具体表名/行号与处理指引，
+        // 让用户在 UI 不可达时也能定位并修复悬空引用
+        let err_msg = result.err().unwrap().to_string();
+        assert!(
+            err_msg.contains("voucher_lines"),
+            "错误文案应包含悬空引用所在表名: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("数据安全中心") && err_msg.contains("备份"),
+            "错误文案应给出备份与修复指引: {err_msg}"
+        );
         // 回滚：新增列、新表与状态键均不残留
         assert!(!stage7_column_exists(
             &conn,
@@ -10283,5 +10685,528 @@ mod stage7_tests {
             .unwrap();
         assert_eq!(txs, 1);
         assert_eq!(stage7_fk_violation_count(&conn), 0);
+    }
+
+    // ==================== Task 16：月结严格模式 / 仪表盘资金联动 / 预算口径 ====================
+
+    /// 种一个资金账户（strict=是否开启严格对账），返回账户 id
+    fn t16_seed_account(conn: &Connection, code: &str, strict: bool, opening: f64) -> i64 {
+        conn.execute(
+            "INSERT INTO fund_accounts
+                (account_code, name, account_type, bank_name, account_no, currency,
+                 gl_account_code, opening_date, opening_balance, is_default, is_active,
+                 strict_reconciliation, created_at, updated_at)
+             VALUES (?1, '测试账户', 'bank', '测试银行', '6222000166', 'CNY',
+                     '1002', '2026-08-01', ?2, 0, 1, ?3, '2026-08-01', '2026-08-01')",
+            params![code, opening, strict as i64],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    /// 种一张资金单据（SQL 直插，db 层测试既有模式），返回单据 id
+    fn t16_seed_doc(
+        conn: &Connection,
+        doc_no: &str,
+        doc_type: &str,
+        month: &str,
+        amount: f64,
+        status: &str,
+        source_account: Option<i64>,
+        employee_id: Option<i64>,
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO fund_documents
+                (document_no, document_type, belong_month, document_date, amount, summary,
+                 expense_type, status, source_account_id, employee_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?3 || '-05', ?4, '测试单据', 'office', ?5, ?6, ?7,
+                     '2026-08-05', '2026-08-05')",
+            params![
+                doc_no,
+                doc_type,
+                month,
+                amount,
+                status,
+                source_account,
+                employee_id
+            ],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    /// 种一张已结算资金单的 active 辅助凭证（source_type='fund_document'）
+    fn t16_seed_fund_voucher(conn: &Connection, voucher_no: &str, doc_id: i64, account_id: i64) {
+        conn.execute(
+            "INSERT INTO vouchers
+                (voucher_no, voucher_date, belong_month, source_type, source_id, total_amount,
+                 status, created_at, updated_at)
+             VALUES (?1, '2026-08-06', '2026-08', 'fund_document', ?2, 100, 'active',
+                     '2026-08-06', '2026-08-06')",
+            params![voucher_no, doc_id],
+        )
+        .unwrap();
+        let vid = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO voucher_lines (voucher_id, account_code, debit_amount, credit_amount, line_order, fund_account_id)
+             VALUES (?1, '1002', 100, 0, 1, ?2)",
+            params![vid, account_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO voucher_lines (voucher_id, account_code, debit_amount, credit_amount, line_order)
+             VALUES (?1, '6602', 0, 100, 2)",
+            params![vid],
+        )
+        .unwrap();
+    }
+
+    /// 种一条银行流水，返回流水 id
+    fn t16_seed_bank_tx(
+        conn: &Connection,
+        month: &str,
+        income: f64,
+        expense: f64,
+        account_id: Option<i64>,
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO bank_transactions
+                (transaction_date, belong_month, summary, income_amount, expense_amount,
+                 fund_account_id, status, created_at, updated_at)
+             VALUES (?1 || '-08', ?1, '测试流水', ?2, ?3, ?4, 'unmatched', '2026-08-08', '2026-08-08')",
+            params![month, income, expense, account_id],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    /// 种一条 active 核销（金额 allocated），分录侧挂一个占位凭证行
+    fn t16_seed_partial_allocation(conn: &Connection, tx_id: i64, account_id: i64, allocated: f64) {
+        conn.execute(
+            "INSERT INTO vouchers
+                (voucher_no, voucher_date, belong_month, source_type, source_id, total_amount,
+                 status, created_at, updated_at)
+             VALUES ('V-T16-' || ?1, '2026-08-06', '2026-08', 'bank_manual', ?1, 100, 'active',
+                     '2026-08-06', '2026-08-06')",
+            params![tx_id],
+        )
+        .unwrap();
+        let vid = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO voucher_lines (voucher_id, account_code, debit_amount, credit_amount, line_order, fund_account_id)
+             VALUES (?1, '6602', 0, 100, 1, ?2)",
+            params![vid, account_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO bank_reconciliation_allocations
+                (transaction_id, voucher_line_id, allocated_amount, status, created_at, updated_at)
+             VALUES (?1, (SELECT id FROM voucher_lines WHERE voucher_id = ?2 LIMIT 1), ?3,
+                     'active', '2026-08-08', '2026-08-08')",
+            params![tx_id, vid, allocated],
+        )
+        .unwrap();
+    }
+
+    /// spec 8 月结新增检查：待审批资金单 / 已审批未付款未结算 / 已付款无辅助凭证（均阻塞）
+    #[test]
+    fn test_month_close_fund_document_checks() {
+        let conn = setup_financial_db();
+        let account = t16_seed_account(&conn, "BANK-T16A", false, 10_000.0);
+        let submitted = t16_seed_doc(
+            &conn,
+            "FK0801",
+            "payment",
+            "2026-08",
+            500.0,
+            "submitted",
+            Some(account),
+            None,
+        );
+        let approved = t16_seed_doc(
+            &conn,
+            "FK0802",
+            "payment",
+            "2026-08",
+            300.0,
+            "approved",
+            Some(account),
+            None,
+        );
+        let settled = t16_seed_doc(
+            &conn,
+            "FK0803",
+            "payment",
+            "2026-08",
+            200.0,
+            "settled",
+            Some(account),
+            None,
+        );
+
+        let wb = get_month_close_workbench(&conn, "2026-08").unwrap();
+        let pending = wb
+            .checks
+            .iter()
+            .find(|c| c.key == "fund_documents_pending_approval")
+            .expect("待审批资金单检查项存在");
+        assert_eq!(pending.status, "blocking");
+        assert_eq!(pending.count, 1);
+        let unpaid = wb
+            .checks
+            .iter()
+            .find(|c| c.key == "fund_documents_unsettled")
+            .expect("已审批未付款检查项存在");
+        assert_eq!(unpaid.status, "blocking");
+        assert_eq!(
+            unpaid.count, 1,
+            "submitted 单独计入待审批，不重复计入未付款"
+        );
+        let no_voucher = wb
+            .checks
+            .iter()
+            .find(|c| c.key == "fund_settled_without_voucher")
+            .expect("已付款无辅助凭证检查项存在");
+        assert_eq!(no_voucher.status, "blocking");
+        assert_eq!(no_voucher.count, 1);
+        assert_eq!(wb.summary.fund_pending_approval_count, 1);
+        assert_eq!(wb.summary.fund_unpaid_count, 1);
+
+        // 修复后恢复 ok：审批 → 结算 → 补辅助凭证
+        for doc in [submitted, approved, settled] {
+            conn.execute(
+                "UPDATE fund_documents SET status='settled', updated_at='2026-08-31' WHERE id=?1",
+                params![doc],
+            )
+            .unwrap();
+            t16_seed_fund_voucher(&conn, &format!("V20260816{doc:03}"), doc, account);
+        }
+        let wb = get_month_close_workbench(&conn, "2026-08").unwrap();
+        for key in [
+            "fund_documents_pending_approval",
+            "fund_documents_unsettled",
+            "fund_settled_without_voucher",
+        ] {
+            let item = wb.checks.iter().find(|c| c.key == key).unwrap();
+            assert_eq!(item.status, "ok", "{key} 修复后应恢复 ok");
+            assert_eq!(item.count, 0);
+        }
+    }
+
+    /// Task 13 挂账承接：严格对账账户配置（strict_reconciliation）+ 严格模式下
+    /// 未确认余额调节表阻塞月结、部分核销升级为阻塞；非严格账户保持 warning。
+    #[test]
+    fn test_month_close_strict_reconciliation_mode() {
+        let conn = setup_financial_db();
+        let strict_account = t16_seed_account(&conn, "BANK-T16S", true, 10_000.0);
+
+        // 严格账户无当月 confirmed 调节表 → blocking
+        let wb = get_month_close_workbench(&conn, "2026-08").unwrap();
+        let strict_check = wb
+            .checks
+            .iter()
+            .find(|c| c.key == "strict_reconciliation_unconfirmed")
+            .expect("严格对账调节表检查项存在");
+        assert_eq!(strict_check.status, "blocking");
+        assert_eq!(strict_check.count, 1);
+
+        // 确认调节表后恢复 ok
+        conn.execute(
+            "INSERT INTO bank_reconciliation_periods
+                (fund_account_id, belong_month, status, confirmed_by, confirmed_at, created_at, updated_at)
+             VALUES (?1, '2026-08', 'confirmed', '测试确认人', '2026-08-31T10:00:00+00:00',
+                     '2026-08-31T10:00:00+00:00', '2026-08-31T10:00:00+00:00')",
+            params![strict_account],
+        )
+        .unwrap();
+        let wb = get_month_close_workbench(&conn, "2026-08").unwrap();
+        let strict_check = wb
+            .checks
+            .iter()
+            .find(|c| c.key == "strict_reconciliation_unconfirmed")
+            .unwrap();
+        assert_eq!(strict_check.status, "ok");
+
+        // 部分核销（核销 40 / 面额 100）涉严格账户 → 由 warning 升级 blocking
+        let strict_tx = t16_seed_bank_tx(&conn, "2026-08", 0.0, 100.0, Some(strict_account));
+        t16_seed_partial_allocation(&conn, strict_tx, strict_account, 40.0);
+        let wb = get_month_close_workbench(&conn, "2026-08").unwrap();
+        let partial = wb
+            .checks
+            .iter()
+            .find(|c| c.key == "bank_partial_allocation")
+            .unwrap();
+        assert_eq!(partial.status, "blocking", "严格账户部分核销应阻塞月结");
+        // 一次部分核销同时命中流水侧与分录侧 → 计 2 条
+        assert_eq!(partial.count, 2);
+
+        // 非严格账户的部分核销保持 warning（旧用户不受影响）
+        let plain_account = t16_seed_account(&conn, "BANK-T16P", false, 5_000.0);
+        let plain_tx = t16_seed_bank_tx(&conn, "2026-08", 80.0, 0.0, Some(plain_account));
+        t16_seed_partial_allocation(&conn, plain_tx, plain_account, 30.0);
+        let wb = get_month_close_workbench(&conn, "2026-08").unwrap();
+        let partial = wb
+            .checks
+            .iter()
+            .find(|c| c.key == "bank_partial_allocation")
+            .unwrap();
+        assert_eq!(
+            partial.status, "blocking",
+            "混合场景中仍涉严格账户应保持阻塞"
+        );
+        assert_eq!(partial.count, 4);
+        conn.execute(
+            "UPDATE bank_reconciliation_allocations SET status='cancelled' WHERE transaction_id=?1",
+            params![strict_tx],
+        )
+        .unwrap();
+        let wb = get_month_close_workbench(&conn, "2026-08").unwrap();
+        let partial = wb
+            .checks
+            .iter()
+            .find(|c| c.key == "bank_partial_allocation")
+            .unwrap();
+        assert_eq!(
+            partial.status, "warning",
+            "仅非严格账户部分核销保持 warning"
+        );
+        assert_eq!(partial.count, 2);
+    }
+
+    /// spec 8：员工借款逾期（warning）。已结清借款不提醒；口径与借款台账一致
+    /// （排除 void/reversed，未清余额 = 金额 − active 核销合计）。
+    #[test]
+    fn test_month_close_advance_overdue_warning() {
+        let conn = setup_financial_db();
+        let account = t16_seed_account(&conn, "BANK-T16L", false, 10_000.0);
+        let overdue = t16_seed_doc(
+            &conn,
+            "JK0801",
+            "advance",
+            "2026-07",
+            100.0,
+            "approved",
+            Some(account),
+            Some(1),
+        );
+        conn.execute(
+            "UPDATE fund_documents SET due_date='2026-08-01' WHERE id=?1",
+            params![overdue],
+        )
+        .unwrap();
+        // 已结清：有全额 active 核销，虽过期也不提醒
+        let settled = t16_seed_doc(
+            &conn,
+            "JK0802",
+            "advance",
+            "2026-07",
+            50.0,
+            "settled",
+            Some(account),
+            Some(2),
+        );
+        conn.execute(
+            "UPDATE fund_documents SET due_date='2026-08-01' WHERE id=?1",
+            params![settled],
+        )
+        .unwrap();
+        let settlement = t16_seed_doc(
+            &conn,
+            "HX0803",
+            "advance_settlement",
+            "2026-08",
+            50.0,
+            "settled",
+            None,
+            Some(2),
+        );
+        conn.execute(
+            "INSERT INTO advance_settlement_links
+                (advance_id, settlement_id, allocated_amount, status, created_at, updated_at)
+             VALUES (?1, ?2, 50, 'active', '2026-08-20', '2026-08-20')",
+            params![settled, settlement],
+        )
+        .unwrap();
+        // 未到期借款不提醒
+        let future = t16_seed_doc(
+            &conn,
+            "JK0804",
+            "advance",
+            "2026-08",
+            80.0,
+            "approved",
+            Some(account),
+            Some(1),
+        );
+        conn.execute(
+            "UPDATE fund_documents SET due_date='2099-01-01' WHERE id=?1",
+            params![future],
+        )
+        .unwrap();
+
+        let wb = get_month_close_workbench(&conn, "2026-08").unwrap();
+        let check = wb
+            .checks
+            .iter()
+            .find(|c| c.key == "advance_overdue")
+            .expect("借款逾期检查项存在");
+        assert_eq!(check.status, "warning");
+        assert_eq!(check.count, 1, "只有逾期且未结清的借款计入");
+    }
+
+    /// spec 8 仪表盘联动：待审批 / 待付款 / 待归集 / 未核销 / 借款逾期 / 账户余额合计
+    #[test]
+    fn test_dashboard_summary_fund_cards() {
+        let conn = setup_financial_db();
+        let account = t16_seed_account(&conn, "BANK-T16D", false, 10_000.0);
+        t16_seed_doc(
+            &conn,
+            "FK0901",
+            "payment",
+            "2026-08",
+            500.0,
+            "submitted",
+            Some(account),
+            None,
+        );
+        t16_seed_doc(
+            &conn,
+            "FK0902",
+            "payment",
+            "2026-08",
+            300.0,
+            "approved",
+            Some(account),
+            None,
+        );
+        // 待归集（无账户）流水
+        t16_seed_bank_tx(&conn, "2026-08", 400.0, 0.0, None);
+        // 未核销（有账户、无核销）流水
+        t16_seed_bank_tx(&conn, "2026-08", 0.0, 200.0, Some(account));
+        // 逾期借款
+        let overdue = t16_seed_doc(
+            &conn,
+            "JK0905",
+            "advance",
+            "2026-07",
+            120.0,
+            "approved",
+            Some(account),
+            Some(1),
+        );
+        conn.execute(
+            "UPDATE fund_documents SET due_date='2026-08-01' WHERE id=?1",
+            params![overdue],
+        )
+        .unwrap();
+
+        let s = get_dashboard_summary(&conn, "2026-08").unwrap();
+        assert_eq!(s.fund_pending_approval_count, 1);
+        assert_eq!(s.fund_unpaid_count, 1);
+        assert_eq!(s.unassigned_bank_tx_count, 1);
+        assert_eq!(s.unreconciled_tx_count, 1);
+        assert_eq!(s.advance_overdue_count, 1);
+        assert!((s.advance_overdue_amount - 120.0).abs() < 0.005);
+        assert!((s.fund_total_balance - 10_000.0).abs() < 0.005);
+    }
+
+    /// Task 4 挂账承接：操作日志 operator 后端精确筛选
+    #[test]
+    fn test_query_operation_logs_filters_by_operator() {
+        let conn = setup_financial_db();
+        log_operation(&conn, "close_month", "甲操作", "张三", None).unwrap();
+        log_operation(&conn, "reopen_month", "乙操作", "李四", None).unwrap();
+        log_operation(&conn, "close_month", "丙操作", "张三", None).unwrap();
+
+        let all = query_operation_logs(&conn, &OperationLogQuery::default()).unwrap();
+        assert_eq!(all.len(), 3);
+        let zhang = query_operation_logs(
+            &conn,
+            &OperationLogQuery {
+                operator: Some("张三".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(zhang.len(), 2);
+        assert!(zhang.iter().all(|l| l.operator.as_deref() == Some("张三")));
+        let none = query_operation_logs(
+            &conn,
+            &OperationLogQuery {
+                operator: Some("王五".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(none.is_empty());
+    }
+
+    /// spec 8 预算口径：实际发生 = 未入已批报销的发票 + 已批报销 + 已审批付款资金单；
+    /// 发票进入已批报销后不再重复计入（修复双计）。
+    #[test]
+    fn test_budget_actual_includes_fund_documents_and_dedupes_claims() {
+        let conn = setup_financial_db();
+        let account = t16_seed_account(&conn, "BANK-T16B", false, 10_000.0);
+        // setup_financial_db：invoice 1 (office, 300) 已进入 approved 报销单 1（300）→ 双计
+        // 已审批付款资金单 office 200
+        t16_seed_doc(
+            &conn,
+            "FK0810",
+            "payment",
+            "2026-08",
+            200.0,
+            "approved",
+            Some(account),
+            None,
+        );
+        save_budget(
+            &conn,
+            &BudgetInput {
+                id: None,
+                month: "2026-08".into(),
+                department: None,
+                expense_type_code: Some("office".into()),
+                budget_amount: 450.0,
+                remark: None,
+            },
+        )
+        .unwrap();
+        let execs = get_budget_executions(&conn, "2026-08").unwrap();
+        let office = execs
+            .iter()
+            .find(|e| e.budget.expense_type_code.as_deref() == Some("office"))
+            .expect("office 预算存在");
+        // 0（发票 1 去重）+ 300（报销）+ 200（资金单）= 500
+        assert!(
+            (office.actual_amount - 500.0).abs() < 0.005,
+            "office 实际发生应为 500：{:?}",
+            office.actual_amount
+        );
+        assert_eq!(office.status, "over");
+    }
+
+    /// 存量行为回归：无资金单时预算部门口径不受资金单影响（发票去重仍生效）
+    #[test]
+    fn test_budget_department_actual_dedupes_claim_invoices() {
+        let conn = setup_financial_db();
+        save_budget(
+            &conn,
+            &BudgetInput {
+                id: None,
+                month: "2026-08".into(),
+                department: Some("销售部".into()),
+                expense_type_code: None,
+                budget_amount: 20_000.0,
+                remark: None,
+            },
+        )
+        .unwrap();
+        let execs = get_budget_executions(&conn, "2026-08").unwrap();
+        let sales = execs
+            .iter()
+            .find(|e| e.budget.department.as_deref() == Some("销售部"))
+            .expect("销售部预算存在");
+        // 工资 12200 + 发票 0（inv1 已入报销单 1 去重）+ 报销 300 = 12500
+        assert!((sales.actual_amount - 12_500.0).abs() < 0.005);
     }
 }

@@ -277,19 +277,67 @@ const MonthClose: React.FC = () => {
         </Row>
 
         <Row gutter={[16, 16]} className="mb-16">
-          <Col xs={24} md={8}>
+          <Col xs={24} md={6}>
             <Card className="stat-card">
               <SensitiveStatistic title="工资应发合计" value={summary?.total_salary_cost ?? 0} />
             </Card>
           </Col>
-          <Col xs={24} md={8}>
+          <Col xs={24} md={6}>
             <Card className="stat-card">
               <SensitiveStatistic title="发票价税合计" value={summary?.total_invoice_amount ?? 0} />
             </Card>
           </Col>
-          <Col xs={24} md={8}>
+          <Col xs={24} md={6}>
             <Card className="stat-card">
               <SensitiveStatistic title="已付款报销" value={summary?.paid_reimbursement_amount ?? 0} />
+            </Card>
+          </Col>
+          <Col xs={24} md={6}>
+            <Card className="stat-card">
+              <SensitiveStatistic title="逾期借款未清" value={summary?.advance_overdue_amount ?? 0} />
+            </Card>
+          </Col>
+        </Row>
+
+        <Row gutter={[16, 16]} className="mb-16">
+          <Col xs={24} sm={12} lg={6}>
+            <Card className="stat-card">
+              <Statistic
+                title="待审批资金单"
+                value={summary?.fund_pending_approval_count ?? 0}
+                suffix="张"
+                valueStyle={{ color: (summary?.fund_pending_approval_count ?? 0) > 0 ? '#ff4d4f' : undefined }}
+              />
+            </Card>
+          </Col>
+          <Col xs={24} sm={12} lg={6}>
+            <Card className="stat-card">
+              <Statistic
+                title="已审批未付款/未结算"
+                value={summary?.fund_unpaid_count ?? 0}
+                suffix="张"
+                valueStyle={{ color: (summary?.fund_unpaid_count ?? 0) > 0 ? '#ff4d4f' : undefined }}
+              />
+            </Card>
+          </Col>
+          <Col xs={24} sm={12} lg={6}>
+            <Card className="stat-card">
+              <Statistic
+                title="待归集银行流水"
+                value={summary?.unassigned_bank_tx_count ?? 0}
+                suffix="条"
+                valueStyle={{ color: (summary?.unassigned_bank_tx_count ?? 0) > 0 ? '#faad14' : undefined }}
+              />
+            </Card>
+          </Col>
+          <Col xs={24} sm={12} lg={6}>
+            <Card className="stat-card">
+              <Statistic
+                title="部分核销流水/分录"
+                value={summary?.partial_allocation_count ?? 0}
+                suffix="条"
+                valueStyle={{ color: (summary?.partial_allocation_count ?? 0) > 0 ? '#faad14' : undefined }}
+              />
             </Card>
           </Col>
         </Row>

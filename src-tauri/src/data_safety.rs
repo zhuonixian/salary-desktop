@@ -41,6 +41,28 @@ pub fn get_status(conn: &Connection, app_data_dir: &Path) -> AppResult<DataSafet
     let invoice_dir = app_data_dir.join(INVOICE_DIR);
     let table_counts = collect_table_counts(conn)?;
 
+    // 第七阶段安全联动统计（spec 8）：附件/资金表/迁移状态/孤儿文件
+    let (attachment_count, attachment_encrypted_count) =
+        if table_exists(conn, "business_attachments")? {
+            conn.query_row(
+                "SELECT COUNT(*), COALESCE(SUM(encrypted), 0) FROM business_attachments",
+                [],
+                |row| {
+                    let total: i64 = row.get(0)?;
+                    let encrypted: i64 = row.get(1)?;
+                    Ok((total, encrypted))
+                },
+            )?
+        } else {
+            (0, 0)
+        };
+    let (attachment_orphan_count, attachment_missing_count) =
+        attachment_disk_stats(conn, app_data_dir)?;
+    let stage7_migration_status: Option<String> = db::get_setting(conn, "stage7_migration_status")?;
+    let stage7_pending_count: Option<i64> =
+        db::get_setting(conn, "stage7_migration_pending_count")?
+            .and_then(|v| v.parse::<i64>().ok());
+
     Ok(DataSafetyStatus {
         app_data_dir: app_data_dir.to_string_lossy().to_string(),
         database_path: database_path.to_string_lossy().to_string(),
@@ -53,7 +75,35 @@ pub fn get_status(conn: &Connection, app_data_dir: &Path) -> AppResult<DataSafet
         last_backup_path: db::get_setting(conn, "last_data_backup_path")?,
         last_restore_at: db::get_setting(conn, "last_data_restore_at")?,
         table_counts,
+        attachment_count,
+        attachment_encrypted_count,
+        attachment_orphan_count,
+        attachment_missing_count,
+        stage7_migration_status,
+        stage7_pending_count,
     })
+}
+
+/// 附件磁盘一致性统计（不产生告警消息，仅计数）：
+/// 孤儿 = 磁盘上有、business_attachments 无引用；缺失 = 有记录、磁盘上没有。
+fn attachment_disk_stats(conn: &Connection, app_data_dir: &Path) -> AppResult<(i64, i64)> {
+    let dir = app_data_dir.join(ATTACHMENT_DIR);
+    if !dir.exists() {
+        return Ok((0, 0));
+    }
+    let referenced: Vec<String> = {
+        let mut stmt = conn.prepare("SELECT file_path FROM business_attachments")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    let mut on_disk: Vec<String> = Vec::new();
+    collect_files_light(&dir, &mut on_disk)?;
+    let orphans = on_disk.iter().filter(|p| !referenced.contains(*p)).count() as i64;
+    let missing = referenced
+        .iter()
+        .filter(|p| !Path::new(p).is_file())
+        .count() as i64;
+    Ok((orphans, missing))
 }
 
 pub fn backup_database(
@@ -569,6 +619,11 @@ fn collect_table_counts(conn: &Connection) -> AppResult<Vec<DataTableCount>> {
         ("invoices", "发票"),
         ("reimbursement_claims", "报销单"),
         ("operation_logs", "操作日志"),
+        // 第七阶段资金表（spec 8：数据安全状态增加资金表统计；旧库缺表时按 0 计）
+        ("fund_accounts", "资金账户"),
+        ("fund_documents", "资金单据"),
+        ("business_attachments", "业务附件"),
+        ("bank_reconciliation_allocations", "银行核销记录"),
     ];
     let mut counts = Vec::new();
     for (table, label) in tables {
@@ -890,6 +945,72 @@ mod tests {
             "应报告缺失文件: {:?}",
             result.messages
         );
+
+        let _ = fs::remove_dir_all(app_dir);
+    }
+
+    /// Task 16（spec 8 安全联动）：数据安全状态须包含资金表计数、附件统计（含加密/孤儿/缺失）、
+    /// 第七阶段迁移状态与待归集数量。
+    #[test]
+    fn test_status_reports_fund_tables_attachments_and_migration() {
+        let app_dir = temp_dir("status-fund-app");
+        fs::create_dir_all(&app_dir).unwrap();
+        let conn = db::init_db(&app_dir.to_string_lossy()).unwrap();
+
+        // 一个资金账户 + 一条已登记加密附件 + 一个磁盘孤儿文件
+        conn.execute(
+            "INSERT INTO fund_accounts
+                (account_code, name, account_type, gl_account_code, opening_balance,
+                 strict_reconciliation, created_at, updated_at)
+             VALUES ('BANK-DS', '数据安全测试户', 'bank', '1002', 0, 1, 'now', 'now')",
+            [],
+        )
+        .unwrap();
+        let att_dir = app_dir
+            .join(ATTACHMENT_DIR)
+            .join("fund_document")
+            .join("2026-08");
+        fs::create_dir_all(&att_dir).unwrap();
+        let referenced = att_dir.join("20260905130000_doc.pdf");
+        fs::write(&referenced, b"cipher").unwrap();
+        let orphan = att_dir.join("20260905130001_orphan.pdf");
+        fs::write(&orphan, b"orphan").unwrap();
+        conn.execute(
+            "INSERT INTO business_attachments
+                (entity_type, entity_id, file_name, file_path, encrypted, file_size, belong_month, uploaded_by, created_at)
+             VALUES ('fund_document', 1, 'doc.pdf', ?1, 1, 6, '2026-08', NULL, 'now')",
+            params![referenced.to_string_lossy()],
+        )
+        .unwrap();
+
+        let status = get_status(&conn, &app_dir).unwrap();
+
+        // 资金表计数进入 table_counts
+        let fund_count = status
+            .table_counts
+            .iter()
+            .find(|t| t.table_name == "fund_accounts")
+            .expect("table_counts 应包含 fund_accounts");
+        assert_eq!(fund_count.count, 1);
+        assert!(status
+            .table_counts
+            .iter()
+            .any(|t| t.table_name == "fund_documents"));
+
+        // 附件统计：总数 / 加密 / 孤儿 / 缺失
+        assert_eq!(status.attachment_count, 1);
+        assert_eq!(status.attachment_encrypted_count, 1);
+        assert_eq!(status.attachment_orphan_count, 1, "磁盘孤儿文件应统计");
+        assert_eq!(status.attachment_missing_count, 0);
+
+        // 迁移状态（init_db 自动迁移完成）
+        assert_eq!(status.stage7_migration_status.as_deref(), Some("done"));
+        assert_eq!(status.stage7_pending_count, Some(0));
+
+        // 引用文件被删 → 缺失统计 +1
+        fs::remove_file(&referenced).unwrap();
+        let status = get_status(&conn, &app_dir).unwrap();
+        assert_eq!(status.attachment_missing_count, 1);
 
         let _ = fs::remove_dir_all(app_dir);
     }

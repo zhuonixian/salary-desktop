@@ -835,6 +835,44 @@ pub fn export_month_close_package_to_dir(
         files.push(batch_file.to_string_lossy().to_string());
     }
 
+    // ---- 第七阶段月结包扩展（spec 8 导出联动，Task 16）----
+    // 资金日记账：每个启用账户一份（当月区间，期初滚入由 get_fund_journal 处理）
+    let fund_accounts = cashier::get_fund_accounts(
+        conn,
+        &FundAccountQuery {
+            is_active: Some(true),
+            ..Default::default()
+        },
+    )?;
+    for account in &fund_accounts {
+        let journal = cashier::get_fund_journal(
+            conn,
+            &FundJournalQuery {
+                fund_account_id: account.id,
+                from_month: Some(month.to_string()),
+                to_month: Some(month.to_string()),
+            },
+        )?;
+        let journal_file = output_dir.join(format!("{month}_资金日记账_{}.xlsx", account.name));
+        excel::export_fund_journal_excel(&journal, &journal_file.to_string_lossy())?;
+        files.push(journal_file.to_string_lossy().to_string());
+    }
+
+    // 余额调节表：当月已生成快照的账户（未生成的账户不产出空表）
+    let periods = cashier::list_bank_reconciliation_periods(conn, None, Some(month))?;
+    for period in &periods {
+        let account_name = period.fund_account_name.clone().unwrap_or_default();
+        let period_file = output_dir.join(format!("{month}_余额调节表_{account_name}.xlsx"));
+        excel::export_bank_reconciliation_excel(period, &period_file.to_string_lossy())?;
+        files.push(period_file.to_string_lossy().to_string());
+    }
+
+    // 借款台账：员工借款余额与账龄（全局口径，逾期与单月无关）
+    let ledger = cashier::get_advance_ledger(conn, &AdvanceLedgerQuery::default())?;
+    let ledger_file = output_dir.join(format!("{month}_借款台账.xlsx"));
+    excel::export_advance_ledger_excel(&ledger, &ledger_file.to_string_lossy())?;
+    files.push(ledger_file.to_string_lossy().to_string());
+
     let manifest_path = output_dir.join("manifest.json");
     let result_files = files.clone();
     let manifest = serde_json::json!({
@@ -1912,7 +1950,10 @@ pub fn submit_reimbursement_claim(
     db::log_operation(
         &conn,
         "submit_reimbursement",
-        &format!("提交报销单 {} 金额 {:.2}", claim.claim_no, claim.total_amount),
+        &format!(
+            "提交报销单 {} 金额 {:.2}",
+            claim.claim_no, claim.total_amount
+        ),
         &cashier::current_operator_name(&conn, &current),
         Some(&format!("claim_id={id}")),
     )?;
@@ -3091,6 +3132,7 @@ mod tests {
             "2026-08_报销清单.xlsx",
             "2026-08_GZ202608TEST_付款明细.xlsx",
             "2026-08_BX202608TEST_付款明细.xlsx",
+            "2026-08_借款台账.xlsx",
             "manifest.json",
         ];
         for file_name in expected {
@@ -3104,6 +3146,52 @@ mod tests {
         assert!(manifest.contains("2026-08_报销清单.xlsx"));
         assert!(manifest.contains("2026-08_GZ202608TEST_付款明细.xlsx"));
         assert!(manifest.contains("2026-08_BX202608TEST_付款明细.xlsx"));
+
+        drop(conn);
+        let _ = fs::remove_dir_all(app_dir);
+        let _ = fs::remove_dir_all(output_root);
+    }
+
+    /// Task 16（spec 8 导出联动）：月结包必须包含资金日记账、余额调节表与借款台账
+    /// （通用付款批次已由已付款批次循环覆盖）。
+    #[test]
+    fn test_export_month_close_package_includes_fund_files() {
+        let app_dir = temp_dir("app-data-fund");
+        let output_root = temp_dir("package-output-fund");
+        let conn = setup_closed_month_package_db(&app_dir);
+
+        conn.execute_batch(
+            "
+            INSERT INTO fund_accounts
+                (account_code, name, account_type, gl_account_code, opening_balance,
+                 is_active, strict_reconciliation, created_at, updated_at)
+             VALUES ('BANK-PKG', '套餐测试户', 'bank', '1002', 10000, 1, 1, '2026-08-01', '2026-08-01');
+            INSERT INTO bank_reconciliation_periods
+                (fund_account_id, belong_month, status, confirmed_by, confirmed_at, created_at, updated_at)
+             VALUES (1, '2026-08', 'confirmed', '测试', '2026-08-31T10:00:00+00:00',
+                     '2026-08-31T10:00:00+00:00', '2026-08-31T10:00:00+00:00');
+            INSERT INTO fund_documents
+                (document_no, document_type, belong_month, document_date, amount, summary,
+                 status, employee_id, due_date, created_at, updated_at)
+             VALUES ('JK20260801', 'advance', '2026-08', '2026-08-05', 600, '备用金',
+                     'approved', 1, '2026-08-31', '2026-08-05', '2026-08-05');
+            ",
+        )
+        .unwrap();
+
+        let result =
+            export_month_close_package_to_dir(&conn, "2026-08", &output_root.to_string_lossy())
+                .unwrap();
+
+        let expected = [
+            "2026-08_资金日记账_套餐测试户.xlsx",
+            "2026-08_余额调节表_套餐测试户.xlsx",
+            "2026-08_借款台账.xlsx",
+        ];
+        for file_name in expected {
+            let path = PathBuf::from(&result.output_dir).join(file_name);
+            assert!(path.exists(), "月结包缺少资金文件: {}", path.display());
+        }
 
         drop(conn);
         let _ = fs::remove_dir_all(app_dir);

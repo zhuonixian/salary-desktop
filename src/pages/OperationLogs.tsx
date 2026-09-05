@@ -116,23 +116,19 @@ const OperationLogs: React.FC = () => {
     return values.map((value) => ({ value, label: getOperationLabel(value) }));
   }, [logs]);
 
-  // 后端 query_operation_logs 暂无 operator 精确筛选参数，
-  // 操作人下拉对当前已加载结果做前端过滤（数据源仍是后端查询结果）。
+  // 操作人下拉选项从当前已加载结果收集；筛选本身由后端 operator 参数精确过滤
+  // （Task 4 挂账承接：替代原前端过滤，消除 limit 截断盲区）。
   const operatorOptions = useMemo(() => {
     const values = Array.from(new Set(logs.map((log) => log.operator).filter(Boolean))) as string[];
     return values.map((value) => ({ value, label: value }));
   }, [logs]);
-
-  const displayLogs = useMemo(
-    () => (operatorFilter ? logs.filter((log) => log.operator === operatorFilter) : logs),
-    [logs, operatorFilter],
-  );
 
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
       const query: OperationLogQuery = {
         operation_type: operationType,
+        operator: operatorFilter,
         keyword: keyword || undefined,
         start_date: range?.[0]?.startOf('day').toISOString(),
         end_date: range?.[1]?.endOf('day').toISOString(),
@@ -144,7 +140,7 @@ const OperationLogs: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [operationType, keyword, range]);
+  }, [operationType, operatorFilter, keyword, range]);
 
   useEffect(() => {
     fetchData();
@@ -217,7 +213,7 @@ const OperationLogs: React.FC = () => {
         <Table
           rowKey="id"
           columns={columns}
-          dataSource={displayLogs}
+          dataSource={logs}
           loading={loading}
           size="small"
           pagination={{ pageSize: 30, showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
