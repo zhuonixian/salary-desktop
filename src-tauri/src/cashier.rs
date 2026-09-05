@@ -2641,8 +2641,9 @@ pub fn reverse_fund_document(
 
 /// 校验借款核销分摊（spec 4.11）：
 /// - 必须关联至少一笔借款单，分摊合计与核销单金额一致；
+/// - 同一张核销单不能重复关联同一笔借款（逐条校验会各自通过、合计击穿上限）；
 /// - 借款单必须已发放（settled，凭证已借记 1221）且员工一致；
-/// - 单笔借款的累计核销（active links 合计 + 本次）不得超过借款金额（容差 0.005）；
+/// - 单笔借款的累计核销（active links 合计 + 本次聚合额）不得超过借款金额（容差 0.005）；
 /// - 一次核销关联的借款单对方科目必须一致（贷方单行出账）。
 /// `exclude_settlement_id`：更新草稿单时排除自身已有关联。
 fn validate_advance_allocations(
@@ -2665,6 +2666,16 @@ fn validate_advance_allocations(
             "核销关联金额合计 {allocated:.2} 与单据金额 {:.2} 不一致",
             input.amount
         )));
+    }
+    // 同单去重（先于逐条校验）：同一借款出现多条分摊时，本单未落库、
+    // 逐条的 already 均为 0 会各自通过，合计却能击穿借款上限——直接拦截
+    let mut per_advance: std::collections::HashMap<i64, f64> = std::collections::HashMap::new();
+    for alloc in allocs {
+        if per_advance.insert(alloc.advance_id, alloc.amount).is_some() {
+            return Err(AppError::InvalidParam(
+                "同一张核销单不能重复关联同一笔借款，请合并为一行分摊".into(),
+            ));
+        }
     }
     for alloc in allocs {
         if alloc.amount < AMOUNT_TOLERANCE {
@@ -2695,17 +2706,21 @@ fn validate_advance_allocations(
                 "借款单 {doc_no} 的员工与核销单不一致，不能核销他人借款"
             )));
         }
-        // 不得重复核销：累计 active 核销 + 本次 ≤ 借款金额
+        // 不得重复核销：累计 active 核销 + 本次聚合额 ≤ 借款金额
         let already: f64 = conn.query_row(
             "SELECT COALESCE(SUM(allocated_amount), 0) FROM advance_settlement_links
              WHERE advance_id = ?1 AND status = 'active' AND settlement_id != ?2",
             params![alloc.advance_id, exclude_settlement_id.unwrap_or(-1)],
             |r| r.get(0),
         )?;
-        if already + alloc.amount > amount + AMOUNT_TOLERANCE {
+        let alloc_amount = per_advance
+            .get(&alloc.advance_id)
+            .copied()
+            .unwrap_or(alloc.amount);
+        if already + alloc_amount > amount + AMOUNT_TOLERANCE {
             return Err(AppError::InvalidParam(format!(
                 "借款单 {doc_no} 累计核销 {:.2} 将超过借款金额 {:.2}（未核销余额 {:.2}）",
-                already + alloc.amount,
+                already + alloc_amount,
                 amount,
                 (amount - already).max(0.0)
             )));
@@ -9791,6 +9806,62 @@ mod tests {
         assert!(row.outstanding_amount.abs() < AMOUNT_TOLERANCE);
         assert_eq!(row.aging_bucket, "已结清");
         assert_eq!(row.overdue_days, 0);
+    }
+
+    /// 同单重复关联同一借款必须拦截（逐条校验各自通过、合计击穿借款上限），
+    /// 合法的一单关联多笔不同借款仍应通过
+    #[test]
+    fn test_advance_settlement_same_document_duplicate_link_blocked() {
+        let (conn, current) = fund_doc_env();
+        let fx = setup_doc_fixtures(&conn);
+
+        // 两笔员工1 已发放借款：loan_a 1000、loan_b 700
+        let mut loan_a_input = advance_input(&fx);
+        loan_a_input.amount = 1000.0;
+        let loan_a = settled_document(&conn, &current, &loan_a_input);
+        let mut loan_b_input = advance_input(&fx);
+        loan_b_input.amount = 700.0;
+        let loan_b = settled_document(&conn, &current, &loan_b_input);
+
+        // 同一单内重复关联 loan_a：单金额 1400 = 700+700，逐条看 700 ≤ 1000 各自通过、
+        // 合计却超过借款 1000——必须直接拦截
+        let mut dup = settlement_mode_input(&fx, loan_a.id, 700.0, "cash_return");
+        dup.amount = 1400.0;
+        dup.advance_allocations = Some(vec![
+            AdvanceAllocationInput {
+                advance_id: loan_a.id,
+                amount: 700.0,
+            },
+            AdvanceAllocationInput {
+                advance_id: loan_a.id,
+                amount: 700.0,
+            },
+        ]);
+        let err = create_fund_document(&conn, &current, &dup)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("重复关联"),
+            "应拦截同单重复关联同一借款：{err}"
+        );
+        // 校验失败不得留下半截核销关系
+        assert_eq!(active_link_count(&conn, loan_a.id), 0);
+
+        // 合法场景：一单 1400 关联两笔不同借款（各 700），应通过且双方都落 active link
+        let mut multi = settlement_mode_input(&fx, loan_a.id, 1400.0, "cash_return");
+        multi.advance_allocations = Some(vec![
+            AdvanceAllocationInput {
+                advance_id: loan_a.id,
+                amount: 700.0,
+            },
+            AdvanceAllocationInput {
+                advance_id: loan_b.id,
+                amount: 700.0,
+            },
+        ]);
+        create_fund_document(&conn, &current, &multi).unwrap();
+        assert_eq!(active_link_count(&conn, loan_a.id), 1);
+        assert_eq!(active_link_count(&conn, loan_b.id), 1);
     }
 
     /// 台账聚合：未清余额、账龄分桶、逾期天数、员工筛选与核销时间线 + Excel 导出

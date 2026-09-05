@@ -136,6 +136,7 @@ const Advances: React.FC = () => {
   const [settlementModalOpen, setSettlementModalOpen] = useState(false);
   const [settlementForm] = Form.useForm<SettlementFormValues>();
   const watchMode = Form.useWatch('settlement_mode', settlementForm);
+  const watchSettleEmployee = Form.useWatch('employee_id', settlementForm);
   const [saving, setSaving] = useState(false);
 
   const [commentAction, setCommentAction] = useState<CommentAction | null>(null);
@@ -213,12 +214,10 @@ const Advances: React.FC = () => {
     const rows = (ledger?.rows ?? []).filter(
       (r) => r.advance_status === 'settled' && r.outstanding_amount > 0.005,
     );
-    const selectedEmp = settlementForm.getFieldValue('employee_id') as number | undefined;
     return rows
-      .filter((r) => !selectedEmp || r.employee_id === selectedEmp)
+      .filter((r) => !watchSettleEmployee || r.employee_id === watchSettleEmployee)
       .map((r) => ({ value: r.advance_id, label: `${r.document_no}（余额 ${fmtMoney(r.outstanding_amount)}）` }));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ledger, settlementModalOpen, settlementForm]);
+  }, [ledger, watchSettleEmployee]);
 
   const submitAdvance = async (values: AdvanceFormValues) => {
     setSaving(true);

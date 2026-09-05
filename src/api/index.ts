@@ -971,6 +971,12 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
         if (Math.abs(allocated - Number(data.amount)) > 0.005) {
           throw new Error('核销关联金额合计与单据金额不一致');
         }
+        // 同单去重：同一借款重复关联时逐条校验各自通过、合计击穿借款上限（与后端同口径）
+        const perAdvance = new Map<number, number>();
+        for (const a of allocs) {
+          if (perAdvance.has(a.advance_id)) throw new Error('同一张核销单不能重复关联同一笔借款');
+          perAdvance.set(a.advance_id, (perAdvance.get(a.advance_id) ?? 0) + Number(a.amount || 0));
+        }
         for (const alloc of allocs) {
           const loan = mockFundDocuments.find((d) => d.id === alloc.advance_id);
           if (!loan || loan.document_type !== 'advance') throw new Error('关联的员工借款单不存在');
@@ -979,7 +985,8 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
           const settledSum = mockAdvanceLinks
             .filter((l) => l.advance_id === loan.id && l.status === 'active')
             .reduce((s, l) => s + l.allocated_amount, 0);
-          if (settledSum + Number(alloc.amount) > loan.amount + 0.005) {
+          const allocAmount = perAdvance.get(alloc.advance_id) ?? Number(alloc.amount);
+          if (settledSum + allocAmount > loan.amount + 0.005) {
             throw new Error(`借款单 ${loan.document_no} 累计核销超过借款金额`);
           }
         }
