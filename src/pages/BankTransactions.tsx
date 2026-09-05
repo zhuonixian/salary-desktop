@@ -57,6 +57,7 @@ import {
 import SensitiveText from '@/components/SensitiveText';
 import { SensitiveStatistic } from '@/components/SensitiveStatistic';
 import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
+import { useSecurity } from '@/contexts/SecurityContext';
 import type {
   BankAllocationBatchResult,
   BankAllocationCandidate,
@@ -567,6 +568,7 @@ const ReconciliationPeriodsPanel: React.FC<{
   onAccountChange: (id?: number) => void;
   onGoWorkbench: () => void;
 }> = ({ month, accounts, accountId, onAccountChange, onGoWorkbench }) => {
+  const { isSensitiveRevealed } = useSecurity();
   const [periods, setPeriods] = useState<BankReconciliationPeriod[]>([]);
   const [loading, setLoading] = useState(false);
   const [openingOverride, setOpeningOverride] = useState<number | null>(null);
@@ -635,6 +637,10 @@ const ReconciliationPeriodsPanel: React.FC<{
   };
 
   const handleExport = async (period: BankReconciliationPeriod) => {
+    if (!isSensitiveRevealed) {
+      message.warning('敏感导出需先解锁敏感数据');
+      return;
+    }
     const target = await save({
       defaultPath: `银行余额调节表_${period.fund_account_name ?? ''}_${period.belong_month.replace('-', '')}.xlsx`,
       filters: [{ name: '余额调节表', extensions: ['xlsx'] }],
@@ -746,9 +752,17 @@ const ReconciliationPeriodsPanel: React.FC<{
               确认
             </Button>
           </Popconfirm>
-          <Button size="small" type="link" loading={exportingId === r.id} onClick={() => void handleExport(r)}>
-            导出
-          </Button>
+          <Tooltip title={isSensitiveRevealed ? '' : '敏感导出需先在页面中解锁敏感数据'}>
+            <Button
+              size="small"
+              type="link"
+              disabled={!isSensitiveRevealed}
+              loading={exportingId === r.id}
+              onClick={() => void handleExport(r)}
+            >
+              导出
+            </Button>
+          </Tooltip>
         </Space>
       ),
     },

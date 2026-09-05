@@ -3974,6 +3974,8 @@ fn resolve_statement_balance(
 /// 对账单余额来源：入参覆盖（导入流水无余额列或期初衔接修正时由前端传入）优先；
 /// 否则按 (交易日期, id) 排序用流水 `balance` 列推算（期初=首行余额−首行收入+首行支出，
 /// 期末=末行余额）；当月无流水时结转上一确认期期末；再无则 0。
+///
+/// 月结保护：已正式月结月份拦截生成（重新生成会把 confirmed 快照拉回 draft，属数据改写）。
 pub fn generate_bank_reconciliation_period(
     conn: &Connection,
     fund_account_id: i64,
@@ -3985,6 +3987,7 @@ pub fn generate_bank_reconciliation_period(
     if month.len() != 7 || month.as_bytes().get(4) != Some(&b'-') {
         return Err(AppError::InvalidParam("月份格式应为 YYYY-MM".into()));
     }
+    ensure_month_open(conn, month)?;
     let account = get_fund_account(conn, fund_account_id)?;
 
     // 账面期末：账户期初 + ≤当月 active 资金分录净额（与日记账口径一致，可复算）
@@ -4305,6 +4308,7 @@ pub fn list_bank_reconciliation_periods(
 /// 确认余额调节表（spec 4.10 确认条件，全部通过才落 confirmed）：
 /// 1) 调节后两侧差额 < 0.005；2) 对账单期初与上一确认期期末衔接；3) 当月无待归集流水。
 /// 已确认期间重复确认幂等返回原快照，不重复写确认信息。
+/// 月结保护：已正式月结月份拦截 draft→confirmed（幂等回读不受影响，参照核销取消的用法）。
 pub fn confirm_bank_reconciliation_period(
     conn: &Connection,
     id: i64,
@@ -4314,6 +4318,8 @@ pub fn confirm_bank_reconciliation_period(
     if period.status == "confirmed" {
         return Ok(period);
     }
+    // 月结保护按调节表归属月份控制（幂等回读已提前返回，不影响已确认快照）
+    ensure_month_open(conn, &period.belong_month)?;
 
     // 门槛 1：调节后差额
     if period.difference.abs() > AMOUNT_TOLERANCE {
@@ -8562,6 +8568,36 @@ mod tests {
         let regenerated =
             generate_bank_reconciliation_period(&conn, acc, "2026-07", None, None).unwrap();
         assert_eq!(regenerated.status, "draft", "重新生成应回到 draft");
+    }
+
+    /// 已正式月结月份：生成/重新生成与确认调节表均被拦截，快照状态不被改动（Fix Round 1）
+    #[test]
+    fn test_bank_reconciliation_period_month_close_guard() {
+        let (conn, acc) = alloc_env();
+
+        // 月结前先生成一份 draft 快照，供确认路径拦截验证
+        let draft = generate_bank_reconciliation_period(&conn, acc, "2026-08", None, None).unwrap();
+        assert_eq!(draft.status, "draft");
+
+        close_month_direct(&conn, "2026-08");
+
+        let err = generate_bank_reconciliation_period(&conn, acc, "2026-08", None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("已正式月结"),
+            "已月结月份生成调节表应拦截：{err}"
+        );
+
+        let err = confirm_bank_reconciliation_period(&conn, draft.id, "出纳")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("已正式月结"),
+            "已月结月份确认调节表应拦截：{err}"
+        );
+        let still = get_bank_reconciliation_period(&conn, draft.id).unwrap();
+        assert_eq!(still.status, "draft", "被拦截的确认不应改动快照状态");
     }
 
     // ==================== 旧匹配命令退役（Task 13，spec 4.9 双路径防重） ====================
