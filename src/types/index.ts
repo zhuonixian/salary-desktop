@@ -489,6 +489,106 @@ export interface BankAutoMatchResult {
   errors: string[];
 }
 
+// ==================== 银行流水多对多核销（Task 12，spec 4.9/6.2/6.3） ====================
+
+export type BankAllocationStatus = 'active' | 'cancelled';
+export type BankAllocationMethod = 'auto' | 'manual' | 'migrated';
+
+export interface BankReconciliationAllocation {
+  id: number;
+  transaction_id: number;
+  voucher_line_id: number;
+  allocated_amount: number;
+  status: BankAllocationStatus;
+  match_method: BankAllocationMethod;
+  score?: number | null;
+  remark?: string;
+  operator_name?: string;
+  /** 旧 bank_transaction_matches 迁移来源（spec 9.4） */
+  legacy_match_id?: number | null;
+  created_at: string;
+  updated_at: string;
+  voucher_id: number;
+  voucher_no: string;
+  voucher_date: string;
+  voucher_belong_month: string;
+  voucher_status: string;
+  account_code: string;
+  line_debit_amount: number;
+  line_credit_amount: number;
+  line_summary?: string;
+  fund_account_id?: number | null;
+}
+
+export interface BankAllocationQuery {
+  transaction_id?: number;
+  voucher_line_id?: number;
+  belong_month?: string;
+  status?: BankAllocationStatus;
+}
+
+export interface BankAllocationInput {
+  transaction_id: number;
+  voucher_line_id: number;
+  allocated_amount: number;
+  score?: number | null;
+  remark?: string;
+}
+
+export interface BankAllocationCandidate {
+  voucher_line_id: number;
+  voucher_id: number;
+  voucher_no: string;
+  voucher_date: string;
+  belong_month: string;
+  source_type: string;
+  source_id: number;
+  account_code: string;
+  line_summary?: string;
+  debit_amount: number;
+  credit_amount: number;
+  remaining_amount: number;
+  score: number;
+  score_reasons: string[];
+}
+
+export interface BankAutoMatchPreviewItem {
+  transaction_id: number;
+  transaction_date: string;
+  belong_month: string;
+  summary?: string;
+  counterparty_name?: string;
+  counterparty_account?: string;
+  income_amount: number;
+  expense_amount: number;
+  remaining_amount: number;
+  fund_account_id: number;
+  fund_account_name?: string | null;
+  candidates: BankAllocationCandidate[];
+}
+
+export interface BankAllocationBatchResult {
+  confirmed: number;
+  skipped: number;
+  errors: string[];
+  allocation_ids: number[];
+}
+
+export interface LegacyBankMatchUnconverted {
+  match_id: number;
+  transaction_id: number;
+  payment_batch_id: number;
+  reason: string;
+}
+
+export interface LegacyBankMatchReport {
+  total: number;
+  active_total: number;
+  migrated: number;
+  already_migrated: number;
+  unconverted: LegacyBankMatchUnconverted[];
+}
+
 // ==================== 银行流水导入预览（Task 11） ====================
 
 export interface BankImportPreviewRow {

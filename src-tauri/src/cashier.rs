@@ -3078,6 +3078,719 @@ fn ensure_fund_document_attachment_editable(document_id: i64, status: &str) -> A
     }
 }
 
+// ==================== 银行流水多对多核销引擎（Task 12，spec 4.9/6.2/6.3） ====================
+
+/// 自动匹配默认日期窗口（spec 6.3「日期在配置窗口内」；可用 app_settings 键
+/// `bank_match_date_window_days` 覆盖，缺省 90 天。人工候选预览不设硬窗口，仅作评分因子）
+const BANK_MATCH_DATE_WINDOW_DAYS_DEFAULT: i64 = 90;
+
+/// 自动匹配默认置信线：批量确认只写入达到该分数的候选（spec 6.2 不自动写低置信匹配）
+const BANK_MATCH_MIN_SCORE_DEFAULT: i32 = 60;
+
+/// 流水收支方向（spec 6.2 硬条件：收流水核借方分录、付流水核贷方分录）。
+/// 零金额或收支并存的流水方向不明确，不能核销。
+fn bank_tx_direction(income: f64, expense: f64) -> AppResult<(&'static str, f64)> {
+    let income_on = income > AMOUNT_TOLERANCE;
+    let expense_on = expense > AMOUNT_TOLERANCE;
+    match (income_on, expense_on) {
+        (true, false) => Ok(("income", income)),
+        (false, true) => Ok(("expense", expense)),
+        _ => Err(AppError::InvalidParam(
+            "流水收支方向不明确（零金额或收支并存），不能核销".into(),
+        )),
+    }
+}
+
+/// 流水核心字段（引擎内部轻量读取，避免全表联表扫描）
+struct BankTxCore {
+    id: i64,
+    belong_month: String,
+    transaction_date: String,
+    summary: Option<String>,
+    counterparty_name: Option<String>,
+    counterparty_account: Option<String>,
+    income_amount: f64,
+    expense_amount: f64,
+    status: String,
+    fund_account_id: Option<i64>,
+    fund_account_name: Option<String>,
+}
+
+fn get_bank_tx_core(conn: &Connection, id: i64) -> AppResult<BankTxCore> {
+    conn.query_row(
+        "SELECT t.id, t.belong_month, t.transaction_date, t.summary, t.counterparty_name,
+                t.counterparty_account, t.income_amount, t.expense_amount, t.status,
+                t.fund_account_id, fa.name
+         FROM bank_transactions t
+         LEFT JOIN fund_accounts fa ON fa.id = t.fund_account_id
+         WHERE t.id = ?1",
+        params![id],
+        |r| {
+            Ok(BankTxCore {
+                id: r.get(0)?,
+                belong_month: r.get(1)?,
+                transaction_date: r.get(2)?,
+                summary: r.get(3)?,
+                counterparty_name: r.get(4)?,
+                counterparty_account: r.get(5)?,
+                income_amount: r.get(6)?,
+                expense_amount: r.get(7)?,
+                status: r.get(8)?,
+                fund_account_id: r.get(9)?,
+                fund_account_name: r.get(10)?,
+            })
+        },
+    )
+    .optional()?
+    .ok_or_else(|| AppError::NotFound(format!("银行流水 ID={id} 不存在")))
+}
+
+/// 流水侧已核销额 = active allocation 合计 + 未迁移的 active 旧式批次匹配合计
+/// （旧匹配金额=批次额，confirm_bank_transaction_match 校验与流水支出相等）。
+/// 已迁移的旧匹配由其 allocation 接管计量，不再重复计入，保证迁移过渡期金额守恒。
+fn bank_tx_allocated(conn: &Connection, transaction_id: i64) -> AppResult<f64> {
+    let allocations: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(allocated_amount),0) FROM bank_reconciliation_allocations
+         WHERE transaction_id = ?1 AND status = 'active'",
+        params![transaction_id],
+        |r| r.get(0),
+    )?;
+    let legacy: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(b.total_amount),0) FROM bank_transaction_matches m
+         JOIN payment_batches b ON b.id = m.payment_batch_id
+         WHERE m.transaction_id = ?1 AND m.status = 'active'
+           AND NOT EXISTS (SELECT 1 FROM bank_reconciliation_allocations a
+                           WHERE a.legacy_match_id = m.id)",
+        params![transaction_id],
+        |r| r.get(0),
+    )?;
+    Ok(allocations + legacy)
+}
+
+/// 分录侧已核销额（仅 active allocation；旧式匹配不指向具体分录，不参与分录侧计量）
+fn bank_line_allocated(conn: &Connection, voucher_line_id: i64) -> AppResult<f64> {
+    let sum: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(allocated_amount),0) FROM bank_reconciliation_allocations
+         WHERE voucher_line_id = ?1 AND status = 'active'",
+        params![voucher_line_id],
+        |r| r.get(0),
+    )?;
+    Ok(sum)
+}
+
+/// 候选资金分录核心字段
+struct BankLineCore {
+    voucher_line_id: i64,
+    voucher_id: i64,
+    voucher_no: String,
+    voucher_date: String,
+    belong_month: String,
+    source_type: String,
+    source_id: i64,
+    account_code: String,
+    line_summary: Option<String>,
+    debit_amount: f64,
+    credit_amount: f64,
+}
+
+/// 查询某账户某方向的 active 资金分录（借方=钱进来，贷方=钱出去）
+fn query_bank_fund_lines(
+    conn: &Connection,
+    account_id: i64,
+    direction: &str,
+) -> AppResult<Vec<BankLineCore>> {
+    let side_cond = if direction == "income" {
+        "vl.debit_amount > 0"
+    } else {
+        "vl.credit_amount > 0"
+    };
+    let sql = format!(
+        "SELECT vl.id, v.id, v.voucher_no, v.voucher_date, v.belong_month, v.source_type,
+                v.source_id, vl.account_code, vl.summary, vl.debit_amount, vl.credit_amount
+         FROM voucher_lines vl
+         JOIN vouchers v ON v.id = vl.voucher_id
+         WHERE v.status = 'active' AND vl.fund_account_id = ?1 AND {side_cond}
+         ORDER BY v.voucher_date, v.id, vl.line_order"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(params![account_id], |r| {
+            Ok(BankLineCore {
+                voucher_line_id: r.get(0)?,
+                voucher_id: r.get(1)?,
+                voucher_no: r.get(2)?,
+                voucher_date: r.get(3)?,
+                belong_month: r.get(4)?,
+                source_type: r.get(5)?,
+                source_id: r.get(6)?,
+                account_code: r.get(7)?,
+                line_summary: r.get(8)?,
+                debit_amount: r.get(9)?,
+                credit_amount: r.get(10)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// 文本 2 字滑窗交集（中英混排的宽松摘要关键词命中）
+fn bigram_overlap(a: &str, b: &str) -> bool {
+    let a_chars: Vec<char> = a.chars().collect();
+    let grams: std::collections::HashSet<Vec<char>> =
+        a_chars.windows(2).map(|w| w.to_vec()).collect();
+    if grams.is_empty() {
+        return false;
+    }
+    let b_chars: Vec<char> = b.chars().collect();
+    b_chars.windows(2).any(|w| grams.contains(&w.to_vec()))
+}
+
+/// 日期距离（自然日；解析失败返回 None，不参与日期评分）
+fn date_distance(a: &str, b: &str) -> Option<i64> {
+    let pa = NaiveDate::parse_from_str(a, "%Y-%m-%d").ok()?;
+    let pb = NaiveDate::parse_from_str(b, "%Y-%m-%d").ok()?;
+    Some((pa - pb).num_days().abs())
+}
+
+/// 自动匹配日期窗口（spec 6.3「配置窗口」，app_settings 可覆盖）
+fn bank_match_date_window_days(conn: &Connection) -> i64 {
+    db::get_setting(conn, "bank_match_date_window_days")
+        .ok()
+        .flatten()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .filter(|d| *d > 0)
+        .unwrap_or(BANK_MATCH_DATE_WINDOW_DAYS_DEFAULT)
+}
+
+/// spec 6.3 评分（0-100）：金额一致 / 凭证号·单号 / 对方户名 / 账号尾号 / 摘要关键词 / 日期距离。
+/// 返回 (分数, 因子说明)，说明供前端解释展示。
+fn score_bank_candidate(
+    tx: &BankTxCore,
+    tx_remaining: f64,
+    line: &BankLineCore,
+    line_remaining: f64,
+) -> (i32, Vec<String>) {
+    let mut score = 0i32;
+    let mut reasons: Vec<String> = Vec::new();
+
+    if (tx_remaining - line_remaining).abs() <= AMOUNT_TOLERANCE {
+        score += 40;
+        reasons.push("金额完全一致 +40".into());
+    } else {
+        score += 10;
+        reasons.push("金额部分吻合 +10".into());
+    }
+
+    let tx_text = format!(
+        "{} {}",
+        tx.summary.as_deref().unwrap_or(""),
+        tx.counterparty_name.as_deref().unwrap_or("")
+    );
+    if tx_text.trim().chars().count() >= 4 && tx_text.contains(&line.voucher_no) {
+        score += 20;
+        reasons.push("凭证号出现在流水摘要 +20".into());
+    }
+
+    if let Some(cp) = tx
+        .counterparty_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| s.chars().count() >= 2)
+    {
+        if line
+            .line_summary
+            .as_deref()
+            .map(|s| s.contains(cp))
+            .unwrap_or(false)
+        {
+            score += 15;
+            reasons.push("对方户名命中分录摘要 +15".into());
+        }
+    }
+
+    if let Some(acc) = tx
+        .counterparty_account
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| s.chars().count() >= 4)
+    {
+        let tail: String = acc
+            .chars()
+            .rev()
+            .take(4)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        if line
+            .line_summary
+            .as_deref()
+            .map(|s| s.contains(&tail))
+            .unwrap_or(false)
+        {
+            score += 10;
+            reasons.push("账号尾号命中分录摘要 +10".into());
+        }
+    }
+
+    if let (Some(a), Some(b)) = (tx.summary.as_deref(), line.line_summary.as_deref()) {
+        if bigram_overlap(a, b) {
+            score += 10;
+            reasons.push("摘要关键词命中 +10".into());
+        }
+    }
+
+    match date_distance(&tx.transaction_date, &line.voucher_date) {
+        Some(0) => {
+            score += 5;
+            reasons.push("同日 +5".into());
+        }
+        Some(d) if d <= 7 => {
+            score += 3;
+            reasons.push("日期相差 7 日内 +3".into());
+        }
+        Some(d) => reasons.push(format!("日期相差 {d} 日 +0")),
+        None => {}
+    }
+
+    (score.min(100), reasons)
+}
+
+/// 构建单条流水的核销预览（候选 = active 凭证、同账户、方向相符且有未核销余额的分录）
+fn build_bank_preview_item(
+    conn: &Connection,
+    tx: BankTxCore,
+) -> AppResult<BankAutoMatchPreviewItem> {
+    let account_id = tx.fund_account_id.ok_or_else(|| {
+        AppError::InvalidParam(format!(
+            "银行流水 ID={} 未归集资金账户，请先完成历史归集",
+            tx.id
+        ))
+    })?;
+    let (direction, side_amount) = bank_tx_direction(tx.income_amount, tx.expense_amount)?;
+    let tx_remaining = (side_amount - bank_tx_allocated(conn, tx.id)?).max(0.0);
+
+    let mut candidates: Vec<BankAllocationCandidate> = Vec::new();
+    if tx_remaining > AMOUNT_TOLERANCE && tx.status != "ignored" {
+        for line in query_bank_fund_lines(conn, account_id, direction)? {
+            let side = if direction == "income" {
+                line.debit_amount
+            } else {
+                line.credit_amount
+            };
+            let remaining = (side - bank_line_allocated(conn, line.voucher_line_id)?).max(0.0);
+            if remaining <= AMOUNT_TOLERANCE {
+                continue;
+            }
+            let (score, score_reasons) = score_bank_candidate(&tx, tx_remaining, &line, remaining);
+            candidates.push(BankAllocationCandidate {
+                voucher_line_id: line.voucher_line_id,
+                voucher_id: line.voucher_id,
+                voucher_no: line.voucher_no,
+                voucher_date: line.voucher_date,
+                belong_month: line.belong_month,
+                source_type: line.source_type,
+                source_id: line.source_id,
+                account_code: line.account_code,
+                line_summary: line.line_summary,
+                debit_amount: line.debit_amount,
+                credit_amount: line.credit_amount,
+                remaining_amount: remaining,
+                score,
+                score_reasons,
+            });
+        }
+        candidates.sort_by(|a, b| {
+            b.score
+                .cmp(&a.score)
+                .then_with(|| a.voucher_line_id.cmp(&b.voucher_line_id))
+        });
+    }
+
+    Ok(BankAutoMatchPreviewItem {
+        transaction_id: tx.id,
+        transaction_date: tx.transaction_date,
+        belong_month: tx.belong_month,
+        summary: tx.summary,
+        counterparty_name: tx.counterparty_name,
+        counterparty_account: tx.counterparty_account,
+        income_amount: tx.income_amount,
+        expense_amount: tx.expense_amount,
+        remaining_amount: tx_remaining,
+        fund_account_id: account_id,
+        fund_account_name: tx.fund_account_name,
+        candidates,
+    })
+}
+
+/// 单条流水的候选预览（人工核销用，不设日期硬窗口，窗口仅作评分因子）
+pub fn preview_bank_allocation_candidates(
+    conn: &Connection,
+    transaction_id: i64,
+) -> AppResult<BankAutoMatchPreviewItem> {
+    let tx = get_bank_tx_core(conn, transaction_id)?;
+    build_bank_preview_item(conn, tx)
+}
+
+/// 自动匹配预览（spec 6.2/6.3）：只返回候选与 score，绝不写库。
+/// 在人工候选硬条件之上追加自动窗口：日期距离 ≤ 配置窗口（spec 6.3 硬条件）。
+pub fn preview_bank_auto_matches(
+    conn: &Connection,
+    month: &str,
+) -> AppResult<Vec<BankAutoMatchPreviewItem>> {
+    let window = bank_match_date_window_days(conn);
+    let tx_ids: Vec<i64> = conn
+        .prepare(
+            "SELECT id FROM bank_transactions
+             WHERE belong_month = ?1 AND status != 'ignored' AND fund_account_id IS NOT NULL
+             ORDER BY transaction_date, id",
+        )?
+        .query_map(params![month], |r| r.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut items: Vec<BankAutoMatchPreviewItem> = Vec::new();
+    for id in tx_ids {
+        let tx = get_bank_tx_core(conn, id)?;
+        let mut item = build_bank_preview_item(conn, tx)?;
+        item.candidates.retain(|c| {
+            date_distance(&item.transaction_date, &c.voucher_date)
+                .map(|d| d <= window)
+                .unwrap_or(false)
+        });
+        if !item.candidates.is_empty() {
+            items.push(item);
+        }
+    }
+    items.sort_by(|a, b| {
+        let best_a = a.candidates.first().map(|c| c.score).unwrap_or(0);
+        let best_b = b.candidates.first().map(|c| c.score).unwrap_or(0);
+        best_b
+            .cmp(&best_a)
+            .then_with(|| a.transaction_id.cmp(&b.transaction_id))
+    });
+    Ok(items)
+}
+
+/// 单条核销校验与写入（调用方保证在事务内）。
+/// 硬条件（spec 4.9/6.2）：流水未忽略且已归集；分录属 active 凭证且挂资金账户；
+/// 同账户；方向相符；双方累计分配不超额。余额在事务内实时计算。
+fn confirm_one_allocation_in_tx(
+    conn: &Connection,
+    item: &BankAllocationInput,
+    match_method: &str,
+    operator: &str,
+) -> AppResult<i64> {
+    if item.allocated_amount <= 0.0 {
+        return Err(AppError::InvalidParam("核销金额必须为正数".into()));
+    }
+    let t = get_bank_tx_core(conn, item.transaction_id)?;
+    if t.status == "ignored" {
+        return Err(AppError::InvalidParam("已忽略流水不能核销".into()));
+    }
+    let account_id = t
+        .fund_account_id
+        .ok_or_else(|| AppError::InvalidParam("流水未归集资金账户，请先完成历史归集".into()))?;
+    // 月结保护按银行流水月份控制（跨月差异规则，plan Task 12）
+    ensure_month_open(conn, &t.belong_month)?;
+    let (direction, side_amount) = bank_tx_direction(t.income_amount, t.expense_amount)?;
+
+    let line = conn
+        .query_row(
+            "SELECT vl.id, vl.debit_amount, vl.credit_amount, vl.fund_account_id,
+                    v.status, v.voucher_no
+             FROM voucher_lines vl JOIN vouchers v ON v.id = vl.voucher_id
+             WHERE vl.id = ?1",
+            params![item.voucher_line_id],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, f64>(1)?,
+                    r.get::<_, f64>(2)?,
+                    r.get::<_, Option<i64>>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or_else(|| {
+            AppError::NotFound(format!("凭证分录 ID={} 不存在", item.voucher_line_id))
+        })?;
+    let (_line_id, line_debit, line_credit, line_account, voucher_status, voucher_no) = line;
+    if voucher_status != "active" {
+        return Err(AppError::InvalidParam(format!(
+            "分录所在凭证 {voucher_no} 已作废，不能核销"
+        )));
+    }
+    let Some(line_account) = line_account else {
+        return Err(AppError::InvalidParam(
+            "分录未挂资金账户辅助核算，不能核销".into(),
+        ));
+    };
+    if line_account != account_id {
+        return Err(AppError::InvalidParam(format!(
+            "跨账户核销拒绝：流水账户({account_id})与分录账户({line_account})不一致"
+        )));
+    }
+    let (line_side_amount, direction_ok) = if direction == "income" {
+        (line_debit, line_debit > 0.0)
+    } else {
+        (line_credit, line_credit > 0.0)
+    };
+    if !direction_ok {
+        return Err(AppError::InvalidParam(format!(
+            "方向不符：{}流水只能核销{}资金分录（凭证 {voucher_no}）",
+            if direction == "income" {
+                "收入"
+            } else {
+                "支出"
+            },
+            if direction == "income" {
+                "借方"
+            } else {
+                "贷方"
+            }
+        )));
+    }
+
+    // 两侧余额守恒校验：累计分配不得超过任一侧可核销余额（spec 4.9）。
+    // 连接由 Mutex 串行化 + 单事务内计算写入，消除并发读写下余额漂移。
+    let tx_remaining = side_amount - bank_tx_allocated(conn, item.transaction_id)?;
+    if tx_remaining + AMOUNT_TOLERANCE < item.allocated_amount {
+        return Err(AppError::InvalidParam(format!(
+            "超出流水可核销余额：剩余 {tx_remaining:.2}，本次 {:.2}",
+            item.allocated_amount
+        )));
+    }
+    let line_remaining = line_side_amount - bank_line_allocated(conn, item.voucher_line_id)?;
+    if line_remaining + AMOUNT_TOLERANCE < item.allocated_amount {
+        return Err(AppError::InvalidParam(format!(
+            "超出分录可核销余额：剩余 {line_remaining:.2}，本次 {:.2}",
+            item.allocated_amount
+        )));
+    }
+
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO bank_reconciliation_allocations
+            (transaction_id, voucher_line_id, allocated_amount, status, match_method,
+             score, remark, operator_name, created_at, updated_at)
+         VALUES (?1, ?2, ?3, 'active', ?4, ?5, ?6, ?7, ?8, ?8)",
+        params![
+            item.transaction_id,
+            item.voucher_line_id,
+            item.allocated_amount,
+            match_method,
+            item.score,
+            item.remark,
+            operator,
+            now
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// 批量确认核销（manual/auto）：整体单事务提交，逐项校验互不阻塞，
+/// 失败项跳过并记入 errors（spec 6.2 批量确认语义：只写入能通过全部硬条件的项）。
+pub fn confirm_bank_allocations(
+    conn: &Connection,
+    items: &[BankAllocationInput],
+    match_method: &str,
+    operator: &str,
+) -> AppResult<BankAllocationBatchResult> {
+    if !matches!(match_method, "manual" | "auto") {
+        return Err(AppError::InvalidParam(
+            "核销方式只允许 manual 或 auto".into(),
+        ));
+    }
+    let tx = conn.unchecked_transaction()?;
+    let mut result = BankAllocationBatchResult {
+        confirmed: 0,
+        skipped: 0,
+        errors: Vec::new(),
+        allocation_ids: Vec::new(),
+    };
+    for item in items {
+        match confirm_one_allocation_in_tx(&tx, item, match_method, operator) {
+            Ok(id) => {
+                result.confirmed += 1;
+                result.allocation_ids.push(id);
+            }
+            Err(e) => {
+                result.skipped += 1;
+                result.errors.push(format!(
+                    "流水{}→分录{}：{e}",
+                    item.transaction_id, item.voucher_line_id
+                ));
+            }
+        }
+    }
+    tx.commit()?;
+    Ok(result)
+}
+
+/// 取消核销（spec 4.9）：状态标记 cancelled（原记录与金额保留可追溯，不物理删除），
+/// 两侧余额随之释放可再核销；月结保护按银行流水月份。
+pub fn cancel_bank_allocation(
+    conn: &Connection,
+    allocation_id: i64,
+    operator: &str,
+) -> AppResult<bool> {
+    let (status, tx_month): (String, String) = conn
+        .query_row(
+            "SELECT a.status, t.belong_month FROM bank_reconciliation_allocations a
+             JOIN bank_transactions t ON t.id = a.transaction_id
+             WHERE a.id = ?1",
+            params![allocation_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+        .ok_or_else(|| AppError::NotFound(format!("核销记录 ID={allocation_id} 不存在")))?;
+    if status != "active" {
+        return Ok(false);
+    }
+    ensure_month_open(conn, &tx_month)?;
+    let now = Utc::now().to_rfc3339();
+    let updated = conn.execute(
+        "UPDATE bank_reconciliation_allocations
+         SET status='cancelled', operator_name=?1, updated_at=?2
+         WHERE id=?3 AND status='active'",
+        params![operator, now, allocation_id],
+    )?;
+    Ok(updated > 0)
+}
+
+/// 核销明细查询（对账页展示与追溯；belong_month 按流水月份过滤）
+pub fn list_bank_allocations(
+    conn: &Connection,
+    query: &BankAllocationQuery,
+) -> AppResult<Vec<BankReconciliationAllocation>> {
+    let mut where_clauses = vec!["1=1".to_string()];
+    let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    let mut idx = 1;
+    if let Some(v) = query.transaction_id {
+        where_clauses.push(format!("a.transaction_id = ?{idx}"));
+        params_vec.push(Box::new(v));
+        idx += 1;
+    }
+    if let Some(v) = query.voucher_line_id {
+        where_clauses.push(format!("a.voucher_line_id = ?{idx}"));
+        params_vec.push(Box::new(v));
+        idx += 1;
+    }
+    if let Some(m) = query
+        .belong_month
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+    {
+        where_clauses.push(format!("t.belong_month = ?{idx}"));
+        params_vec.push(Box::new(m.to_string()));
+        idx += 1;
+    }
+    if let Some(s) = query
+        .status
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        where_clauses.push(format!("a.status = ?{idx}"));
+        params_vec.push(Box::new(s.to_string()));
+    }
+
+    let sql = format!(
+        "SELECT a.id, a.transaction_id, a.voucher_line_id, a.allocated_amount, a.status,
+                a.match_method, a.score, a.remark, a.operator_name, a.legacy_match_id,
+                a.created_at, a.updated_at,
+                v.id, v.voucher_no, v.voucher_date, v.belong_month, v.status,
+                vl.account_code, vl.debit_amount, vl.credit_amount, vl.summary,
+                vl.fund_account_id
+         FROM bank_reconciliation_allocations a
+         JOIN voucher_lines vl ON vl.id = a.voucher_line_id
+         JOIN vouchers v ON v.id = vl.voucher_id
+         JOIN bank_transactions t ON t.id = a.transaction_id
+         WHERE {}
+         ORDER BY a.id DESC",
+        where_clauses.join(" AND ")
+    );
+    let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(params_refs.as_slice(), |r| {
+            Ok(BankReconciliationAllocation {
+                id: r.get(0)?,
+                transaction_id: r.get(1)?,
+                voucher_line_id: r.get(2)?,
+                allocated_amount: r.get(3)?,
+                status: r.get(4)?,
+                match_method: r.get(5)?,
+                score: r.get(6)?,
+                remark: r.get(7)?,
+                operator_name: r.get(8)?,
+                legacy_match_id: r.get(9)?,
+                created_at: r.get(10)?,
+                updated_at: r.get(11)?,
+                voucher_id: r.get(12)?,
+                voucher_no: r.get(13)?,
+                voucher_date: r.get(14)?,
+                voucher_belong_month: r.get(15)?,
+                voucher_status: r.get(16)?,
+                account_code: r.get(17)?,
+                line_debit_amount: r.get(18)?,
+                line_credit_amount: r.get(19)?,
+                line_summary: r.get(20)?,
+                fund_account_id: r.get(21)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// 批量确认自动匹配（spec 6.2/6.3）：只处理「高置信（score ≥ 阈值）且金额两侧相等」
+/// 的最佳候选；候选按分数降序逐条走完整校验，余额被抢先消费的（冲突）自动跳过，
+/// 金额守恒由 confirm_bank_allocations 的余额校验兜底。min_score <= 0 时用默认置信线。
+pub fn batch_confirm_bank_auto_matches(
+    conn: &Connection,
+    month: &str,
+    min_score: i32,
+    operator: &str,
+) -> AppResult<BankAllocationBatchResult> {
+    ensure_month_open(conn, month)?;
+    let threshold = if min_score > 0 {
+        min_score
+    } else {
+        BANK_MATCH_MIN_SCORE_DEFAULT
+    };
+    let items = preview_bank_auto_matches(conn, month)?;
+    let candidate_count = items.len();
+    let mut inputs: Vec<BankAllocationInput> = Vec::new();
+    for item in items {
+        let Some(best) = item.candidates.first() else {
+            continue;
+        };
+        if best.score < threshold {
+            continue;
+        }
+        // 保守策略：只自动确认「流水剩余 = 分录剩余」的全额等量核销，
+        // 部分核销留给人工判断，避免自动写入拆分口径
+        if (item.remaining_amount - best.remaining_amount).abs() > AMOUNT_TOLERANCE {
+            continue;
+        }
+        inputs.push(BankAllocationInput {
+            transaction_id: item.transaction_id,
+            voucher_line_id: best.voucher_line_id,
+            allocated_amount: item.remaining_amount,
+            remark: Some(format!("自动匹配 score={}", best.score)),
+            score: Some(best.score),
+        });
+    }
+    // 预筛阶段跳过（低置信/金额不等）与写入阶段跳过（余额冲突）合并报告
+    let preview_skipped = candidate_count - inputs.len();
+    let mut result = confirm_bank_allocations(conn, &inputs, "auto", operator)?;
+    result.skipped += preview_skipped as i32;
+    Ok(result)
+}
+
 // ==================== 测试 ====================
 
 #[cfg(test)]
@@ -5950,5 +6663,924 @@ mod tests {
             preview_fund_assignment(&conn, "payment_batch", account.id, None, None).is_err(),
             "停用账户不可预览归集"
         );
+    }
+
+    // ==================== 银行流水多对多核销（Task 12，spec 4.9/6.2/6.3） ====================
+
+    /// 直插一张 active/void 凭证 + 一条资金分录（挂指定资金账户），返回分录 id
+    #[allow(clippy::too_many_arguments)]
+    fn insert_fund_line(
+        conn: &Connection,
+        voucher_no: &str,
+        voucher_date: &str,
+        month: &str,
+        source_type: &str,
+        source_id: i64,
+        account_id: i64,
+        debit: f64,
+        credit: f64,
+        summary: &str,
+        status: &str,
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO vouchers (voucher_no, voucher_date, belong_month, source_type, source_id,
+                total_amount, status, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '2026-08-05', '2026-08-05')",
+            params![
+                voucher_no,
+                voucher_date,
+                month,
+                source_type,
+                source_id,
+                debit + credit,
+                status
+            ],
+        )
+        .unwrap();
+        let voucher_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO voucher_lines (voucher_id, account_code, debit_amount, credit_amount,
+                summary, fund_account_id, line_order)
+             VALUES (?1, '1002', ?2, ?3, ?4, ?5, 1)",
+            params![voucher_id, debit, credit, summary, account_id],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    /// 直插一条银行流水，返回流水 id
+    #[allow(clippy::too_many_arguments)]
+    fn insert_tx(
+        conn: &Connection,
+        date: &str,
+        month: &str,
+        summary: &str,
+        counterparty: &str,
+        counter_account: &str,
+        income: f64,
+        expense: f64,
+        account_id: Option<i64>,
+        status: &str,
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO bank_transactions (transaction_date, belong_month, summary,
+                counterparty_name, counterparty_account, income_amount, expense_amount, balance,
+                status, fund_account_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1000, ?8, ?9, '2026-08-05', '2026-08-05')",
+            params![
+                date,
+                month,
+                summary,
+                counterparty,
+                counter_account,
+                income,
+                expense,
+                status,
+                account_id
+            ],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn alloc_input(tx: i64, line: i64, amount: f64) -> BankAllocationInput {
+        BankAllocationInput {
+            transaction_id: tx,
+            voucher_line_id: line,
+            allocated_amount: amount,
+            score: None,
+            remark: None,
+        }
+    }
+
+    /// 单项核销的失败断言：引擎逐项返回结果，单条失败时应 confirmed=0 且错误可读
+    fn confirm_expect_error(conn: &Connection, item: &BankAllocationInput) -> String {
+        let mut r =
+            confirm_bank_allocations(conn, std::slice::from_ref(item), "manual", "出纳").unwrap();
+        assert_eq!(r.confirmed, 0, "不应有成功项：{:?}", r.allocation_ids);
+        assert_eq!(r.errors.len(), 1, "错误明细应有一条：{:?}", r.errors);
+        r.errors.remove(0)
+    }
+
+    fn alloc_env() -> (Connection, i64) {
+        let conn = setup_financial_db();
+        let account =
+            save_fund_account(&conn, &bank_input("BANK-AL", "对账户", "62220088")).unwrap();
+        (conn, account.id)
+    }
+
+    /// 流水剩余可核销额（经单条候选预览回读；无候选时为 0）
+    fn tx_remaining_via_preview(conn: &Connection, tx: i64) -> f64 {
+        let item = preview_bank_allocation_candidates(conn, tx).unwrap();
+        item.candidates
+            .first()
+            .map(|c| c.remaining_amount)
+            .unwrap_or(0.0)
+    }
+
+    /// 一对一部分核销 + 流水侧/分录侧累计超额拦截（spec 4.9）
+    #[test]
+    fn test_allocation_partial_and_overrun_both_sides() {
+        let (conn, acc) = alloc_env();
+        let line = insert_fund_line(
+            &conn,
+            "JZ-AL-001",
+            "2026-08-05",
+            "2026-08",
+            "bank_manual",
+            901,
+            acc,
+            0.0,
+            100.0,
+            "采购付款",
+            "active",
+        );
+        let tx = insert_tx(
+            &conn,
+            "2026-08-06",
+            "2026-08",
+            "采购付款",
+            "供应商甲",
+            "62220001",
+            0.0,
+            100.0,
+            Some(acc),
+            "unmatched",
+        );
+
+        // 部分核销 40：流水侧剩余 60
+        let r = confirm_bank_allocations(&conn, &[alloc_input(tx, line, 40.0)], "manual", "出纳")
+            .unwrap();
+        assert_eq!(r.confirmed, 1);
+        assert_eq!(r.allocation_ids.len(), 1);
+        let remaining = tx_remaining_via_preview(&conn, tx);
+        assert!(
+            (remaining - 60.0).abs() < 0.005,
+            "流水侧剩余应为 60，实际 {remaining}"
+        );
+
+        // 累计超额（流水侧）：40 + 61 > 100 → 拒绝
+        let err = confirm_expect_error(&conn, &alloc_input(tx, line, 61.0));
+        assert!(err.contains("超出"), "流水侧超额应拦截：{err}");
+
+        // 分录侧超额：新流水 200 核销只有 100 余额的分录
+        let tx2 = insert_tx(
+            &conn,
+            "2026-08-07",
+            "2026-08",
+            "大额付款",
+            "供应商甲",
+            "62220001",
+            0.0,
+            200.0,
+            Some(acc),
+            "unmatched",
+        );
+        let err = confirm_expect_error(&conn, &alloc_input(tx2, line, 101.0));
+        assert!(err.contains("超出"), "分录侧超额应拦截：{err}");
+
+        // 合法补足剩余 60 后，两侧余额归零，再核销 1 元被拦
+        confirm_bank_allocations(&conn, &[alloc_input(tx, line, 60.0)], "manual", "出纳").unwrap();
+        assert!(
+            (tx_remaining_via_preview(&conn, tx)).abs() < 0.005,
+            "核销完成后流水侧应无剩余"
+        );
+        let err = confirm_expect_error(&conn, &alloc_input(tx, line, 1.0));
+        assert!(err.contains("超出"), "核销完成后继续核销应拦截：{err}");
+    }
+
+    /// 一对多（一条流水核多条分录）与多对一（多条流水核一条分录）
+    #[test]
+    fn test_allocation_one_to_many_and_many_to_one() {
+        let (conn, acc) = alloc_env();
+        let line_a = insert_fund_line(
+            &conn,
+            "JZ-AL-011",
+            "2026-08-05",
+            "2026-08",
+            "fund_document",
+            11,
+            acc,
+            0.0,
+            60.0,
+            "付款A",
+            "active",
+        );
+        let line_b = insert_fund_line(
+            &conn,
+            "JZ-AL-012",
+            "2026-08-06",
+            "2026-08",
+            "fund_document",
+            12,
+            acc,
+            0.0,
+            40.0,
+            "付款B",
+            "active",
+        );
+        let tx = insert_tx(
+            &conn,
+            "2026-08-07",
+            "2026-08",
+            "合并付款",
+            "供应商乙",
+            "62220002",
+            0.0,
+            100.0,
+            Some(acc),
+            "unmatched",
+        );
+
+        // 一对多：一条 100 的流水拆核 60 + 40
+        let r = confirm_bank_allocations(
+            &conn,
+            &[alloc_input(tx, line_a, 60.0), alloc_input(tx, line_b, 40.0)],
+            "manual",
+            "出纳",
+        )
+        .unwrap();
+        assert_eq!(r.confirmed, 2);
+        assert!(
+            tx_remaining_via_preview(&conn, tx).abs() < 0.005,
+            "一对多核销后流水侧应无剩余"
+        );
+
+        // 多对一：两条流水 30 + 70 合核一条 100 的分录
+        let line_c = insert_fund_line(
+            &conn,
+            "JZ-AL-013",
+            "2026-08-06",
+            "2026-08",
+            "fund_document",
+            13,
+            acc,
+            0.0,
+            100.0,
+            "付款C",
+            "active",
+        );
+        let tx1 = insert_tx(
+            &conn,
+            "2026-08-07",
+            "2026-08",
+            "付款C-1",
+            "供应商丙",
+            "62220003",
+            0.0,
+            30.0,
+            Some(acc),
+            "unmatched",
+        );
+        let tx2 = insert_tx(
+            &conn,
+            "2026-08-08",
+            "2026-08",
+            "付款C-2",
+            "供应商丙",
+            "62220003",
+            0.0,
+            70.0,
+            Some(acc),
+            "unmatched",
+        );
+        let r = confirm_bank_allocations(
+            &conn,
+            &[
+                alloc_input(tx1, line_c, 30.0),
+                alloc_input(tx2, line_c, 70.0),
+            ],
+            "manual",
+            "出纳",
+        )
+        .unwrap();
+        assert_eq!(r.confirmed, 2);
+        // 分录侧余额归零：第三条流水再来核销 1 元被拦
+        let tx3 = insert_tx(
+            &conn,
+            "2026-08-08",
+            "2026-08",
+            "付款C-3",
+            "供应商丙",
+            "62220003",
+            0.0,
+            1.0,
+            Some(acc),
+            "unmatched",
+        );
+        let err = confirm_expect_error(&conn, &alloc_input(tx3, line_c, 1.0));
+        assert!(err.contains("超出"), "分录侧余额耗尽后应拦截：{err}");
+    }
+
+    /// 方向拦截（收核贷/付核借拒绝）+ 跨账户拦截 + 收入流水核借方分录正向通过
+    #[test]
+    fn test_allocation_direction_and_cross_account_blocked() {
+        let (conn, acc) = alloc_env();
+        let other =
+            save_fund_account(&conn, &bank_input("BANK-OTHER", "他行户", "62220099")).unwrap();
+
+        let credit_line = insert_fund_line(
+            &conn,
+            "JZ-AL-021",
+            "2026-08-05",
+            "2026-08",
+            "fund_document",
+            21,
+            acc,
+            0.0,
+            100.0,
+            "支出分录",
+            "active",
+        );
+        let debit_line = insert_fund_line(
+            &conn,
+            "JZ-AL-022",
+            "2026-08-05",
+            "2026-08",
+            "bank_manual",
+            22,
+            acc,
+            100.0,
+            0.0,
+            "收入分录",
+            "active",
+        );
+        let other_line = insert_fund_line(
+            &conn,
+            "JZ-AL-023",
+            "2026-08-05",
+            "2026-08",
+            "fund_document",
+            23,
+            other.id,
+            0.0,
+            100.0,
+            "他行支出分录",
+            "active",
+        );
+
+        // 付流水核借方分录 → 反方向拒绝
+        let pay_tx = insert_tx(
+            &conn,
+            "2026-08-06",
+            "2026-08",
+            "付款",
+            "供应商丁",
+            "62220004",
+            0.0,
+            100.0,
+            Some(acc),
+            "unmatched",
+        );
+        let err = confirm_expect_error(&conn, &alloc_input(pay_tx, debit_line, 100.0));
+        assert!(err.contains("方向"), "付流水核借方分录应拒绝：{err}");
+
+        // 收流水核贷方分录 → 反方向拒绝
+        let income_tx = insert_tx(
+            &conn,
+            "2026-08-06",
+            "2026-08",
+            "收款",
+            "客户甲",
+            "62220005",
+            100.0,
+            0.0,
+            Some(acc),
+            "unmatched",
+        );
+        let err = confirm_expect_error(&conn, &alloc_input(income_tx, credit_line, 100.0));
+        assert!(err.contains("方向"), "收流水核贷方分录应拒绝：{err}");
+
+        // 付流水核其他账户贷方分录 → 跨账户拒绝
+        let err = confirm_expect_error(&conn, &alloc_input(pay_tx, other_line, 100.0));
+        assert!(err.contains("账户"), "跨账户核销应拒绝：{err}");
+
+        // 收流水核借方分录 → 正向通过
+        confirm_bank_allocations(
+            &conn,
+            &[alloc_input(income_tx, debit_line, 100.0)],
+            "manual",
+            "出纳",
+        )
+        .unwrap();
+        assert!(tx_remaining_via_preview(&conn, income_tx).abs() < 0.005);
+    }
+
+    /// 取消核销释放余额、保留原记录可追溯；重复取消幂等、不存在报错
+    #[test]
+    fn test_allocation_cancel_releases_balance_and_keeps_history() {
+        let (conn, acc) = alloc_env();
+        let line = insert_fund_line(
+            &conn,
+            "JZ-AL-031",
+            "2026-08-05",
+            "2026-08",
+            "fund_document",
+            31,
+            acc,
+            0.0,
+            100.0,
+            "付款D",
+            "active",
+        );
+        let tx = insert_tx(
+            &conn,
+            "2026-08-06",
+            "2026-08",
+            "付款D",
+            "供应商戊",
+            "62220006",
+            0.0,
+            100.0,
+            Some(acc),
+            "unmatched",
+        );
+
+        let r = confirm_bank_allocations(&conn, &[alloc_input(tx, line, 100.0)], "manual", "出纳")
+            .unwrap();
+        let allocation_id = r.allocation_ids[0];
+
+        // 取消：状态标记而非物理删除，原金额保留可追溯
+        assert!(cancel_bank_allocation(&conn, allocation_id, "复核人").unwrap());
+        let rows = list_bank_allocations(&conn, &BankAllocationQuery::default()).unwrap();
+        assert_eq!(rows.len(), 1, "取消后原记录应保留");
+        assert_eq!(rows[0].status, "cancelled");
+        assert!(
+            (rows[0].allocated_amount - 100.0).abs() < 0.005,
+            "取消不得篡改原金额"
+        );
+        assert_eq!(rows[0].operator_name.as_deref(), Some("复核人"));
+
+        // 余额释放：流水侧与分录侧均恢复可核销
+        assert!((tx_remaining_via_preview(&conn, tx) - 100.0).abs() < 0.005);
+        let r2 = confirm_bank_allocations(&conn, &[alloc_input(tx, line, 100.0)], "manual", "出纳")
+            .unwrap();
+        assert_eq!(r2.confirmed, 1, "取消后应可重新核销");
+
+        // 重复取消幂等返回 false；不存在报 NotFound
+        assert!(!cancel_bank_allocation(&conn, allocation_id, "复核人").unwrap());
+        assert!(cancel_bank_allocation(&conn, 99999, "复核人").is_err());
+    }
+
+    /// 月结保护：已月结月份流水禁止核销/取消；跨月差异按银行流水月份控制（分录月已结不拦）
+    #[test]
+    fn test_allocation_month_close_protection() {
+        let (conn, acc) = alloc_env();
+        // 分录属于已月结的 2026-07，流水属于未月结的 2026-08 → 按流水月份放行
+        let july_line = insert_fund_line(
+            &conn,
+            "JZ-AL-041",
+            "2026-07-20",
+            "2026-07",
+            "fund_document",
+            41,
+            acc,
+            0.0,
+            50.0,
+            "七月付款",
+            "active",
+        );
+        let tx = insert_tx(
+            &conn,
+            "2026-08-06",
+            "2026-08",
+            "补核销七月付款",
+            "供应商己",
+            "62220007",
+            0.0,
+            50.0,
+            Some(acc),
+            "unmatched",
+        );
+        confirm_bank_allocations(&conn, &[alloc_input(tx, july_line, 50.0)], "manual", "出纳")
+            .unwrap();
+
+        close_month_direct(&conn, "2026-08");
+        // 已月结月份：新增核销与取消核销都拦截
+        let err = confirm_expect_error(&conn, &alloc_input(tx, july_line, 1.0));
+        assert!(err.contains("月结"), "月结后新增核销应拦截：{err}");
+        let rows = list_bank_allocations(&conn, &BankAllocationQuery::default()).unwrap();
+        let err = cancel_bank_allocation(&conn, rows[0].id, "出纳")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("月结"), "月结后取消核销应拦截：{err}");
+    }
+
+    /// 候选过滤（active/同账户/方向相符/有剩余）与评分排序（spec 6.3 因子）
+    #[test]
+    fn test_allocation_candidates_filtering_and_score_order() {
+        let (conn, acc) = alloc_env();
+
+        // 最佳候选：金额与流水完全一致 + 凭证号出现在流水摘要
+        let best = insert_fund_line(
+            &conn,
+            "JZ-AL-051",
+            "2026-08-06",
+            "2026-08",
+            "fund_document",
+            51,
+            acc,
+            0.0,
+            80.0,
+            "货款 供应商庚 尾号8888",
+            "active",
+        );
+        // 次候选：同账户同方向有剩余但金额不一致、无文本因子
+        let worse = insert_fund_line(
+            &conn,
+            "JZ-AL-052",
+            "2026-08-06",
+            "2026-08",
+            "fund_document",
+            52,
+            acc,
+            0.0,
+            55.0,
+            "无关摘要",
+            "active",
+        );
+        // 排除项：借方分录（方向不符）、他账户分录（跨账户）、void 凭证分录
+        let _debit_only = insert_fund_line(
+            &conn,
+            "JZ-AL-053",
+            "2026-08-06",
+            "2026-08",
+            "bank_manual",
+            53,
+            acc,
+            100.0,
+            0.0,
+            "收入分录",
+            "active",
+        );
+        let other_line = insert_fund_line(
+            &conn,
+            "JZ-AL-054",
+            "2026-08-06",
+            "2026-08",
+            "fund_document",
+            54,
+            save_fund_line_account(&conn),
+            0.0,
+            80.0,
+            "他行分录",
+            "active",
+        );
+        let _void_line = insert_fund_line(
+            &conn,
+            "JZ-AL-055",
+            "2026-08-06",
+            "2026-08",
+            "fund_document",
+            55,
+            acc,
+            0.0,
+            80.0,
+            "已作废凭证分录",
+            "void",
+        );
+
+        let tx = insert_tx(
+            &conn,
+            "2026-08-06",
+            "2026-08",
+            "支付 JZ-AL-051 货款 尾号8888",
+            "供应商庚",
+            "62228888",
+            0.0,
+            80.0,
+            Some(acc),
+            "unmatched",
+        );
+
+        let item = preview_bank_allocation_candidates(&conn, tx).unwrap();
+        let ids: Vec<i64> = item.candidates.iter().map(|c| c.voucher_line_id).collect();
+        assert!(ids.contains(&best), "金额一致+凭证号命中应为候选");
+        assert!(ids.contains(&worse), "同账户同方向有剩余应为候选");
+        assert!(!ids.contains(&_debit_only), "方向不符不得入候选");
+        assert!(!ids.contains(&other_line), "跨账户分录不得入候选");
+        assert!(!ids.contains(&_void_line), "void 凭证分录不得入候选");
+
+        // 排序：最佳候选第一，评分降序；因子说明非空
+        assert_eq!(
+            item.candidates[0].voucher_line_id, best,
+            "评分最高者应排第一"
+        );
+        let scores: Vec<i32> = item.candidates.iter().map(|c| c.score).collect();
+        let mut sorted = scores.clone();
+        sorted.sort_unstable_by(|a, b| b.cmp(a));
+        assert_eq!(scores, sorted, "候选应按分数降序");
+        let top = &item.candidates[0];
+        assert!(
+            top.score > item.candidates.last().unwrap().score,
+            "文本/金额因子应拉开分差"
+        );
+        assert!(!top.score_reasons.is_empty(), "评分因子应可解释");
+        assert!(
+            top.score_reasons.iter().any(|r| r.contains("金额")),
+            "金额一致因子应体现"
+        );
+        assert!((top.remaining_amount - 80.0).abs() < 0.005);
+
+        // 已核销耗尽的分录不再出现在候选中
+        confirm_bank_allocations(&conn, &[alloc_input(tx, best, 80.0)], "manual", "出纳").unwrap();
+        let item = preview_bank_allocation_candidates(&conn, tx).unwrap();
+        assert!(
+            !item.candidates.iter().any(|c| c.voucher_line_id == best),
+            "无剩余余额的分录不得再入候选"
+        );
+    }
+
+    /// 自动匹配只预览不写入；批量确认只处理高置信且无冲突项目（spec 6.2/6.3）
+    #[test]
+    fn test_auto_match_preview_and_batch_confirm() {
+        let (conn, acc) = alloc_env();
+        let line1 = insert_fund_line(
+            &conn,
+            "JZ-AL-061",
+            "2026-08-06",
+            "2026-08",
+            "fund_document",
+            61,
+            acc,
+            0.0,
+            100.0,
+            "货款一",
+            "active",
+        );
+        let line2 = insert_fund_line(
+            &conn,
+            "JZ-AL-062",
+            "2026-08-06",
+            "2026-08",
+            "fund_document",
+            62,
+            acc,
+            0.0,
+            50.0,
+            "货款二",
+            "active",
+        );
+        let tx1 = insert_tx(
+            &conn,
+            "2026-08-06",
+            "2026-08",
+            "支付 JZ-AL-061",
+            "供应商辛",
+            "62220008",
+            0.0,
+            100.0,
+            Some(acc),
+            "unmatched",
+        );
+        let tx2 = insert_tx(
+            &conn,
+            "2026-08-06",
+            "2026-08",
+            "支付 JZ-AL-062",
+            "供应商壬",
+            "62220009",
+            0.0,
+            50.0,
+            Some(acc),
+            "unmatched",
+        );
+
+        // 预览只读：返回候选与 score，不写 allocation
+        let preview = preview_bank_auto_matches(&conn, "2026-08").unwrap();
+        assert_eq!(preview.len(), 2, "两条流水都应有候选");
+        assert!(preview.iter().all(|i| !i.candidates.is_empty()));
+        let by_tx: Vec<(i64, i64)> = preview
+            .iter()
+            .map(|i| (i.transaction_id, i.candidates[0].voucher_line_id))
+            .collect();
+        assert!(
+            by_tx.contains(&(tx1, line1)) && by_tx.contains(&(tx2, line2)),
+            "最佳候选应各自对应：{by_tx:?}"
+        );
+        let best_scores: Vec<i32> = preview.iter().map(|i| i.candidates[0].score).collect();
+        let mut sorted = best_scores.clone();
+        sorted.sort_unstable_by(|a, b| b.cmp(a));
+        assert_eq!(best_scores, sorted, "预览项应按最高分降序");
+        assert!(
+            list_bank_allocations(&conn, &BankAllocationQuery::default())
+                .unwrap()
+                .is_empty(),
+            "预览不得写入"
+        );
+
+        // 批量确认：高置信（金额一致+文本因子）全部确认
+        let r = batch_confirm_bank_auto_matches(&conn, "2026-08", 60, "出纳").unwrap();
+        assert_eq!(r.confirmed, 2, "两条高置信流水应确认：{:?}", r.errors);
+        let rows = list_bank_allocations(&conn, &BankAllocationQuery::default()).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows.iter().all(|a| a.match_method == "auto"),
+            "批量确认应记 auto"
+        );
+        assert!(
+            rows.iter().all(|a| a.score.unwrap_or(0) >= 60),
+            "批量确认应记录 score"
+        );
+    }
+
+    /// 批量确认冲突消解：同一分录被多条流水争用时不重复核销（金额守恒）
+    #[test]
+    fn test_batch_confirm_resolves_line_conflicts() {
+        let (conn, acc) = alloc_env();
+        let line = insert_fund_line(
+            &conn,
+            "JZ-AL-071",
+            "2026-08-06",
+            "2026-08",
+            "fund_document",
+            71,
+            acc,
+            0.0,
+            80.0,
+            "争用分录",
+            "active",
+        );
+        let tx_high = insert_tx(
+            &conn,
+            "2026-08-06",
+            "2026-08",
+            "支付 JZ-AL-071 采购",
+            "供应商A",
+            "62220010",
+            0.0,
+            80.0,
+            Some(acc),
+            "unmatched",
+        );
+        let tx_low = insert_tx(
+            &conn,
+            "2026-08-06",
+            "2026-08",
+            "支付 JZ-AL-071 备用",
+            "供应商B",
+            "62220011",
+            0.0,
+            80.0,
+            Some(acc),
+            "unmatched",
+        );
+
+        let r = batch_confirm_bank_auto_matches(&conn, "2026-08", 60, "出纳").unwrap();
+        assert_eq!(r.confirmed, 1, "争用分录只能确认一条：{:?}", r.errors);
+        assert_eq!(r.skipped, 1, "落败方应跳过");
+        let rows = list_bank_allocations(
+            &conn,
+            &BankAllocationQuery {
+                voucher_line_id: Some(line),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let total: f64 = rows
+            .iter()
+            .filter(|a| a.status == "active")
+            .map(|a| a.allocated_amount)
+            .sum();
+        assert!(
+            (total - 80.0).abs() < 0.005,
+            "核销总额不得超过分录余额，实际 {total}"
+        );
+        assert_eq!(rows[0].transaction_id, tx_high, "应保留得分高的流水");
+        let _ = tx_low;
+    }
+
+    /// 低置信（金额不一致且无文本因子）不自动写入，只留在候选预览（spec 6.2）
+    #[test]
+    fn test_batch_confirm_skips_low_confidence() {
+        let (conn, acc) = alloc_env();
+        let _line = insert_fund_line(
+            &conn,
+            "JZ-AL-081",
+            "2026-08-06",
+            "2026-08",
+            "fund_document",
+            81,
+            acc,
+            0.0,
+            90.0,
+            "无文本关联",
+            "active",
+        );
+        let _tx = insert_tx(
+            &conn,
+            "2026-08-06",
+            "2026-08",
+            "无关联付款",
+            "供应商C",
+            "62220012",
+            0.0,
+            100.0,
+            Some(acc),
+            "unmatched",
+        );
+
+        let preview = preview_bank_auto_matches(&conn, "2026-08").unwrap();
+        assert_eq!(preview.len(), 1, "低置信仍是候选");
+        let r = batch_confirm_bank_auto_matches(&conn, "2026-08", 60, "出纳").unwrap();
+        assert_eq!(r.confirmed, 0, "低置信不得自动写入");
+        assert_eq!(r.skipped, 1);
+        assert!(
+            list_bank_allocations(&conn, &BankAllocationQuery::default())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// 忽略流水/待归集流水/零金额流水禁止核销
+    #[test]
+    fn test_allocation_blocks_ignored_unassigned_and_zero_amount() {
+        let (conn, acc) = alloc_env();
+        let line = insert_fund_line(
+            &conn,
+            "JZ-AL-091",
+            "2026-08-06",
+            "2026-08",
+            "fund_document",
+            91,
+            acc,
+            0.0,
+            100.0,
+            "付款E",
+            "active",
+        );
+
+        let ignored = insert_tx(
+            &conn,
+            "2026-08-06",
+            "2026-08",
+            "忽略的流水",
+            "供应商D",
+            "62220013",
+            0.0,
+            50.0,
+            Some(acc),
+            "ignored",
+        );
+        let err = confirm_expect_error(&conn, &alloc_input(ignored, line, 50.0));
+        assert!(err.contains("忽略"), "已忽略流水应拦截：{err}");
+
+        let unassigned = insert_tx(
+            &conn,
+            "2026-08-06",
+            "2026-08",
+            "待归集流水",
+            "供应商E",
+            "62220014",
+            0.0,
+            50.0,
+            None,
+            "unmatched",
+        );
+        assert!(
+            preview_bank_allocation_candidates(&conn, unassigned).is_err(),
+            "待归集流水不可预览候选"
+        );
+        let err = confirm_expect_error(&conn, &alloc_input(unassigned, line, 50.0));
+        assert!(err.contains("归集"), "待归集流水应拦截并提示归集：{err}");
+
+        let zero = insert_tx(
+            &conn,
+            "2026-08-06",
+            "2026-08",
+            "零金额流水",
+            "供应商F",
+            "62220015",
+            0.0,
+            0.0,
+            Some(acc),
+            "unmatched",
+        );
+        let err = confirm_expect_error(&conn, &alloc_input(zero, line, 10.0));
+        assert!(err.contains("方向"), "零金额/方向不明流水应拦截：{err}");
+    }
+
+    /// 辅助：再建一个资金账户（跨账户用例）
+    fn save_fund_line_account(conn: &Connection) -> i64 {
+        save_fund_account(
+            conn,
+            &bank_input(
+                &format!(
+                    "BANK-X{}",
+                    conn.query_row("SELECT COUNT(*) FROM fund_accounts", [], |r| r
+                        .get::<_, i64>(0))
+                        .unwrap()
+                ),
+                "异户",
+                &format!(
+                    "62223{}",
+                    conn.query_row("SELECT COUNT(*) FROM fund_accounts", [], |r| r
+                        .get::<_, i64>(0))
+                        .unwrap()
+                ),
+            ),
+        )
+        .unwrap()
+        .id
     }
 }

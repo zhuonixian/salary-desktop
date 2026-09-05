@@ -479,6 +479,129 @@ pub struct BankAutoMatchResult {
     pub errors: Vec<String>,
 }
 
+// ==================== 第七阶段 Task 12：银行流水多对多核销（spec 4.9/6.2/6.3） ====================
+
+/// 核销记录（bank_reconciliation_allocations 行 + 联表回显）。
+/// 核销只是对账链接不产生会计分录；取消置 cancelled 保留原记录可追溯。
+#[derive(Debug, Clone, Serialize)]
+pub struct BankReconciliationAllocation {
+    pub id: i64,
+    pub transaction_id: i64,
+    pub voucher_line_id: i64,
+    pub allocated_amount: f64,
+    pub status: String,
+    /// auto / manual / migrated（spec 4.9）
+    pub match_method: String,
+    pub score: Option<i32>,
+    pub remark: Option<String>,
+    pub operator_name: Option<String>,
+    /// 旧 bank_transaction_matches 迁移来源（spec 9.4，迁移幂等键）
+    pub legacy_match_id: Option<i64>,
+    pub created_at: String,
+    pub updated_at: String,
+    // ---- 联表回显（对账页展示） ----
+    pub voucher_id: i64,
+    pub voucher_no: String,
+    pub voucher_date: String,
+    pub voucher_belong_month: String,
+    pub voucher_status: String,
+    pub account_code: String,
+    pub line_debit_amount: f64,
+    pub line_credit_amount: f64,
+    pub line_summary: Option<String>,
+    pub fund_account_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BankAllocationQuery {
+    pub transaction_id: Option<i64>,
+    pub voucher_line_id: Option<i64>,
+    pub belong_month: Option<String>,
+    /// 缺省=全部状态（含 cancelled，供对账页追溯）
+    pub status: Option<String>,
+}
+
+/// 核销写入项：金额必须为正；累计不得超出任一侧可核销余额（spec 4.9）。
+/// `score` 由自动匹配流程写入置信分，人工核销为空。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BankAllocationInput {
+    pub transaction_id: i64,
+    pub voucher_line_id: i64,
+    pub allocated_amount: f64,
+    #[serde(default)]
+    pub score: Option<i32>,
+    pub remark: Option<String>,
+}
+
+/// 候选账面资金分录（仅 active 凭证、同账户、方向相符且有未核销余额），含 spec 6.3 评分
+#[derive(Debug, Clone, Serialize)]
+pub struct BankAllocationCandidate {
+    pub voucher_line_id: i64,
+    pub voucher_id: i64,
+    pub voucher_no: String,
+    pub voucher_date: String,
+    pub belong_month: String,
+    pub source_type: String,
+    pub source_id: i64,
+    pub account_code: String,
+    pub line_summary: Option<String>,
+    pub debit_amount: f64,
+    pub credit_amount: f64,
+    /// 分录侧未核销余额
+    pub remaining_amount: f64,
+    /// 0-100，评分因子见 score_reasons（金额一致/单号/户名/尾号/摘要/日期距离）
+    pub score: i32,
+    pub score_reasons: Vec<String>,
+}
+
+/// 自动匹配预览项：一条流水 + 其候选分录（按分数降序）。只读不写入（spec 6.2）
+#[derive(Debug, Clone, Serialize)]
+pub struct BankAutoMatchPreviewItem {
+    pub transaction_id: i64,
+    pub transaction_date: String,
+    pub belong_month: String,
+    pub summary: Option<String>,
+    pub counterparty_name: Option<String>,
+    pub counterparty_account: Option<String>,
+    pub income_amount: f64,
+    pub expense_amount: f64,
+    /// 流水侧未核销余额
+    pub remaining_amount: f64,
+    pub fund_account_id: i64,
+    pub fund_account_name: Option<String>,
+    pub candidates: Vec<BankAllocationCandidate>,
+}
+
+/// 核销批量结果：逐项校验互不阻塞，失败项进 errors（spec 6.2 批量确认语义）
+#[derive(Debug, Clone, Serialize)]
+pub struct BankAllocationBatchResult {
+    pub confirmed: i32,
+    pub skipped: i32,
+    pub errors: Vec<String>,
+    pub allocation_ids: Vec<i64>,
+}
+
+/// 旧匹配迁移报告：无法转换的旧匹配逐条列明原因（spec 4.9 不静默丢失）
+#[derive(Debug, Clone, Serialize)]
+pub struct LegacyBankMatchUnconverted {
+    pub match_id: i64,
+    pub transaction_id: i64,
+    pub payment_batch_id: i64,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct LegacyBankMatchReport {
+    /// 旧表全部行数
+    pub total: i32,
+    /// active 行数（cancelled 历史行不迁移）
+    pub active_total: i32,
+    pub migrated: i32,
+    /// 已有 allocation 的幂等跳过数
+    pub already_migrated: i32,
+    pub unconverted: Vec<LegacyBankMatchUnconverted>,
+}
+
 // ==================== 第七阶段 Task 11：银行流水导入预览（spec 4.8） ====================
 
 /// 导入预览单行：解析结果先行展示，用户确认/修正后才入库

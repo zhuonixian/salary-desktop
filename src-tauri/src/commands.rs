@@ -1146,6 +1146,147 @@ pub fn ignore_bank_transaction(
     Ok(result)
 }
 
+// ==================== Task 12：银行流水多对多核销（spec 4.9/6.2/6.3） ====================
+
+#[tauri::command]
+pub fn preview_bank_allocation_candidates(
+    transaction_id: i64,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<BankAutoMatchPreviewItem, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    cashier::preview_bank_allocation_candidates(&conn, transaction_id)
+}
+
+#[tauri::command]
+pub fn preview_bank_auto_matches(
+    month: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<BankAutoMatchPreviewItem>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    cashier::preview_bank_auto_matches(&conn, &month)
+}
+
+#[tauri::command]
+pub fn confirm_bank_allocations(
+    data: Vec<BankAllocationInput>,
+    match_method: Option<String>,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<BankAllocationBatchResult, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let method = match_method.as_deref().unwrap_or("manual");
+    let result = cashier::confirm_bank_allocations(
+        &conn,
+        &data,
+        method,
+        &cashier::current_operator_name(&conn, &current),
+    )?;
+    // 单项人工确认失败时直接报错透出（批量时逐项跳过不阻塞）
+    if result.confirmed == 0 && !result.errors.is_empty() {
+        return Err(AppError::InvalidParam(result.errors.join("；")));
+    }
+    if result.confirmed > 0 {
+        db::log_operation(
+            &conn,
+            "confirm_bank_allocations",
+            &format!(
+                "银行流水核销：成功 {} 条，跳过 {} 条（方式 {method}）",
+                result.confirmed, result.skipped
+            ),
+            &cashier::current_operator_name(&conn, &current),
+            data.iter()
+                .find(|i| i.remark.as_deref().is_some_and(|r| !r.trim().is_empty()))
+                .and_then(|i| i.remark.clone())
+                .as_deref(),
+        )?;
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn cancel_bank_allocation(
+    allocation_id: i64,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<bool, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let operator = cashier::current_operator_name(&conn, &current);
+    let result = cashier::cancel_bank_allocation(&conn, allocation_id, &operator)?;
+    if result {
+        db::log_operation(
+            &conn,
+            "cancel_bank_allocation",
+            &format!("取消银行流水核销 ID={allocation_id}"),
+            &operator,
+            None,
+        )?;
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn list_bank_allocations(
+    query: BankAllocationQuery,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<BankReconciliationAllocation>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    cashier::list_bank_allocations(&conn, &query)
+}
+
+#[tauri::command]
+pub fn batch_confirm_bank_auto_matches(
+    month: String,
+    min_score: Option<i32>,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<BankAllocationBatchResult, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let operator = cashier::current_operator_name(&conn, &current);
+    let threshold = min_score.unwrap_or(0);
+    let result = cashier::batch_confirm_bank_auto_matches(&conn, &month, threshold, &operator)?;
+    db::log_operation(
+        &conn,
+        "batch_confirm_bank_auto_matches",
+        &format!(
+            "自动匹配批量核销 {month}：确认 {} 条，跳过 {} 条（置信线 {}）{}",
+            result.confirmed,
+            result.skipped,
+            threshold,
+            if result.errors.is_empty() {
+                String::new()
+            } else {
+                format!("；失败：{}", result.errors.join("；"))
+            }
+        ),
+        &operator,
+        None,
+    )?;
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn migrate_legacy_bank_matches(
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<LegacyBankMatchReport, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let report = db::migrate_legacy_bank_matches(&conn)?;
+    db::log_operation(
+        &conn,
+        "migrate_legacy_bank_matches",
+        &format!(
+            "旧银行匹配迁移：旧表 {} 行（active {}），迁入 {} 条，幂等跳过 {}，未转换 {}",
+            report.total,
+            report.active_total,
+            report.migrated,
+            report.already_migrated,
+            report.unconverted.len()
+        ),
+        "system",
+        None,
+    )?;
+    Ok(report)
+}
+
 #[tauri::command]
 pub fn query_budgets(
     query: BudgetQuery,

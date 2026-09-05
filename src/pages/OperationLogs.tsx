@@ -83,6 +83,13 @@ const operationTypeLabels: Record<string, string> = {
   settle_fund_document: '结算资金单据',
   reverse_fund_document: '冲正资金单据',
   apply_fund_assignment: '历史资金归集',
+  preview_bank_allocation_candidates: '预览流水核销候选',
+  preview_bank_auto_matches: '预览自动匹配',
+  confirm_bank_allocations: '确认流水核销',
+  cancel_bank_allocation: '取消流水核销',
+  list_bank_allocations: '查询流水核销明细',
+  batch_confirm_bank_auto_matches: '自动匹配批量核销',
+  migrate_legacy_bank_matches: '旧银行匹配迁移',
 };
 
 const getOperationLabel = (value?: string) =>

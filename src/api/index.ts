@@ -33,13 +33,19 @@ import type {
   PaymentBatchRemarkInput,
   PaymentBatchVoidInput,
   PaymentItem,
+  BankAutoMatchPreviewItem,
   BankAutoMatchResult,
+  BankAllocationBatchResult,
+  BankAllocationInput,
+  BankAllocationQuery,
   BankImportPreview,
+  BankReconciliationAllocation,
   BankTransaction,
   BankTransactionIgnoreInput,
   BankTransactionMatch,
   BankTransactionMatchInput,
   BankTransactionQuery,
+  LegacyBankMatchReport,
   Budget,
   BudgetInput,
   BudgetQuery,
@@ -1033,6 +1039,35 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
     case 'cancel_bank_transaction_match':
     case 'ignore_bank_transaction':
       return true;
+    case 'preview_bank_allocation_candidates':
+      return {
+        transaction_id: Number(args?.transactionId ?? 0),
+        transaction_date: '',
+        belong_month: '',
+        income_amount: 0,
+        expense_amount: 0,
+        remaining_amount: 0,
+        fund_account_id: 0,
+        candidates: [],
+      };
+    case 'preview_bank_auto_matches':
+      return [];
+    case 'confirm_bank_allocations':
+      return { confirmed: 0, skipped: 0, errors: [], allocation_ids: [] };
+    case 'cancel_bank_allocation':
+      return true;
+    case 'list_bank_allocations':
+      return [];
+    case 'batch_confirm_bank_auto_matches':
+      return { confirmed: 0, skipped: 0, errors: [], allocation_ids: [] };
+    case 'migrate_legacy_bank_matches':
+      return {
+        total: 0,
+        active_total: 0,
+        migrated: 0,
+        already_migrated: 0,
+        unconverted: [],
+      };
     case 'query_budgets':
       return [];
     case 'save_budget':
@@ -1434,6 +1469,63 @@ export async function confirmBankTransactionMatch(data: BankTransactionMatchInpu
 
 export async function cancelBankTransactionMatch(transactionId: number): Promise<boolean> {
   return invoke<boolean>('cancel_bank_transaction_match', { transaction_id: transactionId });
+}
+
+// ==================== 银行流水多对多核销（Task 12，spec 4.9/6.2/6.3） ====================
+
+/** 单条流水的候选资金分录预览（人工核销用） */
+export async function previewBankAllocationCandidates(
+  transactionId: number,
+): Promise<BankAutoMatchPreviewItem> {
+  return invoke<BankAutoMatchPreviewItem>('preview_bank_allocation_candidates', {
+    transaction_id: transactionId,
+  });
+}
+
+/** 自动匹配预览：只返回候选与 score，不写库（spec 6.2） */
+export async function previewBankAutoMatches(
+  month: string,
+): Promise<BankAutoMatchPreviewItem[]> {
+  return invoke<BankAutoMatchPreviewItem[]>('preview_bank_auto_matches', { month });
+}
+
+/** 批量确认核销（manual/auto）；单项全败时后端抛错 */
+export async function confirmBankAllocations(
+  data: BankAllocationInput[],
+  matchMethod: 'manual' | 'auto' = 'manual',
+): Promise<BankAllocationBatchResult> {
+  return invoke<BankAllocationBatchResult>('confirm_bank_allocations', {
+    data,
+    matchMethod,
+  });
+}
+
+/** 取消核销（状态标记 cancelled，释放两侧余额） */
+export async function cancelBankAllocation(allocationId: number): Promise<boolean> {
+  return invoke<boolean>('cancel_bank_allocation', { allocation_id: allocationId });
+}
+
+/** 核销明细查询（对账页展示与追溯） */
+export async function listBankAllocations(
+  query: BankAllocationQuery = {},
+): Promise<BankReconciliationAllocation[]> {
+  return invoke<BankReconciliationAllocation[]>('list_bank_allocations', { query });
+}
+
+/** 批量确认自动匹配：只处理高置信且金额相等的候选 */
+export async function batchConfirmBankAutoMatches(
+  month: string,
+  minScore?: number,
+): Promise<BankAllocationBatchResult> {
+  return invoke<BankAllocationBatchResult>('batch_confirm_bank_auto_matches', {
+    month,
+    minScore,
+  });
+}
+
+/** 旧 bank_transaction_matches 迁移为 allocation（spec 4.9/9.4，幂等可重跑） */
+export async function migrateLegacyBankMatches(): Promise<LegacyBankMatchReport> {
+  return invoke<LegacyBankMatchReport>('migrate_legacy_bank_matches');
 }
 
 export async function ignoreBankTransaction(data: BankTransactionIgnoreInput): Promise<boolean> {

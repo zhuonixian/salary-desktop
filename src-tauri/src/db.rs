@@ -628,6 +628,7 @@ const STAGE7_NEW_TABLES: &[&str] = &[
     "fund_documents",
     "approval_events",
     "business_attachments",
+    "bank_reconciliation_allocations",
 ];
 
 /// 第七阶段 schema 迁移入口（幂等，可在新旧库上重复执行）：
@@ -684,6 +685,11 @@ pub fn migrate_stage7_schema(conn: &Connection) -> AppResult<Stage7MigrationRepo
                 )));
             }
         }
+
+        // 旧银行匹配迁移为多对多核销（spec 4.9/9.4）：可唯一定位付款凭证资金行的旧匹配
+        // 写入 allocation（legacy_match_id 幂等）；不可定位的进入迁移报告不静默丢失。
+        // 在外层迁移事务内执行，整体回滚语义与 DDL 一致；归集向导补充账户后重跑可转换更多。
+        migrate_legacy_bank_matches_in_tx(c)?;
 
         // 外键一致性校验：存量脏数据（悬空引用）视为升级阻断项，整体回滚
         let fk_errors = count_fk_check_violations(c)?;
@@ -1020,6 +1026,31 @@ fn create_stage7_tables(conn: &Connection) -> AppResult<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_business_attachments_entity
             ON business_attachments(entity_type, entity_id);
+
+        -- 银行流水多对多核销（spec 4.9，Task 12）：流水 ↔ 带资金辅助核算的账面分录。
+        -- 核销只是对账链接，不产生会计分录；取消核销置 cancelled 保留原记录可追溯；
+        -- legacy_match_id 承接旧 bank_transaction_matches（spec 9.4），唯一索引保证迁移幂等。
+        CREATE TABLE IF NOT EXISTS bank_reconciliation_allocations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            transaction_id INTEGER NOT NULL REFERENCES bank_transactions(id) ON DELETE CASCADE,
+            voucher_line_id INTEGER NOT NULL REFERENCES voucher_lines(id),
+            allocated_amount REAL NOT NULL CHECK (allocated_amount > 0),
+            status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','cancelled')),
+            match_method TEXT NOT NULL DEFAULT 'manual'
+                CHECK (match_method IN ('auto','manual','migrated')),
+            score INTEGER,
+            remark TEXT,
+            operator_name TEXT,
+            legacy_match_id INTEGER,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_bank_alloc_tx
+            ON bank_reconciliation_allocations(transaction_id, status);
+        CREATE INDEX IF NOT EXISTS idx_bank_alloc_line
+            ON bank_reconciliation_allocations(voucher_line_id, status);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_bank_alloc_legacy
+            ON bank_reconciliation_allocations(legacy_match_id) WHERE legacy_match_id IS NOT NULL;
         ",
     )?;
     Ok(())
@@ -1148,6 +1179,197 @@ pub(crate) fn record_stage7_state(
         )?;
     }
     Ok(())
+}
+
+// ==================== Task 12：旧银行匹配迁移为多对多核销（spec 4.9/9.4） ====================
+
+/// 旧 bank_transaction_matches 在迁移后只读保留一个版本周期：新引擎从不写入旧表，
+/// 仅由本迁移单向把可转换的旧匹配写入 bank_reconciliation_allocations。
+/// 迁移幂等（legacy_match_id 唯一索引），归集向导补充账户后可重跑转换更多历史匹配。
+pub fn migrate_legacy_bank_matches(conn: &Connection) -> AppResult<LegacyBankMatchReport> {
+    let tx = conn.unchecked_transaction()?;
+    let report = migrate_legacy_bank_matches_in_tx(&tx)?;
+    tx.commit()?;
+    Ok(report)
+}
+
+/// 迁移核心（无自身事务，供启动迁移复用外层事务）：
+/// 仅迁移 active 旧匹配；要求批次已付款且双方归集同一资金账户，且付款凭证资金行
+/// （挂该账户、贷方、active）能唯一定位；金额取流水支出与分录剩余可核销额的较小值。
+/// 无法定位的逐条记入报告不静默丢失；单行异常不阻断整体迁移。
+pub fn migrate_legacy_bank_matches_in_tx(conn: &Connection) -> AppResult<LegacyBankMatchReport> {
+    // 表可能尚不存在（极旧库在 stage7 建表前调用时由外层先建表；最小测试库直接跳过）
+    let alloc_table: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='bank_reconciliation_allocations'",
+        [],
+        |r| r.get(0),
+    )?;
+    let match_table: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='bank_transaction_matches'",
+        [],
+        |r| r.get(0),
+    )?;
+    if alloc_table == 0 || match_table == 0 {
+        return Ok(LegacyBankMatchReport::default());
+    }
+
+    let mut report = LegacyBankMatchReport::default();
+    report.total = conn.query_row("SELECT COUNT(*) FROM bank_transaction_matches", [], |r| {
+        r.get(0)
+    })?;
+
+    // 已迁移的旧匹配（幂等跳过）
+    let migrated_ids: std::collections::HashSet<i64> = conn
+        .prepare(
+            "SELECT legacy_match_id FROM bank_reconciliation_allocations
+             WHERE legacy_match_id IS NOT NULL",
+        )?
+        .query_map([], |r| r.get(0))?
+        .collect::<Result<std::collections::HashSet<_>, _>>()?;
+
+    let mut stmt = conn.prepare(
+        "SELECT id, transaction_id, payment_batch_id, match_score, remark
+         FROM bank_transaction_matches WHERE status='active' ORDER BY id",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, Option<i32>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+
+    let now = Utc::now().to_rfc3339();
+    for (mid, tx_id, batch_id, score, remark) in rows {
+        report.active_total += 1;
+        if migrated_ids.contains(&mid) {
+            report.already_migrated += 1;
+            continue;
+        }
+        let mut unconvert = |reason: String| {
+            report.unconverted.push(LegacyBankMatchUnconverted {
+                match_id: mid,
+                transaction_id: tx_id,
+                payment_batch_id: batch_id,
+                reason,
+            });
+        };
+        // 逐行容错：单条历史脏数据不阻断整体迁移（记录进报告由人工处理）
+        let outcome = match (|| -> AppResult<Option<()>> {
+            let tx_account: Option<i64> = conn
+                .query_row(
+                    "SELECT fund_account_id FROM bank_transactions WHERE id=?1",
+                    params![tx_id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(AppError::from)?
+                .flatten();
+            let Some(tx_account) = tx_account else {
+                unconvert("流水不存在或未归集资金账户，请先完成历史归集".into());
+                return Ok(None);
+            };
+            let (batch_status, batch_account, _batch_total): (String, Option<i64>, f64) = conn
+                .query_row(
+                    "SELECT status, fund_account_id, total_amount FROM payment_batches WHERE id=?1",
+                    params![batch_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()
+                .map_err(AppError::from)?
+                .ok_or_else(|| AppError::NotFound(format!("付款批次 {batch_id} 不存在")))?;
+            if batch_status != "paid" {
+                unconvert("付款批次未付款（或已作废），无对应付款凭证资金行".into());
+                return Ok(None);
+            }
+            let Some(batch_account) = batch_account else {
+                unconvert("付款批次未归集资金账户，请先完成历史归集后重跑迁移".into());
+                return Ok(None);
+            };
+            if batch_account != tx_account {
+                unconvert("流水与批次的资金账户不一致".into());
+                return Ok(None);
+            }
+
+            // 付款凭证资金行：salary/reimbursement 批次级凭证 + general 单据结算凭证，
+            // 取挂该账户、贷方、active 的分录；不唯一则无法定位
+            let mut line_stmt = conn.prepare(
+                "SELECT vl.id, vl.credit_amount FROM voucher_lines vl
+                 JOIN vouchers v ON v.id = vl.voucher_id
+                 WHERE v.status='active'
+                   AND vl.fund_account_id=?1 AND vl.credit_amount > 0
+                   AND ((v.source_type IN ('salary_payment','reimbursement_payment')
+                         AND v.source_id=?2)
+                     OR (v.source_type='fund_document' AND v.source_id IN
+                         (SELECT id FROM fund_documents WHERE payment_batch_id=?2)))
+                 ORDER BY vl.id",
+            )?;
+            let lines = line_stmt
+                .query_map(params![batch_account, batch_id], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(line_stmt);
+            if lines.len() != 1 {
+                unconvert(format!(
+                    "付款凭证资金行不唯一（{0} 条），无法唯一定位核销分录",
+                    lines.len()
+                ));
+                return Ok(None);
+            }
+            let (line_id, line_credit) = lines[0];
+
+            let tx_expense: f64 = conn.query_row(
+                "SELECT expense_amount FROM bank_transactions WHERE id=?1",
+                params![tx_id],
+                |r| r.get(0),
+            )?;
+            if tx_expense <= 0.0 {
+                unconvert("流水非支出方向，无法对应付款凭证贷方资金行".into());
+                return Ok(None);
+            }
+            let line_allocated: f64 = conn.query_row(
+                "SELECT COALESCE(SUM(allocated_amount),0) FROM bank_reconciliation_allocations
+                 WHERE voucher_line_id=?1 AND status='active'",
+                params![line_id],
+                |r| r.get(0),
+            )?;
+            let amount = (tx_expense - line_allocated).min(line_credit - line_allocated);
+            if amount <= 0.005 {
+                unconvert("可核销余额不足（流水或分录已在其他核销中耗尽）".into());
+                return Ok(None);
+            }
+
+            // spec 9.4：legacy ID 保留进 remark，另存 legacy_match_id 列保证迁移幂等
+            let mut final_remark = format!("旧匹配#{mid} 迁移");
+            if let Some(old) = remark.as_deref().filter(|r| !r.trim().is_empty()) {
+                final_remark.push_str(&format!("；{old}"));
+            }
+            conn.execute(
+                "INSERT INTO bank_reconciliation_allocations
+                    (transaction_id, voucher_line_id, allocated_amount, status, match_method,
+                     score, remark, operator_name, legacy_match_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, 'active', 'migrated', ?4, ?5, 'migration', ?6, ?7, ?7)",
+                params![tx_id, line_id, amount, score, final_remark, mid, now],
+            )?;
+            Ok(Some(()))
+        })() {
+            Ok(v) => v,
+            Err(e) => {
+                unconvert(format!("迁移异常：{e}"));
+                None
+            }
+        };
+        if outcome.is_some() {
+            report.migrated += 1;
+        }
+    }
+    Ok(report)
 }
 
 pub fn insert_default_data(conn: &Connection) -> AppResult<()> {
@@ -7505,6 +7727,239 @@ pub mod tests {
         cancel_bank_transaction_match(&conn, tx_id).unwrap();
         let result = auto_match_bank_transactions(&conn, "2026-08").unwrap();
         assert_eq!(result.matched, 1);
+    }
+
+    // ==================== Task 12：旧匹配迁移与多对多核销 ====================
+
+    /// 直插一条旧式 bank_transaction_matches（一对一批次匹配，spec 4.9 迁移对象）
+    fn insert_legacy_match(
+        conn: &Connection,
+        transaction_id: i64,
+        batch_id: i64,
+        score: i32,
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO bank_transaction_matches
+                (transaction_id, payment_batch_id, match_score, remark, status, created_at)
+             VALUES (?1, ?2, ?3, '旧批次匹配', 'active', '2026-08-31')",
+            params![transaction_id, batch_id, score],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    /// 直插一条带/不带账户的银行流水（迁移测试用），返回 id
+    fn insert_migration_tx(
+        conn: &Connection,
+        summary: &str,
+        expense: f64,
+        account_id: Option<i64>,
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO bank_transactions (transaction_date, belong_month, summary,
+                counterparty_name, counterparty_account, income_amount, expense_amount, balance,
+                status, fund_account_id, created_at, updated_at)
+             VALUES ('2026-08-31', '2026-08', ?1, '测试银行', '62220000', 0, ?2, 9000,
+                     'unmatched', ?3, '2026-08-31', '2026-08-31')",
+            params![summary, expense, account_id],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    /// 旧 bank_transaction_matches 迁移为 allocation（spec 4.9/9.4）：
+    /// 能唯一定位付款凭证资金行的迁入并保留 legacy ID；不可定位的进报告不静默丢失；
+    /// 重跑幂等；旧表只读保留；迁移后流水侧余额在新引擎中视为已核销。
+    #[test]
+    fn test_legacy_bank_match_migration_to_allocations() {
+        let mut conn = setup_financial_db();
+        fill_employee_bank_info(&conn);
+        make_august_closable(&conn);
+        let acc = make_batch_fund_account(&conn, "BANK-T1");
+        let operator = batch_operator();
+        let detail = create_payment_batch(
+            &mut conn,
+            &PaymentBatchInput {
+                belong_month: "2026-08".into(),
+                batch_type: "salary".into(),
+                fund_account_id: Some(acc),
+                source_ids: None,
+                remark: None,
+            },
+            &operator,
+        )
+        .unwrap();
+        mark_payment_batch_exported(&conn, detail.batch.id).unwrap();
+        mark_payment_batch_paid(
+            &mut conn,
+            &PaymentBatchPaidInput {
+                id: detail.batch.id,
+                payment_date: "2026-08-31".into(),
+            },
+            &operator,
+        )
+        .unwrap();
+
+        // 批次付款凭证的唯一资金行（贷方、挂账户）
+        let (fund_line_id, fund_line_credit): (i64, f64) = conn
+            .query_row(
+                "SELECT vl.id, vl.credit_amount FROM voucher_lines vl
+                 JOIN vouchers v ON v.id = vl.voucher_id
+                 WHERE v.source_type='salary_payment' AND v.source_id=?1 AND v.status='active'
+                   AND vl.fund_account_id=?2 AND vl.credit_amount > 0",
+                params![detail.batch.id, acc],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+
+        // 可迁移：带账户流水（金额=批次额）
+        let tx_id = insert_migration_tx(
+            &conn,
+            &format!("{} 工资代发", detail.batch.batch_no),
+            detail.batch.total_amount,
+            Some(acc),
+        );
+        insert_legacy_match(&conn, tx_id, detail.batch.id, 95);
+
+        // 不可迁移①：流水未归集账户（待归集，spec 4.8），匹配到第二个已付款批次
+        // （旧表 active 匹配一流水/一批次唯一，需独立批次承载第二条旧匹配；
+        //   2026-08 工资明细已被批次1占用，批次2 锁定并取 2026-07 既有工资）
+        lock_salary_results(&conn, "2026-07").unwrap();
+        let detail2 = create_payment_batch(
+            &mut conn,
+            &PaymentBatchInput {
+                belong_month: "2026-07".into(),
+                batch_type: "salary".into(),
+                fund_account_id: Some(acc),
+                source_ids: None,
+                remark: None,
+            },
+            &operator,
+        )
+        .unwrap();
+        mark_payment_batch_exported(&conn, detail2.batch.id).unwrap();
+        mark_payment_batch_paid(
+            &mut conn,
+            &PaymentBatchPaidInput {
+                id: detail2.batch.id,
+                payment_date: "2026-07-31".into(),
+            },
+            &operator,
+        )
+        .unwrap();
+        assert!(insert_bank_transaction(
+            &conn,
+            &BankTransaction {
+                id: 0,
+                transaction_date: "2026-08-30".into(),
+                belong_month: "2026-08".into(),
+                summary: Some("待归集旧流水".into()),
+                counterparty_name: Some("测试银行".into()),
+                counterparty_account: Some("62220000".into()),
+                income_amount: 0.0,
+                expense_amount: 10.0,
+                balance: Some(9000.0),
+                status: "matched".into(),
+                ignore_reason: None,
+                imported_file: None,
+                raw_json: None,
+                fund_account_id: None,
+                fund_account_name: None,
+                matched_batch_id: Some(detail2.batch.id),
+                matched_batch_no: Some(detail2.batch.batch_no.clone()),
+                matched_batch_type: Some("salary".into()),
+                matched_amount: Some(10.0),
+                match_score: Some(50),
+                match_remark: Some("旧批次匹配".into()),
+                created_at: None,
+                updated_at: None,
+            }
+        )
+        .unwrap());
+        let tx2_id: i64 = conn
+            .query_row("SELECT MAX(id) FROM bank_transactions", [], |r| r.get(0))
+            .unwrap();
+        insert_legacy_match(&conn, tx2_id, detail2.batch.id, 50);
+
+        // 历史噪音：cancelled 旧匹配不迁移（旧表 active 匹配一流水/一批次唯一，
+        // cancelled 行不受唯一索引约束，指向批次1 即可）
+        conn.execute(
+            "INSERT INTO bank_transaction_matches
+                (transaction_id, payment_batch_id, match_score, remark, status, created_at)
+             VALUES (?1, ?2, 10, '旧批次匹配', 'cancelled', '2026-08-31')",
+            params![tx_id, detail.batch.id],
+        )
+        .unwrap();
+
+        let before: i64 = conn
+            .query_row("SELECT COUNT(*) FROM bank_transaction_matches", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+
+        let report = migrate_legacy_bank_matches(&conn).unwrap();
+        assert_eq!(report.total as i64, before, "报告 total 应覆盖旧表全部行");
+        assert_eq!(report.active_total, 2, "cancelled 旧行不计入 active");
+        assert_eq!(
+            report.migrated, 1,
+            "可唯一定位的旧匹配应迁移：{:?}",
+            report.unconverted
+        );
+        assert_eq!(
+            report.unconverted.len(),
+            1,
+            "不可定位项必须进报告不静默丢失：{:?}",
+            report.unconverted
+        );
+        assert!(report.unconverted.iter().any(|u| u.reason.contains("归集")));
+
+        // allocation 落库且可追溯 legacy ID、方向/金额与付款凭证资金行一致
+        let (alloc_line, alloc_amount, method, score, legacy_id): (i64, f64, String, i32, i64) =
+            conn.query_row(
+                "SELECT voucher_line_id, allocated_amount, match_method, score, legacy_match_id
+                 FROM bank_reconciliation_allocations",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get::<_, Option<i32>>(3)?.unwrap_or(0),
+                        r.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(alloc_line, fund_line_id);
+        assert!((alloc_amount - fund_line_credit).abs() < 0.005);
+        assert_eq!(method, "migrated");
+        assert_eq!(score, 95, "迁移应保留旧匹配 score");
+        assert!(legacy_id > 0);
+
+        // 重跑幂等：已迁移项不再重复写入
+        let report2 = migrate_legacy_bank_matches(&conn).unwrap();
+        assert_eq!(report2.migrated, 0);
+        assert_eq!(report2.already_migrated, 1);
+        let alloc_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM bank_reconciliation_allocations",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(alloc_count, 1, "重跑不得产生重复 allocation");
+
+        // 旧表只读保留一个版本周期（行数与内容不因迁移改变）
+        let after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM bank_transaction_matches", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(before, after);
+
+        // 迁移后流水侧余额在新引擎中视为已核销：无剩余候选
+        let item = crate::cashier::preview_bank_allocation_candidates(&conn, tx_id).unwrap();
+        assert!(item.candidates.is_empty(), "已核销完成的流水不应再有候选");
     }
 
     // ==================== Task 11：流水账户化导入与预览 ====================
