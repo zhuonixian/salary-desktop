@@ -1195,7 +1195,8 @@ pub fn migrate_legacy_bank_matches(conn: &Connection) -> AppResult<LegacyBankMat
 
 /// 迁移核心（无自身事务，供启动迁移复用外层事务）：
 /// 仅迁移 active 旧匹配；要求批次已付款且双方归集同一资金账户，且付款凭证资金行
-/// （挂该账户、贷方、active）能唯一定位；金额取流水支出与分录剩余可核销额的较小值。
+/// （挂该账户、贷方、active）能唯一定位；金额取流水剩余可核销额（支出扣流水侧已核销）
+/// 与分录剩余可核销额（贷方扣分录侧已核销）的较小值，防历史脏数据写出超额核销。
 /// 无法定位的逐条记入报告不静默丢失；单行异常不阻断整体迁移。
 pub fn migrate_legacy_bank_matches_in_tx(conn: &Connection) -> AppResult<LegacyBankMatchReport> {
     // 表可能尚不存在（极旧库在 stage7 建表前调用时由外层先建表；最小测试库直接跳过）
@@ -1339,7 +1340,15 @@ pub fn migrate_legacy_bank_matches_in_tx(conn: &Connection) -> AppResult<LegacyB
                 params![line_id],
                 |r| r.get(0),
             )?;
-            let amount = (tx_expense - line_allocated).min(line_credit - line_allocated);
+            // 流水侧已核销同样占用该流水余额：历史脏数据下旧匹配金额可能大于
+            // 流水剩余额，迁移额必须取两侧剩余的较小值，否则会写出超流水余额的核销
+            let tx_allocated: f64 = conn.query_row(
+                "SELECT COALESCE(SUM(allocated_amount),0) FROM bank_reconciliation_allocations
+                 WHERE transaction_id=?1 AND status='active'",
+                params![tx_id],
+                |r| r.get(0),
+            )?;
+            let amount = (tx_expense - tx_allocated).min(line_credit - line_allocated);
             if amount <= 0.005 {
                 unconvert("可核销余额不足（流水或分录已在其他核销中耗尽）".into());
                 return Ok(None);
@@ -7960,6 +7969,175 @@ pub mod tests {
         // 迁移后流水侧余额在新引擎中视为已核销：无剩余候选
         let item = crate::cashier::preview_bank_allocation_candidates(&conn, tx_id).unwrap();
         assert!(item.candidates.is_empty(), "已核销完成的流水不应再有候选");
+    }
+
+    /// 直插一条新引擎核销 allocation（模拟历史脏数据：迁移前流水/分录侧已有占用）
+    fn insert_dirty_allocation(conn: &Connection, tx_id: i64, line_id: i64, amount: f64) -> i64 {
+        conn.execute(
+            "INSERT INTO bank_reconciliation_allocations
+                (transaction_id, voucher_line_id, allocated_amount, status, match_method,
+                 operator_name, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'active', 'manual', '测试', '2026-08-31', '2026-08-31')",
+            params![tx_id, line_id, amount],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    /// 迁移金额必须取流水侧/分录侧剩余的较小值（Fix Round 1 回归）：
+    /// 历史脏数据下流水已被新引擎部分核销时，旧匹配不得按"只减分录侧"的全额迁出；
+    /// 流水侧耗尽时跳过进不可定位报告而非写出超额核销。
+    #[test]
+    fn test_legacy_migration_amount_capped_by_tx_side_allocated() {
+        let mut conn = setup_financial_db();
+        fill_employee_bank_info(&conn);
+        make_august_closable(&conn);
+        let acc = make_batch_fund_account(&conn, "BANK-T12");
+        let operator = batch_operator();
+
+        // 批次1（2026-08 工资）已付款 → 唯一资金行 L1
+        let detail1 = create_payment_batch(
+            &mut conn,
+            &PaymentBatchInput {
+                belong_month: "2026-08".into(),
+                batch_type: "salary".into(),
+                fund_account_id: Some(acc),
+                source_ids: None,
+                remark: None,
+            },
+            &operator,
+        )
+        .unwrap();
+        mark_payment_batch_exported(&conn, detail1.batch.id).unwrap();
+        mark_payment_batch_paid(
+            &mut conn,
+            &PaymentBatchPaidInput {
+                id: detail1.batch.id,
+                payment_date: "2026-08-31".into(),
+            },
+            &operator,
+        )
+        .unwrap();
+        let (line1_id, line1_credit): (i64, f64) = conn
+            .query_row(
+                "SELECT vl.id, vl.credit_amount FROM voucher_lines vl
+                 JOIN vouchers v ON v.id = vl.voucher_id
+                 WHERE v.source_type='salary_payment' AND v.source_id=?1 AND v.status='active'
+                   AND vl.fund_account_id=?2 AND vl.credit_amount > 0",
+                params![detail1.batch.id, acc],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(
+            line1_credit >= 1000.0,
+            "fixture 假设批次额大于测试金额，got {line1_credit}"
+        );
+
+        // 批次2（2026-07 工资）已付款 → 资金行 L2，仅作场景①脏数据核销目标
+        lock_salary_results(&conn, "2026-07").unwrap();
+        let detail2 = create_payment_batch(
+            &mut conn,
+            &PaymentBatchInput {
+                belong_month: "2026-07".into(),
+                batch_type: "salary".into(),
+                fund_account_id: Some(acc),
+                source_ids: None,
+                remark: None,
+            },
+            &operator,
+        )
+        .unwrap();
+        mark_payment_batch_exported(&conn, detail2.batch.id).unwrap();
+        mark_payment_batch_paid(
+            &mut conn,
+            &PaymentBatchPaidInput {
+                id: detail2.batch.id,
+                payment_date: "2026-07-31".into(),
+            },
+            &operator,
+        )
+        .unwrap();
+        let line2_id: i64 = conn
+            .query_row(
+                "SELECT vl.id FROM voucher_lines vl
+                 JOIN vouchers v ON v.id = vl.voucher_id
+                 WHERE v.source_type='salary_payment' AND v.source_id=?1 AND v.status='active'
+                   AND vl.fund_account_id=?2 AND vl.credit_amount > 0",
+                params![detail2.batch.id, acc],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        // 场景①：流水支出 1000，其中 600 已被新引擎核销到 L2（直改库模拟历史脏数据）。
+        // 迁移额应取两侧剩余较小值 min(1000-600, L1-0) = 400，
+        // 而非只减分录侧得到的 min(1000-0, L1-0) = 1000。
+        let tx1 = insert_migration_tx(&conn, "脏数据流水1", 1000.0, Some(acc));
+        insert_dirty_allocation(&conn, tx1, line2_id, 600.0);
+        let m1 = insert_legacy_match(&conn, tx1, detail1.batch.id, 90);
+
+        // 场景②：流水支出 400 已被新引擎全额核销到 L1 → 迁移必须跳过进报告
+        // （旧表 active 匹配按批次唯一，场景②改挂批次2；其脏数据核销 L1
+        //   同时占掉批次1 资金行部分分录侧余额，场景①不受影响）
+        let tx2 = insert_migration_tx(&conn, "脏数据流水2", 400.0, Some(acc));
+        insert_dirty_allocation(&conn, tx2, line1_id, 400.0);
+        insert_legacy_match(&conn, tx2, detail2.batch.id, 80);
+
+        let report = migrate_legacy_bank_matches(&conn).unwrap();
+        assert_eq!(report.active_total, 2);
+        assert_eq!(report.migrated, 1, "场景①应迁移：{:?}", report.unconverted);
+        assert_eq!(
+            report.unconverted.len(),
+            1,
+            "场景②流水侧耗尽必须进报告不静默丢失：{:?}",
+            report.unconverted
+        );
+        assert_eq!(report.unconverted[0].transaction_id, tx2);
+        assert!(
+            report.unconverted[0].reason.contains("余额不足"),
+            "got: {}",
+            report.unconverted[0].reason
+        );
+
+        // 场景①迁移额 = 400（按 legacy ID 定位迁移行），落在 L1 且保留旧匹配 ID
+        let (m_amount, m_line, m_legacy): (f64, i64, i64) = conn
+            .query_row(
+                "SELECT allocated_amount, voucher_line_id, legacy_match_id
+                 FROM bank_reconciliation_allocations WHERE legacy_match_id=?1",
+                params![m1],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(m_legacy, m1);
+        assert_eq!(m_line, line1_id, "迁移应落在旧匹配批次的资金行");
+        assert!(
+            (m_amount - 400.0).abs() < 0.005,
+            "迁移额应取两侧剩余的较小值 400，got {m_amount}"
+        );
+        // 守恒：tx1 流水侧全部 active 核销合计 == 支出，未超核销
+        let tx1_total: f64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(allocated_amount),0) FROM bank_reconciliation_allocations
+                 WHERE transaction_id=?1 AND status='active'",
+                params![tx1],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!((tx1_total - 1000.0).abs() < 0.005, "got {tx1_total}");
+        // 场景②不新增迁移行（仅原有脏数据 1 条）
+        let tx2_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM bank_reconciliation_allocations WHERE transaction_id=?1",
+                params![tx2],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tx2_rows, 1, "耗尽流水不得再写迁移行");
+
+        // 重跑幂等：场景①不重复迁移，场景②仍进报告
+        let report2 = migrate_legacy_bank_matches(&conn).unwrap();
+        assert_eq!(report2.migrated, 0);
+        assert_eq!(report2.already_migrated, 1);
+        assert_eq!(report2.unconverted.len(), 1);
     }
 
     // ==================== Task 11：流水账户化导入与预览 ====================
