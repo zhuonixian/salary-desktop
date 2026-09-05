@@ -104,6 +104,11 @@ import type {
   FundDocument,
   FundDocumentInput,
   FundDocumentQuery,
+  AdvanceLedger,
+  AdvanceLedgerQuery,
+  AdvanceLedgerRow,
+  AdvanceLinkCancelInput,
+  AdvanceSettlementLink,
   FundDocumentDetail,
   FundDocumentReverseInput,
 } from '@/types';
@@ -332,6 +337,8 @@ const baseMockFundDoc = (over: Partial<FundDocument>): FundDocument => ({
   source_account_id: null,
   target_account_id: null,
   counter_account_code: null,
+  settlement_mode: null,
+  due_date: null,
   status: 'draft',
   payment_batch_id: null,
   reversal_of_id: null,
@@ -391,6 +398,83 @@ const mockFundDocuments: FundDocument[] = [
     status: 'draft',
   }),
 ];
+
+// Task 14 预览种子：两笔借款（一笔部分核销、一笔未核销）
+mockFundDocuments.unshift(
+  baseMockFundDoc({
+    id: 5,
+    document_no: `JK${mockDocMonth.replace('-', '')}0005`,
+    document_type: 'advance',
+    amount: 2000,
+    summary: '员工差旅备用金',
+    employee_id: 2,
+    source_account_id: 1,
+    due_date: `${mockDocMonth}-28`,
+    status: 'settled',
+    submitted_by: 1,
+    submitted_at: '2026-01-02T00:00:00Z',
+    approved_by: 2,
+    approved_at: '2026-01-02T01:00:00Z',
+    settled_by: 1,
+    settled_at: '2026-01-02T02:00:00Z',
+  }),
+  baseMockFundDoc({
+    id: 4,
+    document_no: `JK${mockDocMonth.replace('-', '')}0004`,
+    document_type: 'advance',
+    amount: 3000,
+    summary: '员工出差借款',
+    employee_id: 1,
+    source_account_id: 1,
+    due_date: `${mockDocMonth}-20`,
+    status: 'settled',
+    submitted_by: 1,
+    submitted_at: '2026-01-02T00:00:00Z',
+    approved_by: 2,
+    approved_at: '2026-01-02T01:00:00Z',
+    settled_by: 1,
+    settled_at: '2026-01-02T02:00:00Z',
+  }),
+  baseMockFundDoc({
+    id: 6,
+    document_no: `HX${mockDocMonth.replace('-', '')}0006`,
+    document_type: 'advance_settlement',
+    amount: 1000,
+    summary: '借款核销-现金归还',
+    employee_id: 1,
+    target_account_id: 2,
+    settlement_mode: 'cash_return',
+    status: 'settled',
+    submitted_by: 1,
+    submitted_at: '2026-01-03T00:00:00Z',
+    approved_by: 2,
+    approved_at: '2026-01-03T01:00:00Z',
+    settled_by: 1,
+    settled_at: '2026-01-03T02:00:00Z',
+  }),
+);
+
+// 借款核销关系预览数据（模拟 advance_settlement_links）
+const mockAdvanceLinks: AdvanceSettlementLink[] = [
+  {
+    id: 1,
+    advance_id: 4,
+    settlement_id: 6,
+    allocated_amount: 1000,
+    status: 'active',
+    remark: null,
+    created_at: '2026-01-03T02:00:00Z',
+    cancelled_at: null,
+    cancel_reason: null,
+    settlement_document_no: `HX${mockDocMonth.replace('-', '')}0006`,
+    settlement_date: `${mockDocMonth}-05`,
+    settlement_status: 'settled',
+    settlement_mode: 'cash_return',
+  },
+];
+
+const mockNextAdvanceLinkId = (): number =>
+  mockAdvanceLinks.reduce((max, l) => Math.max(max, l.id), 0) + 1;
 
 const mockApprovalEvents: ApprovalEvent[] = [
   {
@@ -879,6 +963,27 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
       const prefixes: Record<string, string> = {
         receipt: 'SK', payment: 'FK', transfer: 'NB', advance: 'JK', advance_settlement: 'HX',
       };
+      // Task 14：核销单必须关联已发放借款且分摊合计一致（与后端 validate_advance_allocations 同口径）
+      const allocs = data.advance_allocations ?? [];
+      if (data.document_type === 'advance_settlement') {
+        if (allocs.length === 0) throw new Error('借款核销单必须关联至少一笔员工借款单');
+        const allocated = allocs.reduce((s, a) => s + Number(a.amount || 0), 0);
+        if (Math.abs(allocated - Number(data.amount)) > 0.005) {
+          throw new Error('核销关联金额合计与单据金额不一致');
+        }
+        for (const alloc of allocs) {
+          const loan = mockFundDocuments.find((d) => d.id === alloc.advance_id);
+          if (!loan || loan.document_type !== 'advance') throw new Error('关联的员工借款单不存在');
+          if (loan.status !== 'settled') throw new Error(`借款单 ${loan.document_no} 尚未发放，只能核销已发放的借款`);
+          if (loan.employee_id !== data.employee_id) throw new Error('借款单的员工与核销单不一致，不能核销他人借款');
+          const settledSum = mockAdvanceLinks
+            .filter((l) => l.advance_id === loan.id && l.status === 'active')
+            .reduce((s, l) => s + l.allocated_amount, 0);
+          if (settledSum + Number(alloc.amount) > loan.amount + 0.005) {
+            throw new Error(`借款单 ${loan.document_no} 累计核销超过借款金额`);
+          }
+        }
+      }
       const doc = baseMockFundDoc({
         ...data,
         id: mockNextFundDocId(),
@@ -889,6 +994,25 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
         updated_at: now,
       });
       mockFundDocuments.unshift(doc);
+      if (data.document_type === 'advance_settlement') {
+        for (const alloc of allocs) {
+          mockAdvanceLinks.push({
+            id: mockNextAdvanceLinkId(),
+            advance_id: alloc.advance_id,
+            settlement_id: doc.id,
+            allocated_amount: Number(alloc.amount),
+            status: 'active',
+            remark: null,
+            created_at: now,
+            cancelled_at: null,
+            cancel_reason: null,
+            settlement_document_no: doc.document_no,
+            settlement_date: doc.document_date,
+            settlement_status: doc.status,
+            settlement_mode: data.settlement_mode ?? 'cash_return',
+          });
+        }
+      }
       return doc;
     }
     case 'update_fund_document': {
@@ -958,6 +1082,105 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
       mockPushEvent(reversal.id, 'reverse', null, 'settled', data.comment.trim());
       return reversal;
     }
+    // ==================== Task 14：员工借款备用金与核销（spec 4.11） ====================
+    case 'get_advance_ledger': {
+      const q = (args?.query ?? {}) as AdvanceLedgerQuery;
+      const asOf = q.as_of_date ? new Date(`${q.as_of_date}T00:00:00Z`) : new Date();
+      const loans = mockFundDocuments.filter(
+        (d) => d.document_type === 'advance' && d.status !== 'void' && d.status !== 'reversed',
+      );
+      let rows: AdvanceLedgerRow[] = loans.map((loan) => {
+        const settled = mockAdvanceLinks
+          .filter((l) => l.advance_id === loan.id && l.status === 'active')
+          .reduce((s, l) => s + l.allocated_amount, 0);
+        const rawOutstanding = loan.amount - settled;
+        const outstanding = Math.abs(rawOutstanding) < 0.005 ? 0 : rawOutstanding;
+        const docDate = new Date(`${loan.document_date}T00:00:00Z`);
+        const daysOutstanding = Math.max(0, Math.round((asOf.getTime() - docDate.getTime()) / 86400000));
+        const overdueDays =
+          outstanding > 0 && loan.due_date
+            ? Math.max(
+                0,
+                Math.round((asOf.getTime() - new Date(`${loan.due_date}T00:00:00Z`).getTime()) / 86400000),
+              )
+            : 0;
+        const bucket =
+          outstanding <= 0
+            ? '已结清'
+            : daysOutstanding <= 30
+              ? '0-30天'
+              : daysOutstanding <= 60
+                ? '31-60天'
+                : daysOutstanding <= 90
+                  ? '61-90天'
+                  : '90天以上';
+        return {
+          advance_id: loan.id,
+          document_no: loan.document_no,
+          belong_month: loan.belong_month,
+          document_date: loan.document_date,
+          due_date: loan.due_date,
+          employee_id: loan.employee_id,
+          employee_name: loan.employee_id === 1 ? '张三' : loan.employee_id === 2 ? '李四' : null,
+          department: loan.department,
+          summary: loan.summary,
+          amount: loan.amount,
+          settled_amount: settled,
+          outstanding_amount: outstanding,
+          days_outstanding: daysOutstanding,
+          overdue_days: overdueDays,
+          aging_bucket: bucket,
+          advance_status: loan.status,
+        };
+      });
+      if (q.employee_id) rows = rows.filter((r) => r.employee_id === q.employee_id);
+      if (q.keyword?.trim()) {
+        const kw = q.keyword.trim();
+        rows = rows.filter(
+          (r) =>
+            r.document_no.includes(kw) ||
+            r.summary.includes(kw) ||
+            (r.employee_name ?? '').includes(kw),
+        );
+      }
+      if (q.only_outstanding) rows = rows.filter((r) => r.outstanding_amount > 0.005);
+      return {
+        rows,
+        total_amount: rows.reduce((s, r) => s + r.amount, 0),
+        total_settled: rows.reduce((s, r) => s + r.settled_amount, 0),
+        total_outstanding: rows.reduce((s, r) => s + r.outstanding_amount, 0),
+      };
+    }
+    case 'get_advance_settlement_links':
+      return mockAdvanceLinks.filter((l) => l.advance_id === Number(args?.advanceId ?? 0));
+    case 'cancel_advance_settlement_link': {
+      const data = args?.data as AdvanceLinkCancelInput | undefined;
+      const link = mockAdvanceLinks.find((l) => l.id === Number(data?.link_id ?? 0));
+      if (!link) throw new Error('核销记录不存在');
+      if (link.status !== 'active') throw new Error('该核销记录已取消，无需重复取消');
+      if (!data?.reason?.trim()) throw new Error('取消核销必须填写原因');
+      const settlement = mockFundDocuments.find((d) => d.id === link.settlement_id);
+      if (!settlement) throw new Error('核销单不存在');
+      if (settlement.status === 'settled') {
+        throw new Error('预览模式不支持冲正取消核销，请在桌面应用中操作');
+      }
+      const now = new Date().toISOString();
+      mockTransitionFundDocument(
+        settlement.id,
+        ['draft', 'submitted', 'approved', 'rejected'],
+        'void',
+        'void',
+        data.reason,
+        true,
+      );
+      link.status = 'cancelled';
+      link.cancelled_at = now;
+      link.cancel_reason = data.reason.trim();
+      link.settlement_status = 'void';
+      return { ...settlement, status: 'void' };
+    }
+    case 'export_advance_ledger':
+      return String(args?.path ?? '');
     // 预览模式跳过启动密码/锁屏（仅在非 Tauri 环境生效），让业务页面可打开。
     case 'is_security_initialized':
       return true;
@@ -2391,4 +2614,27 @@ export async function settleFundDocument(id: number): Promise<FundDocument> {
 
 export async function reverseFundDocument(data: FundDocumentReverseInput): Promise<FundDocument> {
   return invoke<FundDocument>('reverse_fund_document', { data });
+}
+
+// ==================== 员工借款备用金与核销（第七阶段 Task 14，spec 4.11） ====================
+
+export async function getAdvanceLedger(query: AdvanceLedgerQuery = {}): Promise<AdvanceLedger> {
+  return invoke<AdvanceLedger>('get_advance_ledger', { query });
+}
+
+export async function getAdvanceSettlementLinks(advanceId: number): Promise<AdvanceSettlementLink[]> {
+  return invoke<AdvanceSettlementLink[]>('get_advance_settlement_links', { advanceId });
+}
+
+export async function cancelAdvanceSettlementLink(
+  data: AdvanceLinkCancelInput,
+): Promise<FundDocument> {
+  return invoke<FundDocument>('cancel_advance_settlement_link', { data });
+}
+
+export async function exportAdvanceLedger(
+  query: AdvanceLedgerQuery,
+  path: string,
+): Promise<string> {
+  return invoke<string>('export_advance_ledger', { query, path });
 }

@@ -1322,6 +1322,81 @@ pub fn export_fund_journal(
     Ok(path)
 }
 
+// ==================== Task 14：员工借款备用金与核销（spec 4.11） ====================
+
+/// 借款台账：按借款单聚合未核销余额、逾期天数与账龄（0-30/31-60/61-90/90+）
+#[tauri::command]
+pub fn get_advance_ledger(
+    query: AdvanceLedgerQuery,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<AdvanceLedger, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    cashier::get_advance_ledger(&conn, &query)
+}
+
+/// 核销时间线：某借款单的全部核销记录（含已取消），按时间正序
+#[tauri::command]
+pub fn get_advance_settlement_links(
+    advance_id: i64,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<AdvanceSettlementLink>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    cashier::get_advance_settlement_links(&conn, advance_id)
+}
+
+/// 取消核销：未结算核销单→作废；已结算→冲正（需冲正归属月/日期）。
+/// 取消后借款未核销余额恢复，联动作废/冲正凭证（spec 4.11）。
+#[tauri::command]
+pub fn cancel_advance_settlement_link(
+    data: AdvanceLinkCancelInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<FundDocument, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let doc = cashier::cancel_advance_settlement_link(&conn, &current, &data)?;
+    db::log_operation(
+        &conn,
+        "cancel_advance_settlement_link",
+        &format!(
+            "取消借款核销（记录ID={}），核销单流转为 {} {}",
+            data.link_id,
+            cashier::fund_status_label(&doc.status),
+            doc.document_no
+        ),
+        &cashier::current_operator_name(&conn, &current),
+        Some(&format!(
+            "link_id={} reason={}",
+            data.link_id,
+            data.reason.trim()
+        )),
+    )?;
+    Ok(doc)
+}
+
+/// 导出借款备用金台账 Excel（含未核销余额、逾期与账龄）
+#[tauri::command]
+pub fn export_advance_ledger(
+    query: AdvanceLedgerQuery,
+    path: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<String, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let ledger = cashier::get_advance_ledger(&conn, &query)?;
+    excel::export_advance_ledger_excel(&ledger, &path)?;
+    db::log_operation(
+        &conn,
+        "export_advance_ledger",
+        &format!(
+            "导出借款备用金台账（{} 笔，未核销余额 {:.2}）到{path}",
+            ledger.rows.len(),
+            ledger.total_outstanding
+        ),
+        "system",
+        None,
+    )?;
+    Ok(path)
+}
+
 #[tauri::command]
 pub fn generate_bank_reconciliation_period(
     fund_account_id: i64,

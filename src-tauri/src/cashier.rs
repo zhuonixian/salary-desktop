@@ -1325,7 +1325,25 @@ const DIRECT_SETTLE_TYPES: &[&str] = &["receipt", "transfer", "advance_settlemen
 /// 可进入付款批次的单据类型（spec 5.1：payment/advance）
 const BATCHABLE_TYPES: &[&str] = &["payment", "advance"];
 
-const FUND_DOCUMENT_COLS: &str = "id, document_no, document_type, belong_month, document_date, amount, summary, department, expense_type, remark, partner_id, employee_id, source_account_id, target_account_id, counter_account_code, status, payment_batch_id, reversal_of_id, submitted_by, submitted_at, approved_by, approved_at, settled_by, settled_at, voided_by, voided_at, created_by, created_at, updated_at";
+/// 借款核销方式（Task 14，spec 4.7/4.11）：
+/// cash_return=现金/银行归还（资金回流，需目标账户）；
+/// reimburse_offset=报销抵扣（借 2241 / 贷 1221，无资金流动）；
+/// salary_deduct=工资扣回（借 2211 / 贷 1221，无资金流动）；
+/// other=其他核销（借指定科目 / 贷 1221）
+const SETTLEMENT_MODES: &[&str] = &["cash_return", "reimburse_offset", "salary_deduct", "other"];
+
+/// 核销方式中文名（错误信息与前端展示共用）
+pub(crate) fn settlement_mode_label(mode: &str) -> &'static str {
+    match mode {
+        "cash_return" => "现金/银行归还",
+        "reimburse_offset" => "报销抵扣",
+        "salary_deduct" => "工资扣回",
+        "other" => "其他核销",
+        _ => "未知方式",
+    }
+}
+
+const FUND_DOCUMENT_COLS: &str = "id, document_no, document_type, belong_month, document_date, amount, summary, department, expense_type, remark, partner_id, employee_id, source_account_id, target_account_id, counter_account_code, settlement_mode, due_date, status, payment_batch_id, reversal_of_id, submitted_by, submitted_at, approved_by, approved_at, settled_by, settled_at, voided_by, voided_at, created_by, created_at, updated_at";
 
 fn fund_document_from_row(r: &rusqlite::Row) -> rusqlite::Result<FundDocument> {
     Ok(FundDocument {
@@ -1344,20 +1362,22 @@ fn fund_document_from_row(r: &rusqlite::Row) -> rusqlite::Result<FundDocument> {
         source_account_id: r.get(12)?,
         target_account_id: r.get(13)?,
         counter_account_code: r.get(14)?,
-        status: r.get(15)?,
-        payment_batch_id: r.get(16)?,
-        reversal_of_id: r.get(17)?,
-        submitted_by: r.get(18)?,
-        submitted_at: r.get(19)?,
-        approved_by: r.get(20)?,
-        approved_at: r.get(21)?,
-        settled_by: r.get(22)?,
-        settled_at: r.get(23)?,
-        voided_by: r.get(24)?,
-        voided_at: r.get(25)?,
-        created_by: r.get(26)?,
-        created_at: r.get(27)?,
-        updated_at: r.get(28)?,
+        settlement_mode: r.get(15)?,
+        due_date: r.get(16)?,
+        status: r.get(17)?,
+        payment_batch_id: r.get(18)?,
+        reversal_of_id: r.get(19)?,
+        submitted_by: r.get(20)?,
+        submitted_at: r.get(21)?,
+        approved_by: r.get(22)?,
+        approved_at: r.get(23)?,
+        settled_by: r.get(24)?,
+        settled_at: r.get(25)?,
+        voided_by: r.get(26)?,
+        voided_at: r.get(27)?,
+        created_by: r.get(28)?,
+        created_at: r.get(29)?,
+        updated_at: r.get(30)?,
     })
 }
 
@@ -1649,6 +1669,44 @@ fn validate_fund_document_content(conn: &Connection, input: &FundDocumentInput) 
                 ));
             }
             ensure_fund_account_usable(conn, "来源账户", source)?;
+            // 预计归还日必填（spec 4.11 账龄/逾期统计依据），且不得早于借款日期
+            let Some(due) = input
+                .due_date
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            else {
+                return Err(AppError::InvalidParam(
+                    "员工借款单必须填写预计归还日".into(),
+                ));
+            };
+            let due_date = NaiveDate::parse_from_str(due, "%Y-%m-%d").map_err(|_| {
+                AppError::InvalidParam(format!("预计归还日格式应为 YYYY-MM-DD：{due}"))
+            })?;
+            let doc_date =
+                NaiveDate::parse_from_str(&input.document_date, "%Y-%m-%d").map_err(|_| {
+                    AppError::InvalidParam(format!(
+                        "单据日期格式应为 YYYY-MM-DD：{}",
+                        input.document_date
+                    ))
+                })?;
+            if due_date < doc_date {
+                return Err(AppError::InvalidParam("预计归还日不能早于借款日期".into()));
+            }
+            // 其他应收款科目可选（缺省 1221），填了必须是有效启用科目且不能是资金科目
+            ensure_counter_account(
+                conn,
+                input.counter_account_code.as_deref(),
+                "员工借款单",
+                false,
+            )?;
+            if let Some(code) = input.counter_account_code.as_deref().map(str::trim) {
+                if db::STAGE7_FUND_GL_CODES.contains(&code) {
+                    return Err(AppError::InvalidParam(format!(
+                        "员工借款单的其他应收款科目不能是资金科目 {code}"
+                    )));
+                }
+            }
         }
         "advance_settlement" => {
             if input.source_account_id.is_some() {
@@ -1656,17 +1714,62 @@ fn validate_fund_document_content(conn: &Connection, input: &FundDocumentInput) 
                     "借款核销单只能选择目标账户（资金回流），不能选择来源账户".into(),
                 ));
             }
-            let Some(target) = input.target_account_id else {
-                return Err(AppError::InvalidParam(
-                    "借款核销单必须选择目标账户（资金回流账户）".into(),
-                ));
-            };
             if input.employee_id.is_none() || input.partner_id.is_some() {
                 return Err(AppError::InvalidParam(
                     "借款核销单必须选择员工，不能选择往来单位".into(),
                 ));
             }
-            ensure_fund_account_usable(conn, "目标账户", target)?;
+            // 核销方式分流（Task 14，spec 4.7）：缺省 cash_return 兼容历史"资金回流"建模。
+            // 仅现金归还（cash_return）有资金流动需要目标账户；
+            // 报销抵扣/工资扣回/其他核销为无资金流动的科目对转
+            let mode = effective_settlement_mode(input);
+            ensure_in_list(mode, SETTLEMENT_MODES, "核销方式")?;
+            match mode {
+                "cash_return" => {
+                    let Some(target) = input.target_account_id else {
+                        return Err(AppError::InvalidParam(
+                            "现金归还核销单必须选择目标账户（资金回流账户）".into(),
+                        ));
+                    };
+                    ensure_fund_account_usable(conn, "目标账户", target)?;
+                }
+                "other" => {
+                    ensure_no_fund_account(input)?;
+                    // 其他核销：counter_account_code 作为借方科目，必须指定且不能是资金科目
+                    ensure_counter_account(
+                        conn,
+                        input.counter_account_code.as_deref(),
+                        "其他核销单",
+                        true,
+                    )?;
+                    if let Some(code) = input.counter_account_code.as_deref().map(str::trim) {
+                        if db::STAGE7_FUND_GL_CODES.contains(&code) {
+                            return Err(AppError::InvalidParam(format!(
+                                "其他核销的借方科目不能是资金科目 {code}"
+                            )));
+                        }
+                    }
+                }
+                _ => {
+                    ensure_no_fund_account(input)?;
+                    if input
+                        .counter_account_code
+                        .as_deref()
+                        .map(str::trim)
+                        .is_some_and(|v| !v.is_empty())
+                    {
+                        return Err(AppError::InvalidParam(format!(
+                            "{}核销的借方科目固定为 {}，不需填写对方科目",
+                            settlement_mode_label(mode),
+                            if mode == "reimburse_offset" {
+                                "2241"
+                            } else {
+                                "2211"
+                            }
+                        )));
+                    }
+                }
+            }
         }
         _ => unreachable!("reversal 已在上方拦截"),
     }
@@ -1891,14 +1994,19 @@ pub fn create_fund_document(
         ));
     }
     validate_fund_document_content(conn, input)?;
+    // 借款核销：校验核销关系（spec 4.11 不得重复核销）
+    validate_advance_allocations(conn, input, None)?;
     ensure_month_open(conn, &input.belong_month)?;
     let now = Utc::now().to_rfc3339();
-    conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
         "INSERT INTO fund_documents
             (document_no, document_type, belong_month, document_date, amount, summary,
              department, expense_type, remark, partner_id, employee_id, source_account_id,
-             target_account_id, counter_account_code, status, created_by, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 'draft', ?15, ?16, ?16)",
+             target_account_id, counter_account_code, settlement_mode, due_date,
+             status, created_by, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                 'draft', ?17, ?18, ?18)",
         params![
             fund_document_no(&input.document_type, &input.document_date),
             input.document_type,
@@ -1914,11 +2022,19 @@ pub fn create_fund_document(
             input.source_account_id,
             input.target_account_id,
             trimmed_optional(input.counter_account_code.as_deref()),
+            trimmed_optional(input.settlement_mode.as_deref()),
+            trimmed_optional(input.due_date.as_deref()),
             operator_id,
             now,
         ],
     )?;
-    get_fund_document(conn, conn.last_insert_rowid())
+    let doc_id = tx.last_insert_rowid();
+    // 核销关系与单据同事务落库（任一失败整体回滚，不留无关联的核销单）
+    if input.document_type == "advance_settlement" {
+        replace_advance_links_in_tx(&tx, doc_id, input, operator_id, &now)?;
+    }
+    tx.commit()?;
+    get_fund_document(conn, doc_id)
 }
 
 /// 更新资金单据（仅草稿可编辑；submitted 后业务字段冻结，spec 5.1）。
@@ -1941,14 +2057,18 @@ pub fn update_fund_document(
         )));
     }
     validate_fund_document_content(conn, input)?;
+    // 借款核销：校验核销关系（排除本单已有关联，spec 4.11 不得重复核销）
+    validate_advance_allocations(conn, input, Some(id))?;
     // 归属月份可改：原月份与新月份都必须开放
     ensure_month_open(conn, &existing.belong_month)?;
     ensure_month_open(conn, &input.belong_month)?;
-    conn.execute(
+    let now = Utc::now().to_rfc3339();
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
         "UPDATE fund_documents SET document_type = ?2, belong_month = ?3, document_date = ?4,
             amount = ?5, summary = ?6, department = ?7, expense_type = ?8, remark = ?9,
             partner_id = ?10, employee_id = ?11, source_account_id = ?12, target_account_id = ?13,
-            counter_account_code = ?14, updated_at = ?15
+            counter_account_code = ?14, settlement_mode = ?15, due_date = ?16, updated_at = ?17
          WHERE id = ?1",
         params![
             id,
@@ -1965,9 +2085,23 @@ pub fn update_fund_document(
             input.source_account_id,
             input.target_account_id,
             trimmed_optional(input.counter_account_code.as_deref()),
-            Utc::now().to_rfc3339()
+            trimmed_optional(input.settlement_mode.as_deref()),
+            trimmed_optional(input.due_date.as_deref()),
+            now,
         ],
     )?;
+    // 草稿核销单更新：整组替换核销关系（仅草稿可编辑，无凭证联动）；
+    // 改成其他类型时清空旧核销关系，防止残留悬空关联虚增已核销额
+    if input.document_type == "advance_settlement" {
+        let (operator_id, _) = require_current_operator(&tx, current)?;
+        replace_advance_links_in_tx(&tx, id, input, operator_id, &now)?;
+    } else if existing.document_type == "advance_settlement" {
+        tx.execute(
+            "DELETE FROM advance_settlement_links WHERE settlement_id = ?1",
+            params![id],
+        )?;
+    }
+    tx.commit()?;
     get_fund_document(conn, id)
 }
 
@@ -2190,9 +2324,37 @@ pub fn void_fund_document(
                 "UPDATE fund_documents SET voided_by = ?2, voided_at = ?3 WHERE id = ?1",
                 params![doc.id, operator_id, now],
             )?;
+            // Task 14（spec 4.11）：核销单作废联动取消核销关系，恢复借款未核销余额
+            if doc.document_type == "advance_settlement" {
+                cancel_advance_links_in_tx(
+                    tx,
+                    doc.id,
+                    operator_id,
+                    now,
+                    "核销单作废，联动取消核销记录",
+                )?;
+            }
             Ok(())
         },
     )
+}
+
+/// 取消某核销单的全部 active 核销关系（作废/冲正联动，spec 4.11），必须在同事务内调用。
+fn cancel_advance_links_in_tx(
+    tx: &Connection,
+    settlement_id: i64,
+    operator_id: i64,
+    now: &str,
+    reason: &str,
+) -> AppResult<usize> {
+    let affected = tx.execute(
+        "UPDATE advance_settlement_links
+         SET status = 'cancelled', cancelled_by = ?2, cancelled_at = ?3,
+             cancel_reason = ?4, updated_at = ?3
+         WHERE settlement_id = ?1 AND status = 'active'",
+        params![settlement_id, operator_id, now, reason],
+    )?;
+    Ok(affected)
 }
 
 /// 标记进入付款批次（approved → batched；仅付款/借款单）。
@@ -2387,6 +2549,21 @@ pub fn reverse_fund_document(
     ensure_month_open(&tx, &input.belong_month)?;
 
     let now = Utc::now().to_rfc3339();
+    // 已有核销记录的借款单禁止冲正（余额已被部分核销，须先取消核销，Task 14 spec 4.11）
+    if original.document_type == "advance" {
+        let active: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM advance_settlement_links
+             WHERE advance_id = ?1 AND status = 'active'",
+            params![original.id],
+            |r| r.get(0),
+        )?;
+        if active > 0 {
+            return Err(AppError::General(format!(
+                "借款单 {} 存在 {active} 条核销记录，请先取消全部核销后再冲正",
+                original.document_no
+            )));
+        }
+    }
     // 相反方向：来源/目标账户互换；往来对象、对方科目、部门、费用类型随原单
     tx.execute(
         "INSERT INTO fund_documents
@@ -2441,6 +2618,16 @@ pub fn reverse_fund_document(
         Some(operator_id),
         Some(comment),
     )?;
+    // Task 14（spec 4.11）：冲正核销单联动取消核销关系，恢复借款未核销余额（同事务）
+    if original.document_type == "advance_settlement" {
+        cancel_advance_links_in_tx(
+            &tx,
+            original.id,
+            operator_id,
+            &now,
+            "核销单冲正，联动取消核销记录",
+        )?;
+    }
     // 冲正凭证同事务生成（spec 4.7）：复制原单凭证交换借贷、原凭证保留 active；
     // 任何一步失败（含凭证生成）整体回滚，不留"已冲正但无凭证"的半成品
     let reversal_doc = get_fund_document(&tx, reversal_id)?;
@@ -2450,6 +2637,375 @@ pub fn reverse_fund_document(
     get_fund_document(conn, reversal_id)
 }
 
+// ==================== 员工借款核销（Task 14，spec 4.7/4.11） ====================
+
+/// 校验借款核销分摊（spec 4.11）：
+/// - 必须关联至少一笔借款单，分摊合计与核销单金额一致；
+/// - 借款单必须已发放（settled，凭证已借记 1221）且员工一致；
+/// - 单笔借款的累计核销（active links 合计 + 本次）不得超过借款金额（容差 0.005）；
+/// - 一次核销关联的借款单对方科目必须一致（贷方单行出账）。
+/// `exclude_settlement_id`：更新草稿单时排除自身已有关联。
+fn validate_advance_allocations(
+    conn: &Connection,
+    input: &FundDocumentInput,
+    exclude_settlement_id: Option<i64>,
+) -> AppResult<()> {
+    if input.document_type != "advance_settlement" {
+        return Ok(());
+    }
+    let allocs = input.advance_allocations.as_deref().unwrap_or(&[]);
+    if allocs.is_empty() {
+        return Err(AppError::InvalidParam(
+            "借款核销单必须关联至少一笔员工借款单".into(),
+        ));
+    }
+    let allocated: f64 = allocs.iter().map(|a| a.amount).sum();
+    if (allocated - input.amount).abs() > AMOUNT_TOLERANCE {
+        return Err(AppError::InvalidParam(format!(
+            "核销关联金额合计 {allocated:.2} 与单据金额 {:.2} 不一致",
+            input.amount
+        )));
+    }
+    for alloc in allocs {
+        if alloc.amount < AMOUNT_TOLERANCE {
+            return Err(AppError::InvalidParam("单笔核销分摊金额必须大于 0".into()));
+        }
+        let advance: Option<(String, String, Option<i64>, Option<String>, f64)> = conn
+            .query_row(
+                "SELECT document_no, status, employee_id, counter_account_code, amount
+                 FROM fund_documents WHERE id = ?1 AND document_type = 'advance'",
+                params![alloc.advance_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .optional()?;
+        let Some((doc_no, status, employee_id, _counter, amount)) = advance else {
+            return Err(AppError::NotFound(format!(
+                "关联的员工借款单不存在：id={}",
+                alloc.advance_id
+            )));
+        };
+        if status != "settled" {
+            return Err(AppError::InvalidParam(format!(
+                "借款单 {doc_no} 尚未发放（当前状态：{}），只能核销已发放的借款",
+                fund_status_label(&status)
+            )));
+        }
+        if employee_id != input.employee_id {
+            return Err(AppError::InvalidParam(format!(
+                "借款单 {doc_no} 的员工与核销单不一致，不能核销他人借款"
+            )));
+        }
+        // 不得重复核销：累计 active 核销 + 本次 ≤ 借款金额
+        let already: f64 = conn.query_row(
+            "SELECT COALESCE(SUM(allocated_amount), 0) FROM advance_settlement_links
+             WHERE advance_id = ?1 AND status = 'active' AND settlement_id != ?2",
+            params![alloc.advance_id, exclude_settlement_id.unwrap_or(-1)],
+            |r| r.get(0),
+        )?;
+        if already + alloc.amount > amount + AMOUNT_TOLERANCE {
+            return Err(AppError::InvalidParam(format!(
+                "借款单 {doc_no} 累计核销 {:.2} 将超过借款金额 {:.2}（未核销余额 {:.2}）",
+                already + alloc.amount,
+                amount,
+                (amount - already).max(0.0)
+            )));
+        }
+    }
+    // 贷方科目单行出账：一次核销关联的借款对方科目必须一致
+    let mut credit_codes: Vec<String> = Vec::new();
+    for alloc in allocs {
+        let code: Option<String> = conn.query_row(
+            "SELECT counter_account_code FROM fund_documents WHERE id = ?1",
+            params![alloc.advance_id],
+            |r| r.get(0),
+        )?;
+        let code = code
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| ADVANCE_DEFAULT_GL.to_string());
+        if !credit_codes.contains(&code) {
+            credit_codes.push(code);
+        }
+    }
+    if credit_codes.len() > 1 {
+        return Err(AppError::InvalidParam(format!(
+            "一次核销关联的借款单对方科目不一致（{}），请分开核销",
+            credit_codes.join("、")
+        )));
+    }
+    Ok(())
+}
+
+/// 重写核销单的核销关系（创建/草稿更新共用）：先清旧关联再整组写入，同事务提交。
+fn replace_advance_links_in_tx(
+    tx: &Connection,
+    settlement_id: i64,
+    input: &FundDocumentInput,
+    operator_id: i64,
+    now: &str,
+) -> AppResult<()> {
+    tx.execute(
+        "DELETE FROM advance_settlement_links WHERE settlement_id = ?1",
+        params![settlement_id],
+    )?;
+    let allocs = input.advance_allocations.as_deref().unwrap_or(&[]);
+    for alloc in allocs {
+        tx.execute(
+            "INSERT INTO advance_settlement_links
+                (advance_id, settlement_id, allocated_amount, status, created_by,
+                 created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'active', ?4, ?5, ?5)",
+            params![
+                alloc.advance_id,
+                settlement_id,
+                alloc.amount,
+                operator_id,
+                now
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+/// 取消核销（spec 4.11"取消核销恢复余额"）：按核销单状态联动处理——
+/// 未结算（草稿/已提交/已审批/已驳回）→ 作废核销单（作废钩子联动取消 links，无凭证）；
+/// 已结算 → 冲正核销单（红字凭证恢复 1221，冲正钩子联动取消 links）。
+/// 返回处理后的核销单（作废单或冲正单）。
+pub fn cancel_advance_settlement_link(
+    conn: &Connection,
+    current: &CurrentOperatorState,
+    input: &AdvanceLinkCancelInput,
+) -> AppResult<FundDocument> {
+    let reason = input.reason.trim();
+    if reason.is_empty() {
+        return Err(AppError::InvalidParam("取消核销必须填写原因".into()));
+    }
+    let link_status: (String, i64, i64) = conn
+        .query_row(
+            "SELECT status, advance_id, settlement_id FROM advance_settlement_links WHERE id = ?1",
+            params![input.link_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?
+        .ok_or_else(|| AppError::NotFound(format!("核销记录不存在：id={}", input.link_id)))?;
+    if link_status.0 != "active" {
+        return Err(AppError::General("该核销记录已取消，无需重复取消".into()));
+    }
+    let settlement = get_fund_document(conn, link_status.2)?;
+    match settlement.status.as_str() {
+        "draft" | "submitted" | "approved" | "rejected" => {
+            // 未结算：作废核销单，作废钩子联动取消核销关系
+            void_fund_document(conn, current, settlement.id, reason)
+        }
+        "settled" => {
+            // 已结算：冲正核销单恢复账面（红字凭证），冲正钩子联动取消核销关系
+            let reversal_month = input
+                .reversal_month
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| {
+                    AppError::InvalidParam(
+                        "该核销单已结算入账，取消核销需冲正：请选择冲正归属月份".into(),
+                    )
+                })?;
+            let reversal_date = input
+                .reversal_date
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| {
+                    AppError::InvalidParam(
+                        "该核销单已结算入账，取消核销需冲正：请选择冲正日期".into(),
+                    )
+                })?;
+            reverse_fund_document(
+                conn,
+                current,
+                &FundDocumentReverseInput {
+                    document_id: settlement.id,
+                    belong_month: reversal_month.to_string(),
+                    document_date: reversal_date.to_string(),
+                    comment: reason.to_string(),
+                },
+            )
+        }
+        other => Err(AppError::General(format!(
+            "核销单 {} 当前状态「{}」，无法取消核销",
+            settlement.document_no,
+            fund_status_label(other)
+        ))),
+    }
+}
+
+/// 核销时间线（spec 4.11）：某借款单的全部核销记录（含已取消），按时间正序。
+pub fn get_advance_settlement_links(
+    conn: &Connection,
+    advance_id: i64,
+) -> AppResult<Vec<AdvanceSettlementLink>> {
+    let mut stmt = conn.prepare(
+        "SELECT l.id, l.advance_id, l.settlement_id, l.allocated_amount, l.status, l.remark,
+                l.created_at, l.cancelled_at, l.cancel_reason,
+                d.document_no, d.document_date, d.status, d.settlement_mode
+         FROM advance_settlement_links l
+         LEFT JOIN fund_documents d ON d.id = l.settlement_id
+         WHERE l.advance_id = ?1
+         ORDER BY l.id ASC",
+    )?;
+    let rows = stmt
+        .query_map(params![advance_id], |r| {
+            Ok(AdvanceSettlementLink {
+                id: r.get(0)?,
+                advance_id: r.get(1)?,
+                settlement_id: r.get(2)?,
+                allocated_amount: r.get(3)?,
+                status: r.get(4)?,
+                remark: r.get(5)?,
+                created_at: r.get(6)?,
+                cancelled_at: r.get(7)?,
+                cancel_reason: r.get(8)?,
+                settlement_document_no: r.get(9)?,
+                settlement_date: r.get(10)?,
+                settlement_status: r.get(11)?,
+                settlement_mode: r.get(12)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// 账龄分桶（未清天数）：0-30 / 31-60 / 61-90 / 90+
+fn advance_aging_bucket(days: i64) -> &'static str {
+    match days {
+        0..=30 => "0-30天",
+        31..=60 => "31-60天",
+        61..=90 => "61-90天",
+        _ => "90天以上",
+    }
+}
+
+/// 借款台账（spec 4.11）：按借款单聚合未核销余额、未清天数、逾期天数与账龄。
+/// 借款单状态排除 void/reversed；日期解析失败的账龄按 0 处理（不阻断台账）。
+pub fn get_advance_ledger(
+    conn: &Connection,
+    query: &AdvanceLedgerQuery,
+) -> AppResult<AdvanceLedger> {
+    let as_of = match query
+        .as_of_date
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        Some(d) => NaiveDate::parse_from_str(d, "%Y-%m-%d")
+            .map_err(|_| AppError::InvalidParam(format!("基准日格式应为 YYYY-MM-DD：{d}")))?,
+        None => Utc::now().date_naive(),
+    };
+    let mut where_clauses: Vec<String> = vec![
+        "a.document_type = 'advance'".into(),
+        "a.status NOT IN ('void','reversed')".into(),
+    ];
+    let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    if let Some(emp) = query.employee_id {
+        params_vec.push(Box::new(emp));
+        where_clauses.push(format!("a.employee_id = ?{}", params_vec.len()));
+    }
+    if let Some(kw) = query
+        .keyword
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        let like = format!("%{kw}%");
+        params_vec.push(Box::new(like.clone()));
+        let n = params_vec.len();
+        params_vec.push(Box::new(like.clone()));
+        let n2 = params_vec.len();
+        params_vec.push(Box::new(like));
+        let n3 = params_vec.len();
+        where_clauses.push(format!(
+            "(a.document_no LIKE ?{n} OR a.summary LIKE ?{n2} OR e.name LIKE ?{n3})"
+        ));
+    }
+    let sql = format!(
+        "SELECT a.id, a.document_no, a.belong_month, a.document_date, a.due_date, a.amount,
+                a.status, a.department, a.summary, a.employee_id, e.name,
+                (SELECT COALESCE(SUM(l.allocated_amount), 0) FROM advance_settlement_links l
+                 WHERE l.advance_id = a.id AND l.status = 'active')
+         FROM fund_documents a
+         LEFT JOIN employees e ON e.id = a.employee_id
+         WHERE {}
+         ORDER BY a.document_date DESC, a.id DESC",
+        where_clauses.join(" AND ")
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params_from_iter(params_vec.iter().map(|b| b.as_ref())),
+            |r| {
+                let doc_date_str: String = r.get(3)?;
+                let due_date: Option<String> = r.get(4)?;
+                let amount: f64 = r.get(5)?;
+                let settled: f64 = r.get(11)?;
+                let raw_outstanding = amount - settled;
+                let outstanding = if raw_outstanding.abs() < AMOUNT_TOLERANCE {
+                    0.0
+                } else {
+                    raw_outstanding
+                };
+                let doc_date = NaiveDate::parse_from_str(&doc_date_str, "%Y-%m-%d").ok();
+                let days_outstanding = doc_date.map(|d| (as_of - d).num_days().max(0)).unwrap_or(0);
+                let overdue_days = if outstanding > 0.0 {
+                    due_date
+                        .as_deref()
+                        .and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
+                        .map(|d| (as_of - d).num_days().max(0))
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                Ok(AdvanceLedgerRow {
+                    advance_id: r.get(0)?,
+                    document_no: r.get(1)?,
+                    belong_month: r.get(2)?,
+                    document_date: doc_date_str,
+                    due_date,
+                    amount,
+                    advance_status: r.get(6)?,
+                    department: r.get(7)?,
+                    summary: r.get(8)?,
+                    employee_id: r.get(9)?,
+                    employee_name: r.get(10)?,
+                    settled_amount: settled,
+                    outstanding_amount: outstanding,
+                    days_outstanding,
+                    overdue_days,
+                    aging_bucket: if outstanding <= 0.0 {
+                        "已结清".to_string()
+                    } else {
+                        advance_aging_bucket(days_outstanding).to_string()
+                    },
+                })
+            },
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    let rows = if query.only_outstanding.unwrap_or(false) {
+        rows.into_iter()
+            .filter(|r| r.outstanding_amount > 0.0)
+            .collect()
+    } else {
+        rows
+    };
+    let total_amount = rows.iter().map(|r| r.amount).sum();
+    let total_settled = rows.iter().map(|r| r.settled_amount).sum();
+    let total_outstanding = rows.iter().map(|r| r.outstanding_amount).sum();
+    Ok(AdvanceLedger {
+        rows,
+        total_amount,
+        total_settled,
+        total_outstanding,
+    })
+}
+
 // ==================== 资金单凭证联动（spec 4.7） ====================
 
 /// 资金单凭证 source_type（vouchers 表 CHECK 白名单第七阶段新增）
@@ -2457,6 +3013,32 @@ const FUND_VOUCHER_SOURCE_TYPE: &str = "fund_document";
 
 /// 借款/借款核销单未指定对方科目时的默认科目（1221 其他应收款，spec 4.7）
 const ADVANCE_DEFAULT_GL: &str = "1221";
+
+/// 报销抵扣核销的固定借方科目（2241 其他应付款，spec 4.7）
+const REIMBURSE_OFFSET_GL: &str = "2241";
+
+/// 工资扣回核销的固定借方科目（2211 应付职工薪酬，spec 4.7）
+const SALARY_DEDUCT_GL: &str = "2211";
+
+/// 核销凭证贷方科目：取关联借款单的其他应收款科目（缺省 1221）。
+/// 历史无关联的核销单（Task 14 前）回落 1221，与旧口径一致。
+fn advance_credit_account(conn: &Connection, settlement_id: i64) -> AppResult<String> {
+    let code: Option<String> = conn
+        .query_row(
+            "SELECT a.counter_account_code FROM advance_settlement_links l
+             JOIN fund_documents a ON a.id = l.advance_id
+             WHERE l.settlement_id = ?1 AND l.status = 'active'
+             ORDER BY l.id ASC LIMIT 1",
+            params![settlement_id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(code
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| ADVANCE_DEFAULT_GL.to_string()))
+}
 
 /// 读取资金账户挂接的总账科目（建账户时已限 1001/1002/1012，见 `STAGE7_FUND_GL_CODES`）
 pub(crate) fn fund_account_gl_code(conn: &Connection, account_id: i64) -> AppResult<String> {
@@ -2521,7 +3103,9 @@ pub(crate) fn ensure_fund_voucher_lines(lines: &[VoucherLineDraft]) -> AppResult
 /// - 付款：借对方科目 / 贷来源资金账户；
 /// - 内部转账：借目标账户 / 贷来源账户（两行各带对应 `fund_account_id`）；
 /// - 员工借款：借对方科目（默认 1221 其他应收款）/ 贷来源资金账户；
-/// - 借款核销：借目标资金账户 / 贷对方科目（默认 1221 其他应收款）。
+/// - 借款核销（Task 14 方式分流，spec 4.7）：现金归还=借目标资金账户 / 贷对方科目
+///   （默认 1221）；报销抵扣=借 2241 / 贷 1221；工资扣回=借 2211 / 贷 1221；
+///   其他核销=借指定科目 / 贷 1221；贷方科目统一取关联借款单的对方科目（缺省 1221）。
 /// 资金行 `fund_account_id` 必填、对方行必须为空；凭证归属月/日期取单据归属月/单据日期。
 /// 必须在状态机事务内调用（settle），凭证与结算状态、审批事件同事务提交。
 pub(crate) fn generate_fund_document_voucher(
@@ -2609,20 +3193,60 @@ pub(crate) fn generate_fund_document_voucher(
             ]
         }
         "advance_settlement" => {
-            let target = require_account(doc.target_account_id, "目标")?;
-            let counter = doc_counter_account(doc)
-                .map(str::to_string)
-                .unwrap_or_else(|| ADVANCE_DEFAULT_GL.to_string());
-            vec![
-                fund_voucher_line(
-                    fund_account_gl_code(conn, target)?,
-                    amount,
-                    0.0,
-                    Some(target),
-                    summary,
-                ),
-                fund_voucher_line(counter, 0.0, amount, None, summary),
-            ]
+            // 核销方式分流（Task 14，spec 4.7）：贷方科目 = 关联借款单的其他应收款科目
+            // （缺省 1221）；仅现金归还（cash_return）有资金回流目标账户。
+            let mode = doc
+                .settlement_mode
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .unwrap_or("cash_return");
+            let credit = advance_credit_account(conn, doc.id)?;
+            match mode {
+                "cash_return" => {
+                    let target = require_account(doc.target_account_id, "目标")?;
+                    vec![
+                        fund_voucher_line(
+                            fund_account_gl_code(conn, target)?,
+                            amount,
+                            0.0,
+                            Some(target),
+                            summary,
+                        ),
+                        fund_voucher_line(credit, 0.0, amount, None, summary),
+                    ]
+                }
+                // 报销抵扣：借 2241 其他应付款 / 贷 1221（无资金流动）
+                "reimburse_offset" => vec![
+                    fund_voucher_line(REIMBURSE_OFFSET_GL.to_string(), amount, 0.0, None, summary),
+                    fund_voucher_line(credit, 0.0, amount, None, summary),
+                ],
+                // 工资扣回：借 2211 应付职工薪酬 / 贷 1221（无资金流动）
+                "salary_deduct" => vec![
+                    fund_voucher_line(SALARY_DEDUCT_GL.to_string(), amount, 0.0, None, summary),
+                    fund_voucher_line(credit, 0.0, amount, None, summary),
+                ],
+                // 其他核销：借指定科目 / 贷 1221
+                "other" => {
+                    let debit = doc_counter_account(doc)
+                        .map(str::to_string)
+                        .ok_or_else(|| {
+                            AppError::General(format!(
+                                "核销单 {} 为其他核销，必须填写借方科目",
+                                doc.document_no
+                            ))
+                        })?;
+                    vec![
+                        fund_voucher_line(debit, amount, 0.0, None, summary),
+                        fund_voucher_line(credit, 0.0, amount, None, summary),
+                    ]
+                }
+                other => {
+                    return Err(AppError::General(format!(
+                        "核销方式「{other}」不支持生成核销凭证"
+                    )))
+                }
+            }
         }
         other => {
             return Err(AppError::General(format!(
@@ -2698,6 +3322,26 @@ fn ensure_in_list(value: &str, allowed: &[&str], label: &str) -> AppResult<()> {
             allowed.join(" / ")
         )))
     }
+}
+
+/// 核销方式入参归一：缺省按 cash_return（兼容历史"资金回流"建模数据）
+fn effective_settlement_mode(input: &FundDocumentInput) -> &str {
+    input
+        .settlement_mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("cash_return")
+}
+
+/// 无资金流动的核销方式（报销抵扣/工资扣回/其他核销）不得携带资金账户
+fn ensure_no_fund_account(input: &FundDocumentInput) -> AppResult<()> {
+    if input.source_account_id.is_some() || input.target_account_id.is_some() {
+        return Err(AppError::InvalidParam(
+            "该核销方式无资金流动，不能选择资金账户（仅现金/银行归还可选择目标账户）".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// 校验会计科目存在
@@ -5416,6 +6060,9 @@ mod tests {
             source_account_id: None,
             target_account_id: None,
             counter_account_code: None,
+            settlement_mode: None,
+            due_date: None,
+            advance_allocations: None,
         }
     }
 
@@ -5449,16 +6096,23 @@ mod tests {
         FundDocumentInput {
             source_account_id: Some(fx.bank.id),
             employee_id: Some(1),
+            due_date: Some("2026-09-30".into()),
             summary: "员工出差借款".into(),
             ..doc_input("advance")
         }
     }
 
-    fn settlement_input(fx: &DocFixtures) -> FundDocumentInput {
+    /// 借款核销单入参（现金归还建模）：必须关联一笔已发放借款
+    fn settlement_input(fx: &DocFixtures, advance_id: i64) -> FundDocumentInput {
         FundDocumentInput {
             target_account_id: Some(fx.cash.id),
             employee_id: Some(1),
             summary: "借款核销退款".into(),
+            settlement_mode: Some("cash_return".into()),
+            advance_allocations: Some(vec![AdvanceAllocationInput {
+                advance_id,
+                amount: 500.0,
+            }]),
             ..doc_input("advance_settlement")
         }
     }
@@ -5507,7 +6161,10 @@ mod tests {
         assert!(transfer.document_no.starts_with("NB"));
         let advance = create_fund_document(&conn, &current, &advance_input(&fx)).unwrap();
         assert!(advance.document_no.starts_with("JK"));
-        let settlement = create_fund_document(&conn, &current, &settlement_input(&fx)).unwrap();
+        // 核销单必须关联一笔已发放借款（Task 14 spec 4.11）
+        let paid_advance = settled_document(&conn, &current, &advance_input(&fx));
+        let settlement =
+            create_fund_document(&conn, &current, &settlement_input(&fx, paid_advance.id)).unwrap();
         assert!(settlement.document_no.starts_with("HX"));
 
         // 收款单不能带来源账户
@@ -5554,7 +6211,7 @@ mod tests {
             .to_string()
             .contains("员工借款单"));
         // 核销单不能带来源账户
-        let mut bad = settlement_input(&fx);
+        let mut bad = settlement_input(&fx, paid_advance.id);
         bad.source_account_id = Some(fx.cash.id);
         assert!(create_fund_document(&conn, &current, &bad)
             .unwrap_err()
@@ -5750,7 +6407,9 @@ mod tests {
         let voided = void_fund_document(&conn, &current, v1.id, "不需要了").unwrap();
         assert_eq!(voided.status, "void");
         assert!(voided.voided_by.is_some() && voided.voided_at.is_some());
-        let v2 = create_fund_document(&conn, &current, &settlement_input(&fx)).unwrap();
+        let paid_for_v2 = settled_document(&conn, &current, &advance_input(&fx));
+        let v2 =
+            create_fund_document(&conn, &current, &settlement_input(&fx, paid_for_v2.id)).unwrap();
         submit_fund_document(&conn, &current, v2.id, None).unwrap();
         approve_fund_document(&conn, &current, v2.id, "ok").unwrap();
         assert_eq!(
@@ -5897,7 +6556,9 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("不允许"));
-        let rj = create_fund_document(&conn, &current, &settlement_input(&fx)).unwrap();
+        let paid_for_rj = settled_document(&conn, &current, &advance_input(&fx));
+        let rj =
+            create_fund_document(&conn, &current, &settlement_input(&fx, paid_for_rj.id)).unwrap();
         submit_fund_document(&conn, &current, rj.id, None).unwrap();
         reject_fund_document(&conn, &current, rj.id, "驳回").unwrap();
         assert!(approve_fund_document(&conn, &current, rj.id, "x")
@@ -6305,7 +6966,7 @@ mod tests {
         assert_eq!(v.lines[1].fund_account_id, Some(fx.bank.id));
 
         // 借款核销：借 1001 目标账户（资金回流）/ 贷 1221
-        let settlement = settled_document(&conn, &current, &settlement_input(&fx));
+        let settlement = settled_document(&conn, &current, &settlement_input(&fx, advance.id));
         let v = active_fund_voucher(&conn, settlement.id);
         assert_eq!(v.lines[0].account_code, "1001");
         assert_eq!(v.lines[0].fund_account_id, Some(fx.cash.id));
@@ -8889,5 +9550,560 @@ mod tests {
             period_path.metadata().unwrap().len() > 0,
             "调节表导出文件非空"
         );
+    }
+
+    // ==================== Task 14：员工借款核销（spec 4.7/4.11） ====================
+
+    /// 已发放（settled）借款（走批次付款建模）
+    fn paid_advance(
+        conn: &Connection,
+        current: &CurrentOperatorState,
+        fx: &DocFixtures,
+    ) -> FundDocument {
+        settled_document(conn, current, &advance_input(fx))
+    }
+
+    /// 指定核销方式与金额的核销单入参（关联单笔借款）
+    fn settlement_mode_input(
+        fx: &DocFixtures,
+        advance_id: i64,
+        amount: f64,
+        mode: &str,
+    ) -> FundDocumentInput {
+        FundDocumentInput {
+            amount,
+            employee_id: Some(1),
+            summary: format!("借款核销-{mode}"),
+            settlement_mode: Some(mode.into()),
+            counter_account_code: if mode == "other" {
+                Some("6602".into())
+            } else {
+                None
+            },
+            target_account_id: if mode == "cash_return" {
+                Some(fx.cash.id)
+            } else {
+                None
+            },
+            advance_allocations: Some(vec![AdvanceAllocationInput { advance_id, amount }]),
+            ..doc_input("advance_settlement")
+        }
+    }
+
+    /// 某借款的 active 核销记录数
+    fn active_link_count(conn: &Connection, advance_id: i64) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM advance_settlement_links
+             WHERE advance_id = ?1 AND status = 'active'",
+            params![advance_id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// spec 4.11：`advance_settlement_links` 表与 fund_documents 新列（settlement_mode/due_date）随迁移补建
+    #[test]
+    fn test_advance_settlement_links_schema() {
+        let conn = setup_financial_db();
+        for col in [
+            "id",
+            "advance_id",
+            "settlement_id",
+            "allocated_amount",
+            "status",
+            "created_at",
+            "cancelled_at",
+            "cancel_reason",
+        ] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('advance_settlement_links') WHERE name = ?1",
+                    params![col],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "advance_settlement_links 缺少列 {col}");
+        }
+        for col in ["settlement_mode", "due_date"] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('fund_documents') WHERE name = ?1",
+                    params![col],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "fund_documents 缺少列 {col}");
+        }
+    }
+
+    /// 核销单创建门禁：必须关联已发放借款、员工一致、分摊合计与单据金额一致、
+    /// 非现金方式不允许资金账户、其他核销必须指定借方科目
+    #[test]
+    fn test_advance_settlement_link_validation() {
+        let (conn, current) = fund_doc_env();
+        let fx = setup_doc_fixtures(&conn);
+        let draft_loan = create_fund_document(&conn, &current, &advance_input(&fx)).unwrap();
+
+        // 未关联借款
+        let mut no_link = settlement_input(&fx, draft_loan.id);
+        no_link.advance_allocations = None;
+        assert!(create_fund_document(&conn, &current, &no_link)
+            .unwrap_err()
+            .to_string()
+            .contains("关联"));
+
+        // 借款未发放（草稿）不可核销
+        let err = create_fund_document(&conn, &current, &settlement_input(&fx, draft_loan.id))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("发放"), "应拦截未发放借款：{err}");
+
+        let paid = paid_advance(&conn, &current, &fx);
+
+        // 员工不匹配（借款属员工1，核销单填员工2）
+        let mut other_emp = settlement_input(&fx, paid.id);
+        other_emp.employee_id = Some(2);
+        assert!(create_fund_document(&conn, &current, &other_emp)
+            .unwrap_err()
+            .to_string()
+            .contains("员工"));
+
+        // 分摊合计与单据金额不一致
+        let mut mismatch = settlement_input(&fx, paid.id);
+        if let Some(allocs) = mismatch.advance_allocations.as_mut() {
+            allocs[0].amount = 400.0;
+        }
+        mismatch.amount = 500.0;
+        assert!(create_fund_document(&conn, &current, &mismatch)
+            .unwrap_err()
+            .to_string()
+            .contains("合计"));
+
+        // 非现金方式不允许选择资金账户（无资金流动）
+        let mut with_acc = settlement_mode_input(&fx, paid.id, 100.0, "salary_deduct");
+        with_acc.target_account_id = Some(fx.cash.id);
+        assert!(create_fund_document(&conn, &current, &with_acc)
+            .unwrap_err()
+            .to_string()
+            .contains("资金"));
+
+        // 其他核销必须指定借方科目
+        let mut other_no_acc = settlement_mode_input(&fx, paid.id, 100.0, "other");
+        other_no_acc.counter_account_code = None;
+        assert!(create_fund_document(&conn, &current, &other_no_acc)
+            .unwrap_err()
+            .to_string()
+            .contains("科目"));
+
+        // 借款单必须填写预计归还日
+        let mut no_due = advance_input(&fx);
+        no_due.due_date = None;
+        assert!(create_fund_document(&conn, &current, &no_due)
+            .unwrap_err()
+            .to_string()
+            .contains("预计归还日"));
+    }
+
+    /// 三种核销方式分录分流（spec 4.7）+ 累计核销不得超过借款金额（容差 0.005）
+    #[test]
+    fn test_advance_settlement_mode_vouchers_and_cumulative_cap() {
+        let (conn, current) = fund_doc_env();
+        let fx = setup_doc_fixtures(&conn);
+        let loan = paid_advance(&conn, &current, &fx); // 借款 500 已发放
+
+        // 现金归还 200：借 1001 现金（带辅助核算）/ 贷 1221
+        let cash_back = settled_document(
+            &conn,
+            &current,
+            &settlement_mode_input(&fx, loan.id, 200.0, "cash_return"),
+        );
+        let v = active_fund_voucher(&conn, cash_back.id);
+        assert_eq!(v.lines.len(), 2);
+        assert_eq!(v.lines[0].account_code, "1001");
+        assert_eq!(v.lines[0].fund_account_id, Some(fx.cash.id));
+        assert_eq!(
+            (v.lines[0].debit_amount, v.lines[0].credit_amount),
+            (200.0, 0.0)
+        );
+        assert_eq!(v.lines[1].account_code, "1221");
+        assert_eq!(v.lines[1].fund_account_id, None);
+        assert_eq!(
+            (v.lines[1].debit_amount, v.lines[1].credit_amount),
+            (0.0, 200.0)
+        );
+
+        // 报销抵扣 100：借 2241 其他应付款 / 贷 1221（无资金流动、无资金账户行）
+        let reimb = settled_document(
+            &conn,
+            &current,
+            &settlement_mode_input(&fx, loan.id, 100.0, "reimburse_offset"),
+        );
+        let v = active_fund_voucher(&conn, reimb.id);
+        assert_eq!(v.lines[0].account_code, "2241");
+        assert_eq!(v.lines[0].fund_account_id, None);
+        assert_eq!(
+            (v.lines[0].debit_amount, v.lines[0].credit_amount),
+            (100.0, 0.0)
+        );
+        assert_eq!(v.lines[1].account_code, "1221");
+
+        // 工资扣回 100：借 2211 应付职工薪酬 / 贷 1221
+        let salary = settled_document(
+            &conn,
+            &current,
+            &settlement_mode_input(&fx, loan.id, 100.0, "salary_deduct"),
+        );
+        let v = active_fund_voucher(&conn, salary.id);
+        assert_eq!(v.lines[0].account_code, "2211");
+        assert_eq!(v.lines[1].account_code, "1221");
+
+        // 其他核销 100（借方科目 6602）：借 6602 / 贷 1221
+        let other = settled_document(
+            &conn,
+            &current,
+            &settlement_mode_input(&fx, loan.id, 100.0, "other"),
+        );
+        let v = active_fund_voucher(&conn, other.id);
+        assert_eq!(v.lines[0].account_code, "6602");
+        assert_eq!(v.lines[1].account_code, "1221");
+
+        // 四笔核销 links 全部落库且 active
+        assert_eq!(active_link_count(&conn, loan.id), 4);
+
+        // 再核销 1 元 → 累计超额拦截
+        let err = create_fund_document(
+            &conn,
+            &current,
+            &settlement_mode_input(&fx, loan.id, 1.0, "cash_return"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("超过"), "应拦截累计超额核销：{err}");
+
+        // 台账：借款 500 已全部核销、账龄标记已结清
+        let ledger = get_advance_ledger(&conn, &AdvanceLedgerQuery::default()).unwrap();
+        let row = ledger
+            .rows
+            .iter()
+            .find(|r| r.advance_id == loan.id)
+            .expect("台账应包含借款单");
+        assert!((row.settled_amount - 500.0).abs() < AMOUNT_TOLERANCE);
+        assert!(row.outstanding_amount.abs() < AMOUNT_TOLERANCE);
+        assert_eq!(row.aging_bucket, "已结清");
+        assert_eq!(row.overdue_days, 0);
+    }
+
+    /// 台账聚合：未清余额、账龄分桶、逾期天数、员工筛选与核销时间线 + Excel 导出
+    #[test]
+    fn test_advance_ledger_aging_timeline_and_filters() {
+        let (conn, current) = fund_doc_env();
+        let fx = setup_doc_fixtures(&conn);
+
+        // 借款1：员工1 1000 元，借款日 2026-06-01，预计归还 2026-07-01（跨月核销场景）
+        let mut old_loan = advance_input(&fx);
+        old_loan.belong_month = "2026-06".into();
+        old_loan.document_date = "2026-06-01".into();
+        old_loan.amount = 1000.0;
+        old_loan.due_date = Some("2026-07-01".into());
+        let loan1 = settled_document(&conn, &current, &old_loan);
+
+        // 借款2：员工2 200 元（未核销）
+        let mut loan2_input = advance_input(&fx);
+        loan2_input.employee_id = Some(2);
+        loan2_input.amount = 200.0;
+        let loan2 = settled_document(&conn, &current, &loan2_input);
+
+        // 借款1 部分核销 300（现金归还，8 月）
+        settled_document(
+            &conn,
+            &current,
+            &settlement_mode_input(&fx, loan1.id, 300.0, "cash_return"),
+        );
+
+        // 固定基准日算账龄，避免用例依赖当前日期
+        let q = AdvanceLedgerQuery {
+            as_of_date: Some("2026-07-15".into()),
+            ..Default::default()
+        };
+        let ledger = get_advance_ledger(&conn, &q).unwrap();
+        let r1 = ledger
+            .rows
+            .iter()
+            .find(|r| r.advance_id == loan1.id)
+            .expect("台账应包含借款1");
+        assert!((r1.amount - 1000.0).abs() < AMOUNT_TOLERANCE);
+        assert!((r1.settled_amount - 300.0).abs() < AMOUNT_TOLERANCE);
+        assert!((r1.outstanding_amount - 700.0).abs() < AMOUNT_TOLERANCE);
+        assert_eq!(r1.days_outstanding, 44, "06-01 → 07-15 = 44 天");
+        assert_eq!(r1.aging_bucket, "31-60天");
+        assert_eq!(r1.overdue_days, 14, "归还日 07-01，逾期 14 天");
+        let r2 = ledger
+            .rows
+            .iter()
+            .find(|r| r.advance_id == loan2.id)
+            .expect("台账应包含借款2");
+        assert_eq!(r2.overdue_days, 0, "未到归还日不逾期");
+        assert!((ledger.total_outstanding - 900.0).abs() < AMOUNT_TOLERANCE);
+
+        // 员工筛选
+        let q_emp = AdvanceLedgerQuery {
+            employee_id: Some(2),
+            ..Default::default()
+        };
+        let ledger = get_advance_ledger(&conn, &q_emp).unwrap();
+        assert_eq!(ledger.rows.len(), 1);
+        assert_eq!(ledger.rows[0].advance_id, loan2.id);
+        assert_eq!(ledger.rows[0].employee_name.as_deref(), Some("李四"));
+
+        // 核销时间线：借款1 一条 active 现金归还核销，带核销单号
+        let links = get_advance_settlement_links(&conn, loan1.id).unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].status, "active");
+        assert_eq!(links[0].settlement_mode.as_deref(), Some("cash_return"));
+        assert!(links[0]
+            .settlement_document_no
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("HX"));
+
+        // Excel 导出非空
+        let path = std::env::temp_dir().join(format!("advance-ledger-{}.xlsx", std::process::id()));
+        crate::excel::export_advance_ledger_excel(
+            &get_advance_ledger(&conn, &AdvanceLedgerQuery::default()).unwrap(),
+            path.to_str().unwrap(),
+        )
+        .unwrap();
+        assert!(path.metadata().unwrap().len() > 0, "台账导出文件非空");
+    }
+
+    /// 取消核销恢复余额并联动作废/冲正凭证：未结算核销单→作废；已结算→红字冲正
+    #[test]
+    fn test_cancel_settlement_link_restores_outstanding() {
+        let (conn, current) = fund_doc_env();
+        let fx = setup_doc_fixtures(&conn);
+        let loan = paid_advance(&conn, &current, &fx); // 500
+
+        // 路径A：核销单未结算（approved）→ 取消核销=作废核销单，不产生凭证
+        let s1 = create_fund_document(
+            &conn,
+            &current,
+            &settlement_mode_input(&fx, loan.id, 100.0, "cash_return"),
+        )
+        .unwrap();
+        submit_fund_document(&conn, &current, s1.id, None).unwrap();
+        approve_fund_document(&conn, &current, s1.id, "ok").unwrap();
+        let link1 = get_advance_settlement_links(&conn, loan.id)
+            .unwrap()
+            .into_iter()
+            .find(|l| l.status == "active")
+            .unwrap();
+        let voided = cancel_advance_settlement_link(
+            &conn,
+            &current,
+            &AdvanceLinkCancelInput {
+                link_id: link1.id,
+                reason: "核销填错".into(),
+                reversal_month: None,
+                reversal_date: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(voided.status, "void");
+        assert!(
+            accounting::get_active_voucher_for_source(&conn, "fund_document", s1.id)
+                .unwrap()
+                .is_none(),
+            "作废路径不应产生凭证"
+        );
+        assert_eq!(active_link_count(&conn, loan.id), 0);
+
+        // 余额恢复：可再核销全额 500
+        let s2 = settled_document(
+            &conn,
+            &current,
+            &settlement_mode_input(&fx, loan.id, 500.0, "cash_return"),
+        );
+        assert_eq!(active_link_count(&conn, loan.id), 1);
+
+        // 路径B：已结算核销单 → 取消核销=冲正（原单 reversed + 红字凭证互换借贷）
+        let link2 = get_advance_settlement_links(&conn, loan.id)
+            .unwrap()
+            .into_iter()
+            .find(|l| l.status == "active")
+            .unwrap();
+        let reversal = cancel_advance_settlement_link(
+            &conn,
+            &current,
+            &AdvanceLinkCancelInput {
+                link_id: link2.id,
+                reason: "还款重复".into(),
+                reversal_month: Some("2026-08".into()),
+                reversal_date: Some("2026-08-20".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(reversal.document_type, "reversal");
+        let original = get_fund_document(&conn, s2.id).unwrap();
+        assert_eq!(original.status, "reversed");
+        let rv = active_fund_voucher(&conn, reversal.id);
+        assert_eq!(rv.lines[0].account_code, "1001");
+        assert_eq!(
+            (rv.lines[0].debit_amount, rv.lines[0].credit_amount),
+            (0.0, 500.0)
+        );
+        assert_eq!(rv.lines[1].account_code, "1221");
+        assert_eq!(
+            (rv.lines[1].debit_amount, rv.lines[1].credit_amount),
+            (500.0, 0.0)
+        );
+        assert_eq!(active_link_count(&conn, loan.id), 0);
+
+        // 余额恢复后可再核销（工资扣回全额）
+        create_fund_document(
+            &conn,
+            &current,
+            &settlement_mode_input(&fx, loan.id, 500.0, "salary_deduct"),
+        )
+        .unwrap();
+        assert_eq!(active_link_count(&conn, loan.id), 1);
+
+        // 已取消的核销记录重复取消报错
+        let err = cancel_advance_settlement_link(
+            &conn,
+            &current,
+            &AdvanceLinkCancelInput {
+                link_id: link2.id,
+                reason: "再取消".into(),
+                reversal_month: None,
+                reversal_date: None,
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("已取消") || err.contains("已冲正") || err.contains("已作废"),
+            "{err}"
+        );
+    }
+
+    /// 有 active 核销记录的借款单禁止冲正（余额已被部分核销），须先取消全部核销
+    #[test]
+    fn test_advance_reverse_blocked_until_links_cancelled() {
+        let (conn, current) = fund_doc_env();
+        let fx = setup_doc_fixtures(&conn);
+        let loan = paid_advance(&conn, &current, &fx);
+        settled_document(
+            &conn,
+            &current,
+            &settlement_mode_input(&fx, loan.id, 100.0, "cash_return"),
+        );
+
+        let reverse_err = reverse_fund_document(
+            &conn,
+            &current,
+            &reverse_input(loan.id, "2026-08", "2026-08-20"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(reverse_err.contains("核销"), "{reverse_err}");
+
+        // 取消核销（已结算路径 → 冲正核销单）后借款单可冲正
+        let link = get_advance_settlement_links(&conn, loan.id)
+            .unwrap()
+            .into_iter()
+            .find(|l| l.status == "active")
+            .unwrap();
+        cancel_advance_settlement_link(
+            &conn,
+            &current,
+            &AdvanceLinkCancelInput {
+                link_id: link.id,
+                reason: "纠错".into(),
+                reversal_month: Some("2026-08".into()),
+                reversal_date: Some("2026-08-21".into()),
+            },
+        )
+        .unwrap();
+        let reversal = reverse_fund_document(
+            &conn,
+            &current,
+            &reverse_input(loan.id, "2026-08", "2026-08-22"),
+        )
+        .unwrap();
+        assert_eq!(reversal.document_type, "reversal");
+        assert_eq!(
+            get_fund_document(&conn, loan.id).unwrap().status,
+            "reversed"
+        );
+    }
+
+    /// 跨月核销月结保护：已月结月份不可新建核销；已结算核销单在原月月结后不可取消
+    #[test]
+    fn test_advance_settlement_month_lock_protection() {
+        let (conn, current) = fund_doc_env();
+        let fx = setup_doc_fixtures(&conn);
+        let loan = paid_advance(&conn, &current, &fx);
+        let settled_one = settled_document(
+            &conn,
+            &current,
+            &settlement_mode_input(&fx, loan.id, 100.0, "cash_return"),
+        );
+        close_month_direct(&conn, "2026-08");
+
+        // 新建核销（归属已月结月份）被拦
+        let err = create_fund_document(
+            &conn,
+            &current,
+            &settlement_mode_input(&fx, loan.id, 100.0, "cash_return"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("月结"), "{err}");
+
+        // 已结算核销单取消 → 冲正被原月份月结拦截
+        let link = get_advance_settlement_links(&conn, loan.id)
+            .unwrap()
+            .into_iter()
+            .find(|l| l.status == "active" && l.settlement_id == settled_one.id)
+            .unwrap();
+        let err = cancel_advance_settlement_link(
+            &conn,
+            &current,
+            &AdvanceLinkCancelInput {
+                link_id: link.id,
+                reason: "取消核销".into(),
+                reversal_month: Some("2026-08".into()),
+                reversal_date: Some("2026-08-25".into()),
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("月结"), "{err}");
+    }
+
+    /// 草稿核销单更新可替换关联借款（links 同步替换，不得残留旧关联）
+    #[test]
+    fn test_advance_settlement_update_replaces_links() {
+        let (conn, current) = fund_doc_env();
+        let fx = setup_doc_fixtures(&conn);
+        let loan1 = paid_advance(&conn, &current, &fx);
+        let mut loan2_input = advance_input(&fx);
+        loan2_input.employee_id = Some(2);
+        let loan2 = settled_document(&conn, &current, &loan2_input);
+
+        let draft = create_fund_document(
+            &conn,
+            &current,
+            &settlement_mode_input(&fx, loan1.id, 100.0, "cash_return"),
+        )
+        .unwrap();
+        assert_eq!(active_link_count(&conn, loan1.id), 1);
+
+        let mut edit = settlement_mode_input(&fx, loan2.id, 100.0, "cash_return");
+        edit.employee_id = Some(2);
+        edit.id = Some(draft.id);
+        update_fund_document(&conn, &current, &edit).unwrap();
+        assert_eq!(active_link_count(&conn, loan1.id), 0, "旧关联应被替换");
+        assert_eq!(active_link_count(&conn, loan2.id), 1);
     }
 }

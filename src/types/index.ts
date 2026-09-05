@@ -1442,6 +1442,10 @@ export interface FundDocument {
   source_account_id: number | null;
   target_account_id: number | null;
   counter_account_code: string | null;
+  /** 借款核销方式（仅 advance_settlement） */
+  settlement_mode: string | null;
+  /** 预计归还日（仅 advance 借款单） */
+  due_date: string | null;
   status: string;
   payment_batch_id: number | null;
   reversal_of_id: number | null;
@@ -1473,7 +1477,89 @@ export interface FundDocumentInput {
   source_account_id?: number | null;
   target_account_id?: number | null;
   counter_account_code?: string | null;
+  /** 借款核销方式（仅 advance_settlement；缺省按 cash_return） */
+  settlement_mode?: string | null;
+  /** 预计归还日（仅 advance 借款单必填） */
+  due_date?: string | null;
+  /** 核销关联（仅 advance_settlement 必填） */
+  advance_allocations?: AdvanceAllocationInput[] | null;
 }
+
+/** 借款核销分摊行（spec 4.11：核销单连接借款资金单） */
+export interface AdvanceAllocationInput {
+  advance_id: number;
+  amount: number;
+}
+
+/** 借款核销关系 + 核销时间线联查字段（后端 AdvanceSettlementLink） */
+export interface AdvanceSettlementLink {
+  id: number;
+  advance_id: number;
+  settlement_id: number;
+  allocated_amount: number;
+  status: string;
+  remark: string | null;
+  created_at: string;
+  cancelled_at: string | null;
+  cancel_reason: string | null;
+  settlement_document_no: string | null;
+  settlement_date: string | null;
+  settlement_status: string | null;
+  settlement_mode: string | null;
+}
+
+/** 借款台账查询条件（后端 AdvanceLedgerQuery） */
+export interface AdvanceLedgerQuery {
+  employee_id?: number;
+  keyword?: string;
+  only_outstanding?: boolean;
+  /** 账龄/逾期计算基准日（YYYY-MM-DD，缺省今天） */
+  as_of_date?: string;
+}
+
+/** 借款台账行：按借款单聚合核销进度与账龄 */
+export interface AdvanceLedgerRow {
+  advance_id: number;
+  document_no: string;
+  belong_month: string;
+  document_date: string;
+  due_date: string | null;
+  employee_id: number | null;
+  employee_name: string | null;
+  department: string | null;
+  summary: string;
+  amount: number;
+  settled_amount: number;
+  outstanding_amount: number;
+  days_outstanding: number;
+  overdue_days: number;
+  aging_bucket: string;
+  advance_status: string;
+}
+
+/** 借款台账：明细行 + 汇总 */
+export interface AdvanceLedger {
+  rows: AdvanceLedgerRow[];
+  total_amount: number;
+  total_settled: number;
+  total_outstanding: number;
+}
+
+/** 取消借款核销入参：未结算核销单走作废；已结算走冲正 */
+export interface AdvanceLinkCancelInput {
+  link_id: number;
+  reason: string;
+  reversal_month?: string | null;
+  reversal_date?: string | null;
+}
+
+/** 借款核销方式中文名（与后端 settlement_mode_label 一致） */
+export const SETTLEMENT_MODE_LABEL: Record<string, string> = {
+  cash_return: '现金/银行归还',
+  reimburse_offset: '报销抵扣',
+  salary_deduct: '工资扣回',
+  other: '其他核销',
+};
 
 export interface FundDocumentQuery {
   belong_month?: string;

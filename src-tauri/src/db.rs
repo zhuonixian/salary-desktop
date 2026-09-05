@@ -630,6 +630,7 @@ const STAGE7_NEW_TABLES: &[&str] = &[
     "business_attachments",
     "bank_reconciliation_allocations",
     "bank_reconciliation_periods",
+    "advance_settlement_links",
 ];
 
 /// 第七阶段 schema 迁移入口（幂等，可在新旧库上重复执行）：
@@ -671,6 +672,9 @@ pub fn migrate_stage7_schema(conn: &Connection) -> AppResult<Stage7MigrationRepo
             "fund_account_id",
             "INTEGER REFERENCES fund_accounts(id)",
         )?;
+        // Task 14（spec 4.11）：借款核销方式与预计归还日（可空，历史数据保持 NULL 兼容）
+        ensure_column(c, "fund_documents", "settlement_mode", "TEXT")?;
+        ensure_column(c, "fund_documents", "due_date", "TEXT")?;
         rebuild_stage7_indexes(c)?;
 
         // 新表自检：防止部分建表被静默吞掉
@@ -1078,6 +1082,27 @@ fn create_stage7_tables(conn: &Connection) -> AppResult<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_bank_recon_periods_account
             ON bank_reconciliation_periods(fund_account_id, belong_month);
+
+        -- 员工借款核销关系（spec 4.11，Task 14）：借款单 ↔ 核销单多对多，
+        -- 累计核销（active 合计）不得超过借款金额；取消核销置 cancelled 保留追溯
+        CREATE TABLE IF NOT EXISTS advance_settlement_links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            advance_id INTEGER NOT NULL REFERENCES fund_documents(id),
+            settlement_id INTEGER NOT NULL REFERENCES fund_documents(id),
+            allocated_amount REAL NOT NULL CHECK (allocated_amount > 0),
+            status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','cancelled')),
+            remark TEXT,
+            created_by INTEGER REFERENCES operator_profiles(id),
+            created_at TEXT NOT NULL,
+            cancelled_by INTEGER REFERENCES operator_profiles(id),
+            cancelled_at TEXT,
+            cancel_reason TEXT,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_advance_links_advance
+            ON advance_settlement_links(advance_id, status);
+        CREATE INDEX IF NOT EXISTS idx_advance_links_settlement
+            ON advance_settlement_links(settlement_id, status);
         ",
     )?;
     Ok(())
@@ -7242,6 +7267,14 @@ pub mod tests {
             source_account_id: Some(account_id),
             target_account_id: None,
             counter_account_code: Some("2202".into()),
+            settlement_mode: None,
+            // 借款单必须填写预计归还日（Task 14 spec 4.11）
+            due_date: if document_type == "advance" {
+                Some(format!("{month}-28"))
+            } else {
+                None
+            },
+            advance_allocations: None,
         };
         let doc = crate::cashier::create_fund_document(conn, operator, &input).unwrap();
         crate::cashier::submit_fund_document(conn, operator, doc.id, None).unwrap();

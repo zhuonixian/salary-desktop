@@ -1539,6 +1539,10 @@ pub struct FundDocument {
     pub source_account_id: Option<i64>,
     pub target_account_id: Option<i64>,
     pub counter_account_code: Option<String>,
+    /// 借款核销方式（仅 advance_settlement）：cash_return / reimburse_offset / salary_deduct / other
+    pub settlement_mode: Option<String>,
+    /// 预计归还日（仅 advance 借款单，spec 4.11 账龄/逾期统计依据）
+    pub due_date: Option<String>,
     pub status: String,
     pub payment_batch_id: Option<i64>,
     pub reversal_of_id: Option<i64>,
@@ -1573,6 +1577,96 @@ pub struct FundDocumentInput {
     pub source_account_id: Option<i64>,
     pub target_account_id: Option<i64>,
     pub counter_account_code: Option<String>,
+    /// 借款核销方式（仅 advance_settlement；缺省按 cash_return 现金归还，兼容历史数据）
+    pub settlement_mode: Option<String>,
+    /// 预计归还日（仅 advance 借款单必填）
+    pub due_date: Option<String>,
+    /// 核销关联（仅 advance_settlement 必填）：本次核销对应哪些借款单、各核销多少
+    pub advance_allocations: Option<Vec<AdvanceAllocationInput>>,
+}
+
+/// 借款核销分摊行（spec 4.11：核销单连接借款资金单）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdvanceAllocationInput {
+    pub advance_id: i64,
+    pub amount: f64,
+}
+
+/// 借款核销关系（spec 4.11）：advance_settlement_links 行 + 核销时间线联查字段
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdvanceSettlementLink {
+    pub id: i64,
+    pub advance_id: i64,
+    pub settlement_id: i64,
+    pub allocated_amount: f64,
+    /// active / cancelled
+    pub status: String,
+    pub remark: Option<String>,
+    pub created_at: String,
+    pub cancelled_at: Option<String>,
+    pub cancel_reason: Option<String>,
+    /// 联查：核销单号 / 核销日期 / 核销单状态 / 核销方式
+    pub settlement_document_no: Option<String>,
+    pub settlement_date: Option<String>,
+    pub settlement_status: Option<String>,
+    pub settlement_mode: Option<String>,
+}
+
+/// 借款台账查询条件（spec 4.11：输出未核销余额和账龄）
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AdvanceLedgerQuery {
+    pub employee_id: Option<i64>,
+    pub keyword: Option<String>,
+    /// 仅看未结清借款
+    pub only_outstanding: Option<bool>,
+    /// 账龄/逾期计算基准日（YYYY-MM-DD，缺省取今天；导出与测试可固定）
+    pub as_of_date: Option<String>,
+}
+
+/// 借款台账行：按借款单聚合核销进度与账龄
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdvanceLedgerRow {
+    pub advance_id: i64,
+    pub document_no: String,
+    pub belong_month: String,
+    pub document_date: String,
+    pub due_date: Option<String>,
+    pub employee_id: Option<i64>,
+    pub employee_name: Option<String>,
+    pub department: Option<String>,
+    pub summary: String,
+    /// 借款金额
+    pub amount: f64,
+    /// 累计已核销（active links 合计）
+    pub settled_amount: f64,
+    /// 未核销余额
+    pub outstanding_amount: f64,
+    /// 借款日至今未清天数（基准日 − 借款日）
+    pub days_outstanding: i64,
+    /// 逾期天数（未结清且超预计归还日时 > 0）
+    pub overdue_days: i64,
+    /// 0-30天 / 31-60天 / 61-90天 / 90天以上 / 已结清
+    pub aging_bucket: String,
+    /// 借款单状态（settled=已发放，approved=待付款批次发放）
+    pub advance_status: String,
+}
+
+/// 借款台账：明细行 + 汇总
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdvanceLedger {
+    pub rows: Vec<AdvanceLedgerRow>,
+    pub total_amount: f64,
+    pub total_settled: f64,
+    pub total_outstanding: f64,
+}
+
+/// 取消借款核销入参：未结算核销单走作废；已结算走冲正（需冲正归属月/日期）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdvanceLinkCancelInput {
+    pub link_id: i64,
+    pub reason: String,
+    pub reversal_month: Option<String>,
+    pub reversal_date: Option<String>,
 }
 
 /// 资金单据查询条件

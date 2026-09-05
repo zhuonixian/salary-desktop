@@ -90,6 +90,8 @@ const operationTypeLabels: Record<string, string> = {
   list_bank_allocations: '查询流水核销明细',
   batch_confirm_bank_auto_matches: '自动匹配批量核销',
   migrate_legacy_bank_matches: '旧银行匹配迁移',
+  cancel_advance_settlement_link: '取消借款核销',
+  export_advance_ledger: '导出借款台账',
 };
 
 const getOperationLabel = (value?: string) =>

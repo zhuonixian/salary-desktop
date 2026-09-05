@@ -2139,6 +2139,84 @@ fn journal_reconcile_text(status: &str) -> &str {
     }
 }
 
+/// 借款备用金台账（Task 14，spec 4.11）：按借款单输出核销进度、未清余额、逾期与账龄。
+pub fn export_advance_ledger_excel(ledger: &AdvanceLedger, path: &str) -> AppResult<()> {
+    let mut workbook = Workbook::new();
+    let sheet = workbook.add_worksheet();
+    sheet.set_name("借款备用金台账")?;
+    let title = Format::new().set_bold().set_font_size(14);
+    let header = Format::new()
+        .set_bold()
+        .set_border(rust_xlsxwriter::FormatBorder::Thin);
+    let cell = Format::new().set_border(rust_xlsxwriter::FormatBorder::Thin);
+    let money = Format::new()
+        .set_border(rust_xlsxwriter::FormatBorder::Thin)
+        .set_num_format("#,##0.00");
+    sheet.merge_range(
+        0,
+        0,
+        0,
+        11,
+        &format!("员工借款备用金台账（共 {} 笔）", ledger.rows.len()),
+        &title,
+    )?;
+    let headers = [
+        "借款单号",
+        "员工",
+        "部门",
+        "借款日期",
+        "预计归还日",
+        "借款金额",
+        "已核销",
+        "未核销余额",
+        "未清天数",
+        "逾期天数",
+        "账龄",
+        "状态",
+    ];
+    for (i, h) in headers.iter().enumerate() {
+        sheet.write_with_format(1, i as u16, *h, &header)?;
+    }
+    fn status_text(s: &str) -> &str {
+        match s {
+            "approved" => "待发放",
+            "batched" => "发放中",
+            "settled" => "已发放",
+            other => other,
+        }
+    }
+    let mut r: u32 = 2;
+    for row in &ledger.rows {
+        sheet.write_with_format(r, 0, &row.document_no, &cell)?;
+        sheet.write_with_format(r, 1, row.employee_name.as_deref().unwrap_or(""), &cell)?;
+        sheet.write_with_format(r, 2, row.department.as_deref().unwrap_or(""), &cell)?;
+        sheet.write_with_format(r, 3, &row.document_date, &cell)?;
+        sheet.write_with_format(r, 4, row.due_date.as_deref().unwrap_or(""), &cell)?;
+        sheet.write_number_with_format(r, 5, row.amount, &money)?;
+        sheet.write_number_with_format(r, 6, row.settled_amount, &money)?;
+        sheet.write_number_with_format(r, 7, row.outstanding_amount, &money)?;
+        sheet.write_number(r, 8, row.days_outstanding as f64)?;
+        sheet.write_number(r, 9, row.overdue_days as f64)?;
+        sheet.write_with_format(r, 10, &row.aging_bucket, &cell)?;
+        sheet.write_with_format(r, 11, status_text(&row.advance_status), &cell)?;
+        r += 1;
+    }
+    // 合计行
+    sheet.write_with_format(r, 0, "合计", &header)?;
+    for col in [1u16, 2, 3, 4, 8, 9, 10, 11] {
+        sheet.write_with_format(r, col, "", &cell)?;
+    }
+    sheet.write_number_with_format(r, 5, ledger.total_amount, &money)?;
+    sheet.write_number_with_format(r, 6, ledger.total_settled, &money)?;
+    sheet.write_number_with_format(r, 7, ledger.total_outstanding, &money)?;
+    let widths = [16u16, 10, 12, 12, 12, 12, 12, 12, 10, 10, 10, 10];
+    for (col, w) in widths.iter().enumerate() {
+        sheet.set_column_width(col as u16, *w)?;
+    }
+    workbook.save(path)?;
+    Ok(())
+}
+
 /// 银行余额调节表（spec 4.10）：两侧调节勾稽 + 未达项清单。
 pub fn export_bank_reconciliation_excel(
     period: &BankReconciliationPeriod,

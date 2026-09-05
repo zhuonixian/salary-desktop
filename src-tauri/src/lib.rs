@@ -184,6 +184,11 @@ pub fn run() {
         commands::confirm_bank_reconciliation_period,
         commands::list_bank_reconciliation_periods,
         commands::export_bank_reconciliation_period,
+        // ===== Cashier Task 14（员工借款备用金与核销，spec 4.11） =====
+        commands::get_advance_ledger,
+        commands::get_advance_settlement_links,
+        commands::cancel_advance_settlement_link,
+        commands::export_advance_ledger,
         commands::query_budgets,
         commands::save_budget,
         commands::delete_budget,

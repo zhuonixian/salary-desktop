@@ -34,6 +34,7 @@ import {
   MoneyCollectOutlined,
   TransactionOutlined,
   UserOutlined,
+  PayCircleOutlined,
 } from '@ant-design/icons';
 import Dashboard from '@/pages/Dashboard';
 import Employees from '@/pages/Employees';
@@ -59,6 +60,7 @@ import SecurityCenter from '@/pages/SecurityCenter';
 import FundAccounts from '@/pages/FundAccounts';
 import FundDocuments from '@/pages/FundDocuments';
 import FundJournals from '@/pages/FundJournals';
+import Advances from '@/pages/Advances';
 import LockScreen from '@/components/LockScreen';
 import SetupSecurity from '@/components/SetupSecurity';
 import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
@@ -118,6 +120,7 @@ const menuItems: MenuProps['items'] = [
       { key: '/payments', label: '付款批次', icon: <WalletOutlined /> },
       { key: '/bank-transactions', label: '银行对账', icon: <TransactionOutlined /> },
       { key: '/fund-journals', label: '资金日记账', icon: <ProfileOutlined /> },
+      { key: '/advances', label: '借款备用金', icon: <PayCircleOutlined /> },
     ],
   },
   {
@@ -343,6 +346,7 @@ const AppLayout: React.FC = () => {
               <Route path="/fund-accounts" element={<FundAccounts />} />
               <Route path="/fund-documents" element={<FundDocuments />} />
               <Route path="/fund-journals" element={<FundJournals />} />
+              <Route path="/advances" element={<Advances />} />
               <Route path="/accounts" element={<ChartOfAccounts />} />
               <Route path="/vouchers" element={<Vouchers />} />
               <Route path="/reports" element={<FinancialReports />} />

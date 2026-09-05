@@ -719,6 +719,9 @@ mod tests {
                 source_account_id: None,
                 target_account_id: Some(bank.id),
                 counter_account_code: Some("1122".into()),
+                settlement_mode: None,
+                due_date: None,
+                advance_allocations: None,
             },
         )
         .unwrap();
