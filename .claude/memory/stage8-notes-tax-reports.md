@@ -49,3 +49,7 @@ description: 第八阶段（票据台账、账期提醒、现金盘点、资金�
 4. **三导出**：资金日报（日记账页按钮）、个税扣缴申报表（未锁定月份应被拒、锁定月份导出三险拆列正确）、进项台账（区间+月度小计）
 5. **三险配置**：社保台账录三列份额 → 申报表按份额拆列；清空份额回落全局规则三键
 6. **既有 v0.7 挂账项**：见 `.claude/memory/stage7-cashier-operations.md` 的 Windows 验收清单（资金账户/收付款审批/批次/多对多对账/日记账/借款核销/月结联动）
+
+## Minor 留档（终审 triage 全部不阻断，后续打磨）
+
+冲正后 fund_account_id 残留；AMOUNT_TOLERANCE notes.rs 本地重定义待收敛 pub(crate)；票据 belong_month 登记月口径跨月需切月；贴现日志 .max(0.0) 冗余；mock 登记不落审批事件；NotesInstruments.tsx 1400 行可拆；提醒 approved_at 空串不回落（建议 NULLIF）；滞留恰 N 天边界未直测；盘点前端凭证号显示裸 voucher_id；快速模式参考差异渲染滞后；excel.rs 反向依赖 cashier；申报门禁计数未滤 void；进项台账映射变量名 code 实为 name；台账页月份初值不随业务月；进项 Excel 未断言报销单号列；全局三险键后端不校验和 100%（前端拦+导出兜底）；upsert_salary_rule_key 预览无 mock case；申报合并路径仅单测覆盖（Windows 验收人工核对一份）
