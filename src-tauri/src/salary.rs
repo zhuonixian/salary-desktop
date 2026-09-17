@@ -129,10 +129,33 @@ fn build_rules_map(conn: &Connection) -> AppResult<std::collections::HashMap<Str
     Ok(map)
 }
 
-/// 累计预扣法：累计应纳税所得额×预扣率-速算扣除-累计已预扣（max 0）。
-/// 历史月份（含旧月度算法结果）自然作为"已预扣"基数，启用当月平滑。
+/// 累计预扣法中间量（工资计税与个税扣缴申报表导出共享的单一事实源）：
+/// 历史月累计、累计应纳税所得额与当期档位（预扣率/速算扣除数）。
+/// 历史月口径：同年度、早于当月、`status != 'void'` 的工资结果行（含旧月度算法结果）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct CumulativeTaxContext {
+    /// 历史月累计收入
+    pub prev_gross: f64,
+    /// 历史月累计三险 + 公积金个人
+    pub prev_ss_hf: f64,
+    /// 历史月累计已预扣税额
+    pub prev_tax: f64,
+    /// 历史月行数（计税月数 = prev_count + 1）
+    pub prev_count: i64,
+    /// 计税月数
+    pub months: f64,
+    /// 累计应纳税所得额
+    pub cumulative_taxable: f64,
+    /// 当期预扣率（累计应纳税所得额 ≤ 0 或未命中档位时为 0）
+    pub tax_rate: f64,
+    /// 速算扣除数（同上为 0）
+    pub quick_deduction: f64,
+}
+
+/// 计算累计预扣中间量：历史月汇总 SQL、累计应纳税所得额公式与档位匹配在此单点维护，
+/// `calculate_cumulative_tax`（工资计税）与个税扣缴申报表导出（spec 8）共用。
 /// 注意：历史月的专项附加未落库，按当月值×月数近似（员工专项附加年度内不变）。
-pub fn calculate_cumulative_tax(
+pub fn cumulative_tax_context(
     conn: &Connection,
     employee_no: &str,
     month: &str,
@@ -141,7 +164,7 @@ pub fn calculate_cumulative_tax(
     hf_personal: f64,
     special_deduction: f64,
     threshold: f64,
-) -> AppResult<f64> {
+) -> AppResult<CumulativeTaxContext> {
     let year_prefix = format!("{}-%", &month[..4]);
     let (prev_gross, prev_ss, prev_tax, prev_count): (f64, f64, f64, i64) = conn
         .query_row(
@@ -158,19 +181,56 @@ pub fn calculate_cumulative_tax(
         - (prev_ss + ss_personal + hf_personal)
         - threshold * months
         - special_deduction * months;
-    if cumulative_taxable <= 0.0 {
-        return Ok(0.0);
-    }
-    let rules = get_cumulative_tax_rules(conn)?;
-    let mut annual_tax = 0.0;
-    for rule in &rules {
-        let max = rule.max_amount.unwrap_or(f64::MAX);
-        if cumulative_taxable > rule.min_amount && cumulative_taxable <= max {
-            annual_tax = (cumulative_taxable * rule.tax_rate - rule.quick_deduction).max(0.0);
-            break;
+    let mut ctx = CumulativeTaxContext {
+        prev_gross,
+        prev_ss_hf: prev_ss,
+        prev_tax,
+        prev_count,
+        months,
+        cumulative_taxable,
+        tax_rate: 0.0,
+        quick_deduction: 0.0,
+    };
+    if cumulative_taxable > 0.0 {
+        for rule in &get_cumulative_tax_rules(conn)? {
+            let max = rule.max_amount.unwrap_or(f64::MAX);
+            if cumulative_taxable > rule.min_amount && cumulative_taxable <= max {
+                ctx.tax_rate = rule.tax_rate;
+                ctx.quick_deduction = rule.quick_deduction;
+                break;
+            }
         }
     }
-    Ok((annual_tax - prev_tax).max(0.0))
+    Ok(ctx)
+}
+
+/// 累计预扣法：累计应纳税所得额×预扣率-速算扣除-累计已预扣（max 0）。
+/// 历史月份（含旧月度算法结果）自然作为"已预扣"基数，启用当月平滑。
+pub fn calculate_cumulative_tax(
+    conn: &Connection,
+    employee_no: &str,
+    month: &str,
+    gross: f64,
+    ss_personal: f64,
+    hf_personal: f64,
+    special_deduction: f64,
+    threshold: f64,
+) -> AppResult<f64> {
+    let ctx = cumulative_tax_context(
+        conn,
+        employee_no,
+        month,
+        gross,
+        ss_personal,
+        hf_personal,
+        special_deduction,
+        threshold,
+    )?;
+    if ctx.cumulative_taxable <= 0.0 {
+        return Ok(0.0);
+    }
+    let annual_tax = (ctx.cumulative_taxable * ctx.tax_rate - ctx.quick_deduction).max(0.0);
+    Ok((annual_tax - ctx.prev_tax).max(0.0))
 }
 
 fn calculate_single_employee(

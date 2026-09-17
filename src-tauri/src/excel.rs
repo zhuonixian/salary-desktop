@@ -2035,7 +2035,6 @@ pub fn export_tax_withholding_declaration(
             _ => None,
         }
     };
-    let tax_rules = crate::db::get_cumulative_tax_rules(conn)?;
 
     let valid_rates = |rates: (f64, f64, f64)| -> bool {
         let (p, m, u) = rates;
@@ -2051,14 +2050,13 @@ pub fn export_tax_withholding_declaration(
         gross: f64,
         ss_personal: f64,
         hf_personal: f64,
-        tax_amount: f64,
     }
 
     // ---- 数据行：工资结果联员工表取身份证号/专项附加 ----
     let mut stmt = conn.prepare(
         "SELECT r.employee_no, COALESCE(e.name, r.name), COALESCE(e.id_card, ''),
                 COALESCE(e.special_deduction, 0),
-                r.gross_salary, r.social_security_personal, r.housing_fund_personal, r.tax_amount
+                r.gross_salary, r.social_security_personal, r.housing_fund_personal
          FROM salary_monthly_results r
          LEFT JOIN employees e ON e.employee_no = r.employee_no
          WHERE r.salary_month = ?1
@@ -2074,15 +2072,13 @@ pub fn export_tax_withholding_declaration(
                 gross: row.get(4)?,
                 ss_personal: row.get(5)?,
                 hf_personal: row.get(6)?,
-                tax_amount: row.get(7)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()
         .map_err(AppError::from)?;
 
-    let year_str = month.get(0..4).unwrap_or("");
-    let year: i64 = year_str.parse().unwrap_or(0);
-    let year_prefix = format!("{year_str}-%");
+    // 台账年度取工资月前四位（历史月汇总 SQL 与档位匹配在 salary::cumulative_tax_context 内完成）
+    let year: i64 = month.get(0..4).and_then(|y| y.parse().ok()).unwrap_or(0);
 
     struct WithholdingSplit {
         pension: f64,
@@ -2132,35 +2128,18 @@ pub fn export_tax_withholding_declaration(
     let (mut sum_hf, mut sum_prev_tax) = (0.0f64, 0.0f64);
     let mut fallback_count = 0usize;
     for row in &rows {
-        // 累计预扣口径与 salary::calculate_cumulative_tax 完全同源：
-        // 累计应纳税所得额 = 累计收入 − 累计三险公积金 − 起征点×月数 − 专项附加×月数
-        let (prev_gross, prev_ss_hf, prev_tax, prev_count): (f64, f64, f64, i64) = conn
-            .query_row(
-                "SELECT COALESCE(SUM(gross_salary),0), COALESCE(SUM(social_security_personal + housing_fund_personal),0),
-                        COALESCE(SUM(tax_amount),0), COUNT(*)
-                 FROM salary_monthly_results
-                 WHERE employee_no = ?1 AND salary_month LIKE ?2 AND salary_month < ?3 AND status != 'void'",
-                params![row.employee_no, year_prefix, month],
-                |x| Ok((x.get(0)?, x.get(1)?, x.get(2)?, x.get(3)?)),
-            )
-            .unwrap_or((0.0, 0.0, 0.0, 0));
-        let months = (prev_count + 1) as f64;
-        let cumulative_taxable = (prev_gross + row.gross)
-            - (prev_ss_hf + row.ss_personal + row.hf_personal)
-            - threshold * months
-            - row.special_deduction * months;
-        let mut rate = 0.0;
-        let mut quick_deduction = 0.0;
-        if cumulative_taxable > 0.0 {
-            for rule in &tax_rules {
-                let max = rule.max_amount.unwrap_or(f64::MAX);
-                if cumulative_taxable > rule.min_amount && cumulative_taxable <= max {
-                    rate = rule.tax_rate;
-                    quick_deduction = rule.quick_deduction;
-                    break;
-                }
-            }
-        }
+        // 累计预扣中间量与 salary::calculate_cumulative_tax 共用单一事实源
+        // （salary::cumulative_tax_context：历史月汇总 SQL / 应纳税所得额公式 / 档位匹配）
+        let ctx = crate::salary::cumulative_tax_context(
+            conn,
+            &row.employee_no,
+            month,
+            row.gross,
+            row.ss_personal,
+            row.hf_personal,
+            row.special_deduction,
+            threshold,
+        )?;
 
         // 三险拆列：有台账行只认台账比例，无台账行只认全局比例（不交叉回退）
         let ledger_rates: Option<(f64, f64, f64)> = conn
@@ -2234,17 +2213,17 @@ pub fn export_tax_withholding_declaration(
         sheet.write_number_with_format(r, 6, row.hf_personal, &money)?;
         sheet.write_number_with_format(r, 7, threshold, &money)?;
         sheet.write_number_with_format(r, 8, row.special_deduction, &money)?;
-        sheet.write_number_with_format(r, 9, cumulative_taxable, &money)?;
-        sheet.write_number_with_format(r, 10, rate, &percent)?;
-        sheet.write_number_with_format(r, 11, quick_deduction, &money)?;
-        sheet.write_number_with_format(r, 12, prev_tax, &money)?;
+        sheet.write_number_with_format(r, 9, ctx.cumulative_taxable, &money)?;
+        sheet.write_number_with_format(r, 10, ctx.tax_rate, &percent)?;
+        sheet.write_number_with_format(r, 11, ctx.quick_deduction, &money)?;
+        sheet.write_number_with_format(r, 12, ctx.prev_tax, &money)?;
 
         sum_gross += row.gross;
         sum_pension += split.pension;
         sum_medical += split.medical.unwrap_or(0.0);
         sum_unemployment += split.unemployment.unwrap_or(0.0);
         sum_hf += row.hf_personal;
-        sum_prev_tax += prev_tax;
+        sum_prev_tax += ctx.prev_tax;
         r += 1;
     }
 
