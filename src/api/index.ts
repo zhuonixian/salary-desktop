@@ -49,6 +49,7 @@ import type {
   FundJournal,
   FundJournalQuery,
   FundDailyReport,
+  InputTaxLedgerReport,
   BankReconciliationPeriod,
   Budget,
   BudgetInput,
@@ -1978,6 +1979,23 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
     }
     case 'export_fund_daily_report':
       return String(args?.path ?? '');
+    // ==================== 进项台账（第八阶段 Task 10，spec 9） ====================
+    case 'get_input_tax_ledger': {
+      const fromMonth = String(args?.fromMonth ?? '');
+      const toMonth = String(args?.toMonth ?? '');
+      return {
+        from_month: fromMonth,
+        to_month: toMonth,
+        rows: [],
+        monthly_subtotals: [],
+        invoice_count: 0,
+        sum_amount: 0,
+        sum_tax_amount: 0,
+        sum_total_amount: 0,
+      };
+    }
+    case 'export_input_tax_ledger':
+      return String(args?.path ?? '');
     case 'generate_bank_reconciliation_period':
       return {
         id: 0,
@@ -2549,6 +2567,25 @@ export async function getFundDailyReport(date: string): Promise<FundDailyReport>
 /** 导出资金日报 Excel（两 sheet：账户汇总 + 当日明细；敏感导出） */
 export async function exportFundDailyReport(date: string, path: string): Promise<string> {
   return invoke<string>('export_fund_daily_report', { date, path });
+}
+
+// ==================== 增值税进项台账（第八阶段 Task 10，spec 9） ====================
+
+/** 进项台账（只读）：发票维度明细 + 月度小计 + 区间合计（排除 void；登记 ≠ 认证） */
+export async function getInputTaxLedger(
+  fromMonth: string,
+  toMonth: string,
+): Promise<InputTaxLedgerReport> {
+  return invoke<InputTaxLedgerReport>('get_input_tax_ledger', { fromMonth, toMonth });
+}
+
+/** 导出进项台账 Excel（明细 + 月度小计 + 区间合计；敏感导出） */
+export async function exportInputTaxLedger(
+  fromMonth: string,
+  toMonth: string,
+  path: string,
+): Promise<string> {
+  return invoke<string>('export_input_tax_ledger', { fromMonth, toMonth, path });
 }
 
 export async function generateBankReconciliationPeriod(

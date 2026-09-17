@@ -7210,6 +7210,118 @@ pub fn query_invoices(conn: &Connection, q: &InvoiceQuery) -> AppResult<Vec<Invo
     rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
 }
 
+// ==================== 进项台账（第八阶段 Task 10，spec 9） ====================
+
+/// 台账月份入参校验（YYYY-MM），返回规整后的月份字符串
+fn validate_input_tax_ledger_month(value: &str, label: &str) -> AppResult<String> {
+    let m = value.trim();
+    chrono::NaiveDate::parse_from_str(&format!("{m}-01"), "%Y-%m-%d")
+        .map_err(|_| AppError::InvalidParam(format!("{label}格式应为 YYYY-MM：{value}")))?;
+    Ok(m.to_string())
+}
+
+/// 增值税进项台账（spec 9，只读）：发票维度明细（排除 status='void'，归属月份落在
+/// [from_month, to_month] 闭区间）+ 月度小计 + 区间合计（不含税/税额/价税合计）。
+/// 报销单号经 reimbursement_claim_invoices 反查：多报销关联取首个（claim_id 最小），
+/// refs_count 为关联报销单张数；测试最小 schema 无报销表时回退 NULL/0（与既有口径一致）。
+/// 注意：发票登记 ≠ 进项认证，认证状态以税务系统为准。
+pub fn get_input_tax_ledger(
+    conn: &Connection,
+    from_month: &str,
+    to_month: &str,
+) -> AppResult<InputTaxLedgerReport> {
+    let from = validate_input_tax_ledger_month(from_month, "起始月份")?;
+    let to = validate_input_tax_ledger_month(to_month, "结束月份")?;
+    if from > to {
+        return Err(AppError::InvalidParam(format!(
+            "起始月份 {from} 不能晚于结束月份 {to}"
+        )));
+    }
+
+    // 报销反查列：真实库带报销表时用关联子查询；最小 schema 缺表时退化为 NULL/0
+    let has_claim_tables = crate::accounting::table_exists(conn, "reimbursement_claim_invoices")
+        && crate::accounting::table_exists(conn, "reimbursement_claims");
+    let claim_columns = if has_claim_tables {
+        ", (SELECT rc.claim_no \
+            FROM reimbursement_claim_invoices rci \
+            JOIN reimbursement_claims rc ON rc.id = rci.claim_id \
+            WHERE rci.invoice_id = i.id ORDER BY rci.claim_id LIMIT 1), \
+           (SELECT COUNT(*) FROM reimbursement_claim_invoices rci WHERE rci.invoice_id = i.id)"
+    } else {
+        ", NULL, 0"
+    };
+    let sql = format!(
+        "SELECT i.id, i.invoice_code, i.invoice_number, i.issue_date, \
+                i.seller_name, i.seller_tax_id, i.amount, i.tax_amount, i.total_amount, \
+                i.expense_type_code, t.name, i.belong_month{claim_columns} \
+         FROM invoices i \
+         LEFT JOIN invoice_expense_types t ON t.code = i.expense_type_code \
+         WHERE i.status != 'void' AND i.belong_month BETWEEN ?1 AND ?2 \
+         ORDER BY i.belong_month, i.issue_date, i.id"
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let mapped = stmt.query_map(params![from, to], |r| {
+        let code: Option<String> = r.get(10)?;
+        Ok(InputTaxLedgerRow {
+            invoice_id: r.get(0)?,
+            invoice_code: r.get(1)?,
+            invoice_number: r.get(2)?,
+            issue_date: r.get(3)?,
+            seller_name: r.get(4)?,
+            seller_tax_id: r.get(5)?,
+            amount: r.get(6)?,
+            tax_amount: r.get(7)?,
+            total_amount: r.get(8)?,
+            expense_type_code: r.get(9)?,
+            // 费用类型名缺失时回退展示 code
+            expense_type_name: code.or(r.get::<_, Option<String>>(9)?),
+            claim_no: r.get(12)?,
+            refs_count: r.get(13)?,
+            belong_month: r.get(11)?,
+        })
+    })?;
+
+    // 明细行 + 月度小计 + 区间合计同源累计（行已按 belong_month 排序，小计自然分段）
+    let mut rows = Vec::new();
+    let mut subtotals: Vec<InputTaxLedgerMonthlySubtotal> = Vec::new();
+    let (mut sum_amount, mut sum_tax, mut sum_total) = (0.0f64, 0.0f64, 0.0f64);
+    for row in mapped {
+        let row = row?;
+        match subtotals.last_mut() {
+            Some(s) if s.belong_month == row.belong_month => {
+                s.invoice_count += 1;
+                s.amount += row.amount;
+                s.tax_amount += row.tax_amount;
+                s.total_amount += row.total_amount;
+            }
+            _ => subtotals.push(InputTaxLedgerMonthlySubtotal {
+                belong_month: row.belong_month.clone(),
+                invoice_count: 1,
+                amount: row.amount,
+                tax_amount: row.tax_amount,
+                total_amount: row.total_amount,
+            }),
+        }
+        sum_amount += row.amount;
+        sum_tax += row.tax_amount;
+        sum_total += row.total_amount;
+        rows.push(row);
+    }
+    let invoice_count = rows.len() as i64;
+
+    Ok(InputTaxLedgerReport {
+        from_month: from,
+        to_month: to,
+        rows,
+        monthly_subtotals: subtotals,
+        invoice_count,
+        sum_amount,
+        sum_tax_amount: sum_tax,
+        sum_total_amount: sum_total,
+    })
+}
+
 // ==================== Reimbursements ====================
 
 fn row_to_reimbursement_claim(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReimbursementClaim> {
@@ -7794,6 +7906,310 @@ pub mod tests {
             .unwrap();
         let result = delete_invoice_expense_type(&conn, office_id);
         assert!(result.is_err(), "被引用的费用类型不允许删除");
+    }
+
+    // ---- 进项台账（第八阶段 Task 10，spec 9） ----
+
+    /// 进项台账测试库：setup_db 基础上补报销两表（真实库由 init_db 建表，最小库缺省）
+    fn setup_input_tax_db() -> Connection {
+        let conn = setup_db();
+        conn.execute_batch(
+            "CREATE TABLE reimbursement_claims (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                claim_no TEXT UNIQUE NOT NULL,
+                employee_id INTEGER,
+                belong_month TEXT NOT NULL,
+                title TEXT NOT NULL,
+                total_amount REAL DEFAULT 0,
+                invoice_count INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'draft',
+                payment_status TEXT DEFAULT 'unpaid',
+                payment_date TEXT,
+                remark TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            );
+            CREATE TABLE reimbursement_claim_invoices (
+                claim_id INTEGER NOT NULL,
+                invoice_id INTEGER NOT NULL,
+                created_at TEXT,
+                PRIMARY KEY (claim_id, invoice_id)
+            );",
+        )
+        .unwrap();
+        conn
+    }
+
+    /// 指定月份与金额（不含税/税额，价税合计=和）的台账发票入参
+    fn ledger_invoice(code: &str, num: &str, month: &str, amount: f64, tax: f64) -> InvoiceInput {
+        let mut input = sample_input(code, num);
+        input.belong_month = Some(month.into());
+        input.amount = Some(amount);
+        input.tax_amount = Some(tax);
+        input.total_amount = Some(amount + tax);
+        input
+    }
+
+    #[test]
+    fn test_input_tax_ledger_void_excluded_and_range_filter() {
+        let conn = setup_input_tax_db();
+        insert_invoice(
+            &conn,
+            &ledger_invoice("L01", "001", "2026-07", 100.0, 6.0),
+            "/a.pdf",
+            0,
+        )
+        .unwrap();
+        insert_invoice(
+            &conn,
+            &ledger_invoice("L01", "002", "2026-08", 200.0, 12.0),
+            "/b.pdf",
+            0,
+        )
+        .unwrap();
+        // 区间外（9月）不入账
+        insert_invoice(
+            &conn,
+            &ledger_invoice("L01", "003", "2026-09", 400.0, 24.0),
+            "/c.pdf",
+            0,
+        )
+        .unwrap();
+        // 作废发票不入账
+        let voided = insert_invoice(
+            &conn,
+            &ledger_invoice("L01", "004", "2026-08", 800.0, 48.0),
+            "/d.pdf",
+            0,
+        )
+        .unwrap();
+        soft_delete_invoice(&conn, voided.id).unwrap();
+
+        let report = get_input_tax_ledger(&conn, "2026-07", "2026-08").unwrap();
+        assert_eq!(report.rows.len(), 2, "void 与区间外发票不应进台账");
+        assert_eq!(report.rows[0].invoice_number.as_deref(), Some("001"));
+        assert_eq!(report.rows[1].invoice_number.as_deref(), Some("002"));
+        assert!((report.sum_amount - 300.0).abs() < 0.005, "区间不含税合计");
+        assert!((report.sum_tax_amount - 18.0).abs() < 0.005, "区间税额合计");
+        assert!(
+            (report.sum_total_amount - 318.0).abs() < 0.005,
+            "区间价税合计"
+        );
+    }
+
+    #[test]
+    fn test_input_tax_ledger_monthly_subtotals_and_totals() {
+        let conn = setup_input_tax_db();
+        insert_invoice(
+            &conn,
+            &ledger_invoice("M01", "001", "2026-07", 100.0, 6.0),
+            "/a.pdf",
+            0,
+        )
+        .unwrap();
+        insert_invoice(
+            &conn,
+            &ledger_invoice("M01", "002", "2026-07", 100.0, 6.0),
+            "/b.pdf",
+            0,
+        )
+        .unwrap();
+        insert_invoice(
+            &conn,
+            &ledger_invoice("M01", "003", "2026-08", 300.0, 9.0),
+            "/c.pdf",
+            0,
+        )
+        .unwrap();
+
+        let report = get_input_tax_ledger(&conn, "2026-07", "2026-08").unwrap();
+        assert_eq!(report.monthly_subtotals.len(), 2, "按月小计分两段");
+        let july = &report.monthly_subtotals[0];
+        assert_eq!(july.belong_month, "2026-07");
+        assert_eq!(july.invoice_count, 2);
+        assert!((july.amount - 200.0).abs() < 0.005);
+        assert!((july.tax_amount - 12.0).abs() < 0.005);
+        assert!((july.total_amount - 212.0).abs() < 0.005);
+        let august = &report.monthly_subtotals[1];
+        assert_eq!(august.belong_month, "2026-08");
+        assert_eq!(august.invoice_count, 1);
+        assert!((august.tax_amount - 9.0).abs() < 0.005);
+
+        // 月度小计之和 = 区间合计（勾稽）
+        let sub_amount: f64 = report.monthly_subtotals.iter().map(|s| s.amount).sum();
+        let sub_total: f64 = report
+            .monthly_subtotals
+            .iter()
+            .map(|s| s.total_amount)
+            .sum();
+        assert!((sub_amount - report.sum_amount).abs() < 0.005);
+        assert!((sub_total - report.sum_total_amount).abs() < 0.005);
+        assert_eq!(report.invoice_count, 3);
+        assert!((report.sum_tax_amount - 21.0).abs() < 0.005);
+    }
+
+    #[test]
+    fn test_input_tax_ledger_claim_reverse_lookup_single_and_multiple() {
+        let conn = setup_input_tax_db();
+        let single = insert_invoice(
+            &conn,
+            &ledger_invoice("N01", "001", "2026-08", 100.0, 6.0),
+            "/a.pdf",
+            0,
+        )
+        .unwrap();
+        let multi = insert_invoice(
+            &conn,
+            &ledger_invoice("N01", "002", "2026-08", 200.0, 12.0),
+            "/b.pdf",
+            0,
+        )
+        .unwrap();
+        let none = insert_invoice(
+            &conn,
+            &ledger_invoice("N01", "003", "2026-08", 300.0, 18.0),
+            "/c.pdf",
+            0,
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO reimbursement_claims
+                (id, claim_no, belong_month, title, status, created_at, updated_at)
+             VALUES
+                (1, 'BX202608001', '2026-08', '甲报销', 'approved', '2026-08-15', '2026-08-15'),
+                (2, 'BX202608002', '2026-08', '乙报销', 'draft', '2026-08-16', '2026-08-16');",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO reimbursement_claim_invoices (claim_id, invoice_id, created_at)
+             VALUES (1, ?1, '2026-08-15')",
+            params![single.id],
+        )
+        .unwrap();
+        // multi 同时挂两张报销单：反查取首个（claim_id 最小）且计数 2
+        conn.execute(
+            "INSERT INTO reimbursement_claim_invoices (claim_id, invoice_id, created_at)
+             VALUES (2, ?1, '2026-08-16')",
+            params![multi.id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO reimbursement_claim_invoices (claim_id, invoice_id, created_at)
+             VALUES (1, ?1, '2026-08-16')",
+            params![multi.id],
+        )
+        .unwrap();
+
+        let report = get_input_tax_ledger(&conn, "2026-08", "2026-08").unwrap();
+        let by_id = |id: i64| {
+            report
+                .rows
+                .iter()
+                .find(|r| r.invoice_id == id)
+                .unwrap_or_else(|| panic!("发票 {id} 应在台账中"))
+        };
+        let s = by_id(single.id);
+        assert_eq!(s.claim_no.as_deref(), Some("BX202608001"));
+        assert_eq!(s.refs_count, 1, "单关联计数 1");
+        let m = by_id(multi.id);
+        assert_eq!(
+            m.claim_no.as_deref(),
+            Some("BX202608001"),
+            "多报销关联取首个（claim_id 最小）"
+        );
+        assert_eq!(m.refs_count, 2, "多关联计数 2");
+        let n = by_id(none.id);
+        assert!(n.claim_no.is_none(), "无关联报销单为空");
+        assert_eq!(n.refs_count, 0);
+    }
+
+    #[test]
+    fn test_input_tax_ledger_from_gt_to_rejected() {
+        let conn = setup_input_tax_db();
+        let err = get_input_tax_ledger(&conn, "2026-08", "2026-07").unwrap_err();
+        assert!(
+            err.to_string().contains("不能晚于"),
+            "起始晚于结束应中文报错：{err}"
+        );
+        // 非法月份格式同样拒绝
+        let bad = get_input_tax_ledger(&conn, "2026/07", "2026-08").unwrap_err();
+        assert!(
+            bad.to_string().contains("YYYY-MM"),
+            "非法月份应中文报错：{bad}"
+        );
+        // 闭区间边界：起止同月可查
+        assert!(get_input_tax_ledger(&conn, "2026-08", "2026-08").is_ok());
+    }
+
+    #[test]
+    fn test_input_tax_ledger_excel_export_readback() {
+        use calamine::{open_workbook_auto, Data, Reader};
+        let conn = setup_input_tax_db();
+        insert_invoice(
+            &conn,
+            &ledger_invoice("X01", "001", "2026-07", 100.0, 6.0),
+            "/a.pdf",
+            0,
+        )
+        .unwrap();
+        insert_invoice(
+            &conn,
+            &ledger_invoice("X01", "002", "2026-08", 200.0, 12.0),
+            "/b.pdf",
+            0,
+        )
+        .unwrap();
+        let voided = insert_invoice(
+            &conn,
+            &ledger_invoice("X01", "003", "2026-08", 400.0, 24.0),
+            "/c.pdf",
+            0,
+        )
+        .unwrap();
+        soft_delete_invoice(&conn, voided.id).unwrap();
+
+        let path = std::env::temp_dir().join(format!("input-tax-{}.xlsx", std::process::id()));
+        crate::excel::export_input_tax_ledger(&conn, "2026-07", "2026-08", path.to_str().unwrap())
+            .unwrap();
+        let mut workbook = open_workbook_auto(path.to_str().unwrap()).unwrap();
+        assert_eq!(workbook.sheet_names(), &["进项台账".to_string()]);
+        let sheet = workbook.worksheet_range("进项台账").unwrap();
+        // 标题 + 表头 + 2明细 + 2小计 + 区间合计 + 尾注 = 8 行
+        assert_eq!(
+            sheet.height(),
+            8,
+            "应为 标题+表头+2明细+2小计+合计+尾注 共 8 行"
+        );
+        let money = |r: u32, c: u32| -> f64 {
+            match sheet.get_value((r, c)) {
+                Some(Data::Float(v)) => *v,
+                Some(Data::Int(v)) => *v as f64,
+                other => panic!("应为数字单元格：({r},{c}) = {other:?}"),
+            }
+        };
+        let text = |r: u32, c: u32| -> String {
+            match sheet.get_value((r, c)) {
+                Some(Data::String(s)) => s.clone(),
+                other => panic!("应为文本单元格：({r},{c}) = {other:?}"),
+            }
+        };
+        // 7月明细（row 2）+ 小计（row 3）
+        assert_eq!(text(2, 0), "2026-07");
+        assert!((money(2, 7) - 6.0).abs() < 0.005);
+        assert_eq!(text(3, 0), "2026-07 小计");
+        assert!((money(3, 6) - 100.0).abs() < 0.005);
+        // 8月明细（row 4）+ 小计（row 5）：void 的 400/24 不出现
+        assert!((money(4, 8) - 212.0).abs() < 0.005);
+        assert_eq!(text(5, 0), "2026-08 小计");
+        assert!((money(5, 7) - 12.0).abs() < 0.005);
+        assert_eq!(text(5, 9), "共1张");
+        // 区间合计行（row 6）勾稽
+        assert_eq!(text(6, 0), "区间合计");
+        assert!((money(6, 6) - 300.0).abs() < 0.005);
+        assert!((money(6, 7) - 18.0).abs() < 0.005);
+        assert!((money(6, 8) - 318.0).abs() < 0.005);
+        // 尾注：登记 ≠ 认证提示
+        assert!(text(7, 0).contains("进项认证"), "表尾应有认证口径提示");
     }
 
     #[test]

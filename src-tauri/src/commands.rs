@@ -1436,6 +1436,40 @@ pub fn export_fund_daily_report(
     Ok(path)
 }
 
+// ==================== Task 10：增值税进项台账（第八阶段 spec 9） ====================
+
+/// 进项台账（只读，不落操作日志）：发票维度明细 + 月度小计 + 区间合计（排除 void；
+/// 发票登记 ≠ 进项认证，认证状态以税务系统为准）
+#[tauri::command]
+pub fn get_input_tax_ledger(
+    from_month: String,
+    to_month: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<InputTaxLedgerReport, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    db::get_input_tax_ledger(&conn, &from_month, &to_month)
+}
+
+/// 导出进项台账 Excel（明细 + 月度小计 + 区间合计；敏感导出，记操作日志）
+#[tauri::command]
+pub fn export_input_tax_ledger(
+    from_month: String,
+    to_month: String,
+    path: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<String, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    excel::export_input_tax_ledger(&conn, &from_month, &to_month, &path)?;
+    db::log_operation(
+        &conn,
+        "export_input_tax_ledger",
+        &format!("导出{from_month}至{to_month}进项台账到{path}"),
+        "system",
+        None,
+    )?;
+    Ok(path)
+}
+
 // ==================== Task 14：员工借款备用金与核销（spec 4.11） ====================
 
 /// 借款台账：按借款单聚合未核销余额、逾期天数与账龄（0-30/31-60/61-90/90+）

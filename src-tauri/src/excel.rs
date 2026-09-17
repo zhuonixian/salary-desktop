@@ -7,6 +7,7 @@ use rusqlite::params;
 use rust_xlsxwriter::{Format, Workbook};
 
 use crate::cashier::get_fund_daily_report;
+use crate::db::get_input_tax_ledger;
 use crate::errors::{AppError, AppResult};
 use crate::models::*;
 
@@ -2545,6 +2546,138 @@ pub fn export_fund_daily_report(
     let detail_widths = [18u16, 14, 28, 14, 14, 14];
     for (col, w) in detail_widths.iter().enumerate() {
         detail.set_column_width(col as u16, *w)?;
+    }
+
+    workbook.save(path)?;
+    Ok(())
+}
+
+/// 增值税进项台账导出（第八阶段 Task 10，spec 9）：单 sheet 明细 + 月度小计行 + 区间合计行，
+/// 文件名 `进项台账_YYYYMM-YYYYMM.xlsx` 由前端 save 对话框给定；表尾明示
+/// 「发票登记 ≠ 进项认证」。数据经 `db::get_input_tax_ledger` 现算（排除 void）；
+/// 敏感导出门禁与既有导出一致，由前端解锁后调用（get/export 命令层）。
+pub fn export_input_tax_ledger(
+    conn: &rusqlite::Connection,
+    from_month: &str,
+    to_month: &str,
+    path: &str,
+) -> AppResult<()> {
+    let report = get_input_tax_ledger(conn, from_month, to_month)?;
+
+    let mut workbook = Workbook::new();
+    let sheet = workbook.add_worksheet();
+    sheet.set_name("进项台账")?;
+    let title = Format::new().set_bold().set_font_size(14);
+    let header = Format::new()
+        .set_bold()
+        .set_border(rust_xlsxwriter::FormatBorder::Thin);
+    let cell = Format::new().set_border(rust_xlsxwriter::FormatBorder::Thin);
+    let money = Format::new()
+        .set_border(rust_xlsxwriter::FormatBorder::Thin)
+        .set_num_format("#,##0.00");
+    let note = Format::new().set_font_color("#808080");
+
+    // 列：0所属月份 1发票代码 2发票号码 3开票日期 4销方名称 5销方税号
+    //     6不含税金额 7税额 8价税合计 9费用类型 10关联报销单号
+    sheet.merge_range(
+        0,
+        0,
+        0,
+        10,
+        &format!(
+            "增值税进项台账（{} 至 {}，共 {} 张）",
+            report.from_month, report.to_month, report.invoice_count
+        ),
+        &title,
+    )?;
+    let headers = [
+        "所属月份",
+        "发票代码",
+        "发票号码",
+        "开票日期",
+        "销方名称",
+        "销方税号",
+        "不含税金额",
+        "税额",
+        "价税合计",
+        "费用类型",
+        "关联报销单号",
+    ];
+    for (i, h) in headers.iter().enumerate() {
+        sheet.write_with_format(1, i as u16, *h, &header)?;
+    }
+
+    let expense_type_text = |row: &InputTaxLedgerRow| -> String {
+        row.expense_type_name
+            .clone()
+            .or_else(|| row.expense_type_code.clone())
+            .unwrap_or_else(|| "-".to_string())
+    };
+    let claim_text = |row: &InputTaxLedgerRow| -> String {
+        match &row.claim_no {
+            Some(no) if row.refs_count > 1 => format!("{no}（共{}张）", row.refs_count),
+            Some(no) => no.clone(),
+            None => "-".to_string(),
+        }
+    };
+
+    let mut r: u32 = 2;
+    // 明细行按月分段输出，每月末插小计行（行与小计同源且已按 belong_month 排序，双指针单趟扫完）
+    let mut idx = 0usize;
+    for subtotal in &report.monthly_subtotals {
+        while idx < report.rows.len() && report.rows[idx].belong_month == subtotal.belong_month {
+            let row = &report.rows[idx];
+            sheet.write_with_format(r, 0, &row.belong_month, &cell)?;
+            sheet.write_with_format(r, 1, row.invoice_code.as_deref().unwrap_or(""), &cell)?;
+            sheet.write_with_format(r, 2, row.invoice_number.as_deref().unwrap_or(""), &cell)?;
+            sheet.write_with_format(r, 3, row.issue_date.as_deref().unwrap_or(""), &cell)?;
+            sheet.write_with_format(r, 4, row.seller_name.as_deref().unwrap_or(""), &cell)?;
+            sheet.write_with_format(r, 5, row.seller_tax_id.as_deref().unwrap_or(""), &cell)?;
+            sheet.write_number_with_format(r, 6, row.amount, &money)?;
+            sheet.write_number_with_format(r, 7, row.tax_amount, &money)?;
+            sheet.write_number_with_format(r, 8, row.total_amount, &money)?;
+            sheet.write_with_format(r, 9, &expense_type_text(row), &cell)?;
+            sheet.write_with_format(r, 10, &claim_text(row), &cell)?;
+            idx += 1;
+            r += 1;
+        }
+        // 月度小计行
+        sheet.write_with_format(r, 0, &format!("{} 小计", subtotal.belong_month), &header)?;
+        for col in [1u16, 2, 3, 4, 5] {
+            sheet.write_with_format(r, col, "", &cell)?;
+        }
+        sheet.write_number_with_format(r, 6, subtotal.amount, &money)?;
+        sheet.write_number_with_format(r, 7, subtotal.tax_amount, &money)?;
+        sheet.write_number_with_format(r, 8, subtotal.total_amount, &money)?;
+        sheet.write_with_format(r, 9, &format!("共{}张", subtotal.invoice_count), &cell)?;
+        sheet.write_with_format(r, 10, "", &cell)?;
+        r += 1;
+    }
+
+    // 区间合计行
+    sheet.write_with_format(r, 0, "区间合计", &header)?;
+    for col in [1u16, 2, 3, 4, 5] {
+        sheet.write_with_format(r, col, "", &cell)?;
+    }
+    sheet.write_number_with_format(r, 6, report.sum_amount, &money)?;
+    sheet.write_number_with_format(r, 7, report.sum_tax_amount, &money)?;
+    sheet.write_number_with_format(r, 8, report.sum_total_amount, &money)?;
+    sheet.write_with_format(r, 9, &format!("共{}张", report.invoice_count), &cell)?;
+    sheet.write_with_format(r, 10, "", &cell)?;
+    r += 1;
+    // 表尾口径提示
+    sheet.merge_range(
+        r,
+        0,
+        r,
+        10,
+        "发票登记 ≠ 进项认证，认证状态以税务系统为准",
+        &note,
+    )?;
+
+    let widths = [11u16, 20, 14, 12, 26, 20, 14, 12, 14, 12, 22];
+    for (col, w) in widths.iter().enumerate() {
+        sheet.set_column_width(col as u16, *w)?;
     }
 
     workbook.save(path)?;

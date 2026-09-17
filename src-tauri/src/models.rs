@@ -1045,6 +1045,62 @@ pub struct InvoiceQuery {
     pub status: Option<String>,
 }
 
+// ==================== Input Tax Ledger（第八阶段 Task 10，spec 9） ====================
+
+/// 进项台账明细行：发票维度（已排除 status='void'），报销单号经
+/// reimbursement_claim_invoices 反查（多报销关联取首个 claim_id 最小者）
+#[derive(Debug, Clone, Serialize)]
+pub struct InputTaxLedgerRow {
+    pub invoice_id: i64,
+    pub invoice_code: Option<String>,
+    pub invoice_number: Option<String>,
+    pub issue_date: Option<String>,
+    pub seller_name: Option<String>,
+    pub seller_tax_id: Option<String>,
+    /// 不含税金额
+    pub amount: f64,
+    /// 税额
+    pub tax_amount: f64,
+    /// 价税合计
+    pub total_amount: f64,
+    pub expense_type_code: Option<String>,
+    /// 费用类型名（invoice_expense_types 联表，缺类型时回退 code）
+    pub expense_type_name: Option<String>,
+    /// 关联报销单号（多报销关联取首个），无关联为 None
+    pub claim_no: Option<String>,
+    /// 关联报销单张数（含首个）
+    pub refs_count: i64,
+    pub belong_month: String,
+}
+
+/// 进项台账月度小计
+#[derive(Debug, Clone, Serialize)]
+pub struct InputTaxLedgerMonthlySubtotal {
+    pub belong_month: String,
+    pub invoice_count: i64,
+    pub amount: f64,
+    pub tax_amount: f64,
+    pub total_amount: f64,
+}
+
+/// 增值税进项台账：明细行（按 月份+开票日期+id 稳定排序）+ 月度小计 + 区间合计。
+/// 注意：发票登记 ≠ 进项认证，认证状态以税务系统为准（页面与导出均需明示）。
+#[derive(Debug, Clone, Serialize)]
+pub struct InputTaxLedgerReport {
+    pub from_month: String,
+    pub to_month: String,
+    pub rows: Vec<InputTaxLedgerRow>,
+    pub monthly_subtotals: Vec<InputTaxLedgerMonthlySubtotal>,
+    /// 区间内发票张数
+    pub invoice_count: i64,
+    /// 区间不含税金额合计
+    pub sum_amount: f64,
+    /// 区间税额合计
+    pub sum_tax_amount: f64,
+    /// 区间价税合计
+    pub sum_total_amount: f64,
+}
+
 // ==================== Reimbursement ====================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

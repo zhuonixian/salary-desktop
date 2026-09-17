@@ -313,6 +313,9 @@ pub fn run() {
         // ===== Fund Daily Report（第八阶段 资金日报） =====
         commands::get_fund_daily_report,
         commands::export_fund_daily_report,
+        // ===== Input Tax Ledger（第八阶段 进项台账） =====
+        commands::get_input_tax_ledger,
+        commands::export_input_tax_ledger,
         // ===== Security（Task 6） =====
         security_commands::is_security_initialized,
         security_commands::setup_security,

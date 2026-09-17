@@ -740,6 +740,57 @@ export interface FundDailyReport {
   trend: FundDailyTrendPoint[];
 }
 
+// ==================== 增值税进项台账（第八阶段 Task 10，spec 9） ====================
+// 字段与后端 src-tauri/src/models.rs InputTaxLedger 系列结构 1:1 对齐；
+// 排除 status='void'，报销单号经 reimbursement_claim_invoices 反查（多关联取首个+计数）。
+// 注意：发票登记 ≠ 进项认证，认证状态以税务系统为准。
+
+export interface InputTaxLedgerRow {
+  invoice_id: number;
+  invoice_code?: string;
+  invoice_number?: string;
+  issue_date?: string;
+  seller_name?: string;
+  seller_tax_id?: string;
+  /** 不含税金额 */
+  amount: number;
+  /** 税额 */
+  tax_amount: number;
+  /** 价税合计 */
+  total_amount: number;
+  expense_type_code?: string;
+  /** 费用类型名（缺类型时后端回退 code） */
+  expense_type_name?: string;
+  /** 关联报销单号（多报销关联取首个），无关联为空 */
+  claim_no?: string;
+  /** 关联报销单张数（含首个） */
+  refs_count: number;
+  belong_month: string;
+}
+
+export interface InputTaxLedgerMonthlySubtotal {
+  belong_month: string;
+  invoice_count: number;
+  amount: number;
+  tax_amount: number;
+  total_amount: number;
+}
+
+export interface InputTaxLedgerReport {
+  from_month: string;
+  to_month: string;
+  rows: InputTaxLedgerRow[];
+  monthly_subtotals: InputTaxLedgerMonthlySubtotal[];
+  /** 区间内发票张数 */
+  invoice_count: number;
+  /** 区间不含税金额合计 */
+  sum_amount: number;
+  /** 区间税额合计 */
+  sum_tax_amount: number;
+  /** 区间价税合计 */
+  sum_total_amount: number;
+}
+
 // ==================== 银行余额调节表（Task 13，spec 4.10） ====================
 
 export interface BankReconciliationOutstandingTx {

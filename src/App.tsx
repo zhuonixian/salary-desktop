@@ -42,6 +42,7 @@ import Employees from '@/pages/Employees';
 import Attendance from '@/pages/Attendance';
 import OcrCenter from '@/pages/OcrCenter';
 import Invoices from '@/pages/Invoices';
+import InputTaxLedger from '@/pages/InputTaxLedger';
 import SalaryRules from '@/pages/SalaryRules';
 import SalaryCalculate from '@/pages/SalaryCalculate';
 import ExportCenter from '@/pages/ExportCenter';
@@ -111,6 +112,7 @@ const menuItems: MenuProps['items'] = [
     children: [
       { key: '/invoices', label: '发票管理', icon: <FileTextOutlined /> },
       { key: '/reimbursements', label: '报销管理', icon: <WalletOutlined /> },
+      { key: '/input-tax-ledger', label: '进项台账', icon: <AccountBookOutlined /> },
     ],
   },
   {
@@ -340,6 +342,7 @@ const AppLayout: React.FC = () => {
               <Route path="/punch-card" element={<PunchCard />} />
               <Route path="/ocr" element={<OcrCenter />} />
               <Route path="/invoices" element={<Invoices />} />
+              <Route path="/input-tax-ledger" element={<InputTaxLedger />} />
               <Route path="/reimbursements" element={<Reimbursements />} />
               <Route path="/month-close" element={<MonthClose />} />
               <Route path="/financial-analysis" element={<FinancialAnalysis />} />

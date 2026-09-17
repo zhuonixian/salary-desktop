@@ -120,6 +120,9 @@ const operationTypeLabels: Record<string, string> = {
   // 第八阶段资金日报命令（与 src-tauri/src/commands.rs 实名一一对应；get 类不落日志，映射仅兜底）
   get_fund_daily_report: '查询资金日报',
   export_fund_daily_report: '导出资金日报',
+  // 第八阶段进项台账命令（与 src-tauri/src/commands.rs 实名一一对应；get 类不落日志，映射仅兜底）
+  get_input_tax_ledger: '查询进项台账',
+  export_input_tax_ledger: '导出进项台账',
   generate_bank_reconciliation_period: '生成余额调节表',
   confirm_bank_reconciliation_period: '确认余额调节表',
   export_bank_reconciliation_period: '导出余额调节表',
