@@ -3056,6 +3056,9 @@ const SALARY_DEDUCT_GL: &str = "2211";
 
 /// 核销凭证贷方科目：取关联借款单的其他应收款科目（缺省 1221）。
 /// 历史无关联的核销单（Task 14 前）回落 1221，与旧口径一致。
+/// 极窄边角（Minor 9，行为确认）：存量核销单即使自身填过 counter_account_code，
+/// 贷方也不读该字段（自身字段仅在 other 模式作借方科目），统一回落 1221——
+/// 该现状由 test_legacy_settlement_credit_falls_back_to_1221 显式锁定，改动时需同步评估。
 fn advance_credit_account(conn: &Connection, settlement_id: i64) -> AppResult<String> {
     let code: Option<String> = conn
         .query_row(
@@ -3320,6 +3323,11 @@ pub(crate) fn generate_fund_document_voucher(
 /// 生成冲正凭证（spec 4.7）：复制原单生效凭证并交换借贷方向
 /// （资金行的 `fund_account_id` 随科目保留），source_id 指向冲正单；
 /// 原凭证保留 active，经冲正单 `reversal_of_id` 与凭证备注建立追溯。
+///
+/// 跨月口径（显式化，Minor 4）：冲正凭证的 `belong_month`/`voucher_date`
+/// 取冲正单自身的归属月/单据日期，即**冲正凭证归属操作月**，不回溯原单月份——
+/// 原凭证保留在原月份不动，两月各自试算平衡，净影响经原单+冲正单对冲归零。
+/// 月结保护已同时覆盖原月份与冲正月份（见 reverse_fund_document）。
 /// 必须在冲正事务内调用。
 pub(crate) fn generate_reversal_document_voucher(
     conn: &Connection,
@@ -3424,7 +3432,7 @@ fn resolve_optional(input: &Option<String>, existing: Option<String>) -> Option<
 // ==================== 报销单审批治理（Task 15，spec 5.2） ====================
 
 /// 报销单审批状态标签
-fn reimbursement_status_label(status: &str) -> &'static str {
+pub(crate) fn reimbursement_status_label(status: &str) -> &'static str {
     match status {
         "draft" => "草稿",
         "submitted" => "待审批",
@@ -4425,6 +4433,10 @@ fn build_bank_preview_item(
                 score_reasons,
             });
         }
+        // 排序语义（Minor 10 明确化）：主键 score 降序；**同分平局**按 voucher_line_id
+        // 升序（先落库的凭证分录排前）——平局不掷硬币、不受查询顺序影响，结果确定可复现，
+        // 也与"金额同分时先入账的凭证优先核销"的业务直觉一致（见平局锁定测试
+        // test_allocation_candidate_tie_break_orders_by_voucher_line_id）。
         candidates.sort_by(|a, b| {
             b.score
                 .cmp(&a.score)
@@ -7548,6 +7560,45 @@ mod tests {
         }
     }
 
+    /// 存量核销单贷方回落 1221（Minor 9 边角行为锁定）：Task 14 前的核销单无核销关联，
+    /// 结算贷方经 advance_credit_account 回落 1221；即使存量单自身填过
+    /// counter_account_code（如 1122），贷方也不读它——该字段仅在其他核销模式作借方。
+    #[test]
+    fn test_legacy_settlement_credit_falls_back_to_1221() {
+        let (conn, current) = fund_doc_env();
+        let fx = setup_doc_fixtures(&conn);
+        // 直插一行"存量"核销单：无核销关联、自身 counter_account_code 填了 1122、待结算（approved）
+        conn.execute(
+            "INSERT INTO fund_documents
+                (document_no, document_type, belong_month, document_date, amount, summary,
+                 employee_id, target_account_id, counter_account_code, settlement_mode,
+                 status, created_by, created_at, updated_at)
+             VALUES ('HX-LEGACY-001', 'advance_settlement', '2026-08', '2026-08-05', 300.0,
+                     '存量核销', 1, ?1, '1122', NULL,
+                     'approved', NULL, '2026-08-05', '2026-08-05')",
+            params![fx.cash.id],
+        )
+        .unwrap();
+        let legacy_id: i64 = conn
+            .query_row(
+                "SELECT id FROM fund_documents WHERE document_no = 'HX-LEGACY-001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        let settled = settle_fund_document(&conn, &current, legacy_id).unwrap();
+        let v = active_fund_voucher(&conn, settled.id);
+        assert_eq!(v.lines.len(), 2);
+        // 借：目标账户科目 1001（现金）
+        assert_eq!(v.lines[0].account_code, "1001");
+        assert_eq!(v.lines[0].fund_account_id, Some(fx.cash.id));
+        // 贷：回落 1221，而非存量单自身填的 1122
+        assert_eq!(v.lines[1].account_code, "1221");
+        assert_eq!(v.lines[1].credit_amount, 300.0);
+        assert_eq!(v.lines[1].fund_account_id, None);
+    }
+
     /// 冲正凭证（spec 4.7）：复制原凭证交换借贷、source_id 指向冲正单；
     /// 原凭证保留 active（红字冲销口径，两单并存账面净影响归零）；冲正的冲正回到原方向。
     #[test]
@@ -7628,6 +7679,53 @@ mod tests {
             (v2.lines[1].debit_amount, v2.lines[1].credit_amount),
             (0.0, 500.0)
         );
+    }
+
+    /// 跨月冲正凭证口径（Minor 4 显式化）：原单 2026-07 结算、2026-08 冲正时，
+    /// 冲正凭证归属操作月（belong_month=2026-08，voucher_date=冲正单日期），
+    /// 不回溯原单月份；原凭证保留 2026-07，两月各自平衡、净影响对冲归零。
+    #[test]
+    fn test_reverse_voucher_belongs_to_operation_month_on_cross_month_reversal() {
+        let (conn, current) = fund_doc_env();
+        let fx = setup_doc_fixtures(&conn);
+        let input = FundDocumentInput {
+            belong_month: "2026-07".into(),
+            document_date: "2026-07-10".into(),
+            ..receipt_input(&fx)
+        };
+        let receipt = settled_document(&conn, &current, &input);
+        assert_eq!(receipt.belong_month, "2026-07");
+        let original_voucher = active_fund_voucher(&conn, receipt.id);
+        assert_eq!(original_voucher.belong_month, "2026-07");
+
+        // 跨月冲正：操作月 2026-08
+        let reversal = reverse_fund_document(
+            &conn,
+            &current,
+            &reverse_input(receipt.id, "2026-08", "2026-08-20"),
+        )
+        .unwrap();
+        assert_eq!(reversal.belong_month, "2026-08");
+        assert_eq!(reversal.document_date, "2026-08-20");
+
+        // 冲正凭证归属操作月
+        let rev_voucher = active_fund_voucher(&conn, reversal.id);
+        assert_eq!(rev_voucher.belong_month, "2026-08");
+        assert_eq!(rev_voucher.voucher_date, "2026-08-20");
+
+        // 原凭证保留原月份，原凭证 + 冲正凭证净影响为 0
+        let still = accounting::get_active_voucher_for_source(&conn, "fund_document", receipt.id)
+            .unwrap()
+            .expect("原凭证应保留 active");
+        assert_eq!(still.belong_month, "2026-07");
+        let (mut debit, mut credit) = (0.0, 0.0);
+        for v in [&still, &rev_voucher] {
+            for l in &v.lines {
+                debit += l.debit_amount;
+                credit += l.credit_amount;
+            }
+        }
+        assert!((debit - credit).abs() < AMOUNT_TOLERANCE);
     }
 
     /// 防重复：结算前撤回不产生凭证；结算/撤回重走/重复结算各路径后同源凭证唯一，
@@ -9088,6 +9186,67 @@ mod tests {
         assert!(
             !item.candidates.iter().any(|c| c.voucher_line_id == best),
             "无剩余余额的分录不得再入候选"
+        );
+    }
+
+    /// 同分平局排序语义锁定（Minor 10）：两条候选评分完全相同（同日期、同金额一致、
+    /// 无其他文本因子）时，按 voucher_line_id 升序——先落库的凭证分录排前，
+    /// 结果确定可复现，不依赖查询返回顺序。
+    #[test]
+    fn test_allocation_candidate_tie_break_orders_by_voucher_line_id() {
+        let (conn, acc) = alloc_env();
+        // 第一条落库（line id 更小）：凭证号刻意更大，排除"按凭证号排序"的误解
+        let first = insert_fund_line(
+            &conn,
+            "JZ-AL-099",
+            "2026-08-06",
+            "2026-08",
+            "fund_document",
+            99,
+            acc,
+            0.0,
+            80.0,
+            "无文本因子分录甲",
+            "active",
+        );
+        // 第二条落库（line id 更大、凭证号更小）：评分因子与第一条完全一致
+        let second = insert_fund_line(
+            &conn,
+            "JZ-AL-098",
+            "2026-08-06",
+            "2026-08",
+            "fund_document",
+            98,
+            acc,
+            0.0,
+            80.0,
+            "无文本因子分录乙",
+            "active",
+        );
+        assert!(first < second, "前置：先插入的分录 line id 应更小");
+
+        let tx = insert_tx(
+            &conn,
+            "2026-08-06",
+            "2026-08",
+            "无文本因子流水",
+            "供应商癸",
+            "62229999",
+            0.0,
+            80.0,
+            Some(acc),
+            "unmatched",
+        );
+
+        let item = preview_bank_allocation_candidates(&conn, tx).unwrap();
+        assert_eq!(item.candidates.len(), 2, "两条同因子分录均应入候选");
+        assert_eq!(
+            item.candidates[0].score, item.candidates[1].score,
+            "前置：两条候选评分应相同（平局场景）"
+        );
+        assert_eq!(
+            item.candidates[0].voucher_line_id, first,
+            "同分平局应按 voucher_line_id 升序（先落库者排前）"
         );
     }
 

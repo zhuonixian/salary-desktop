@@ -415,6 +415,10 @@ pub fn create_tables(conn: &Connection) -> AppResult<()> {
             ss_personal_rate REAL DEFAULT 0,
             hf_employer_rate REAL DEFAULT 0,
             hf_personal_rate REAL DEFAULT 0,
+            -- 三险个人分摊份额（spec 8）：之和≈100%，0 = 未配置导出退合并展示
+            pension_personal_rate REAL NOT NULL DEFAULT 0,
+            medical_personal_rate REAL NOT NULL DEFAULT 0,
+            unemployment_personal_rate REAL NOT NULL DEFAULT 0,
             remark TEXT,
             created_at TEXT,
             updated_at TEXT,
@@ -2426,6 +2430,27 @@ pub fn update_salary_rule(conn: &Connection, id: i64, value: f64) -> AppResult<b
     Ok(updated > 0)
 }
 
+/// 按 rule_key 全局规则 upsert（Minor 13）：三险个人分摊份额等"可选键"缺省不落库，
+/// 用户首次保存时插入、再次保存时更新（rule_key UNIQUE，enabled 置 1）。
+/// 供个税扣缴申报表导出读取全局比例（excel.rs get_salary_rules → enabled=1 过滤）。
+pub fn upsert_salary_rule_key(
+    conn: &Connection,
+    key: &str,
+    rule_name: &str,
+    value: f64,
+) -> AppResult<()> {
+    if key.trim().is_empty() {
+        return Err(AppError::InvalidParam("规则键不能为空".into()));
+    }
+    conn.execute(
+        "INSERT INTO salary_rules (rule_key, rule_name, rule_value, enabled)
+         VALUES (?1, ?2, ?3, 1)
+         ON CONFLICT(rule_key) DO UPDATE SET rule_value = excluded.rule_value, enabled = 1",
+        params![key.trim(), rule_name, value],
+    )?;
+    Ok(())
+}
+
 pub fn get_rule_value(conn: &Connection, key: &str) -> AppResult<f64> {
     let value: f64 = conn.query_row(
         "SELECT rule_value FROM salary_rules WHERE rule_key = ?1 AND enabled = 1",
@@ -3462,6 +3487,10 @@ pub fn get_month_close_workbench(conn: &Connection, month: &str) -> AppResult<Mo
     )?;
     // 已付款批次视为未匹配 = 无 active 旧匹配（bank_transaction_matches，迁移后只读保留、
     // 仍为 active，保护 Task 12 迁移前用户）且批次付款凭证资金分录未被 active 核销全额覆盖。
+    // 月结口径（Minor 12 显式化）：新旧两套对账引擎是"或"关系——旧匹配存在 **或** 新引擎
+    // 核销全额覆盖，任一成立即视为已匹配（下面两个 NOT EXISTS 相与）；已迁移旧匹配由
+    // 带 legacy_match_id 的 allocation 接管金额计量，旧匹配在这里仅作存在性判断、不参与
+    // 金额计算，故两表并存也不会把同一笔核销计入两次（与 cashier::bank_tx_allocated 口径一致）。
     // 资金分录定位口径与 Task 12 迁移一致：工资/报销批次级付款凭证（salary_payment /
     // reimbursement_payment）与通用付款单结算凭证（fund_document，经 payment_batch_id 关联）
     // 中挂批次资金账户的贷方分录；只查旧表会导致新对账引擎（bank_reconciliation_allocations）
@@ -5083,7 +5112,9 @@ pub fn set_social_base_limits(
 pub fn get_social_profiles(conn: &Connection, year: i64) -> AppResult<Vec<SocialInsuranceProfile>> {
     let mut stmt = conn.prepare(
         "SELECT id, employee_no, profile_year, ss_base, hf_base, ss_employer_rate,
-                ss_personal_rate, hf_employer_rate, hf_personal_rate, remark, created_at, updated_at
+                ss_personal_rate, hf_employer_rate, hf_personal_rate,
+                pension_personal_rate, medical_personal_rate, unemployment_personal_rate,
+                remark, created_at, updated_at
          FROM social_insurance_profiles WHERE profile_year = ?1 ORDER BY employee_no",
     )?;
     let rows = stmt
@@ -5098,9 +5129,12 @@ pub fn get_social_profiles(conn: &Connection, year: i64) -> AppResult<Vec<Social
                 ss_personal_rate: r.get(6)?,
                 hf_employer_rate: r.get(7)?,
                 hf_personal_rate: r.get(8)?,
-                remark: r.get(9)?,
-                created_at: r.get(10)?,
-                updated_at: r.get(11)?,
+                pension_personal_rate: r.get(9)?,
+                medical_personal_rate: r.get(10)?,
+                unemployment_personal_rate: r.get(11)?,
+                remark: r.get(12)?,
+                created_at: r.get(13)?,
+                updated_at: r.get(14)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -5120,6 +5154,9 @@ pub fn upsert_social_profile(
         input.ss_personal_rate,
         input.hf_employer_rate,
         input.hf_personal_rate,
+        input.pension_personal_rate,
+        input.medical_personal_rate,
+        input.unemployment_personal_rate,
     ] {
         if let Some(r) = rate {
             if !(0.0..=1.0).contains(&r) {
@@ -5146,13 +5183,34 @@ pub fn upsert_social_profile(
         input.hf_employer_rate.unwrap_or(0.0),
         input.hf_personal_rate.unwrap_or(0.0),
     );
+    // 三险个人分摊份额（spec 8）：0 = 未配置；前端提示合计应≈100%（容差内）
+    let (pension_share, medical_share, unemployment_share) = (
+        input.pension_personal_rate.unwrap_or(0.0),
+        input.medical_personal_rate.unwrap_or(0.0),
+        input.unemployment_personal_rate.unwrap_or(0.0),
+    );
     let id = match exists {
         Some(id) => {
             conn.execute(
                 "UPDATE social_insurance_profiles SET ss_base=?1, hf_base=?2, ss_employer_rate=?3,
-                 ss_personal_rate=?4, hf_employer_rate=?5, hf_personal_rate=?6, remark=?7, updated_at=?8
-                 WHERE id=?9",
-                params![ss_base, hf_base, ss_e, ss_p, hf_e, hf_p, input.remark, now, id],
+                 ss_personal_rate=?4, hf_employer_rate=?5, hf_personal_rate=?6,
+                 pension_personal_rate=?7, medical_personal_rate=?8, unemployment_personal_rate=?9,
+                 remark=?10, updated_at=?11
+                 WHERE id=?12",
+                params![
+                    ss_base,
+                    hf_base,
+                    ss_e,
+                    ss_p,
+                    hf_e,
+                    hf_p,
+                    pension_share,
+                    medical_share,
+                    unemployment_share,
+                    input.remark,
+                    now,
+                    id
+                ],
             )?;
             id
         }
@@ -5172,8 +5230,9 @@ pub fn upsert_social_profile(
             conn.execute(
                 "INSERT INTO social_insurance_profiles
                  (employee_no, profile_year, ss_base, hf_base, ss_employer_rate, ss_personal_rate,
-                  hf_employer_rate, hf_personal_rate, remark, created_at, updated_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?10)",
+                  hf_employer_rate, hf_personal_rate, pension_personal_rate, medical_personal_rate,
+                  unemployment_personal_rate, remark, created_at, updated_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?13)",
                 params![
                     input.employee_no,
                     input.profile_year,
@@ -5183,6 +5242,9 @@ pub fn upsert_social_profile(
                     ss_p,
                     hf_e,
                     hf_p,
+                    pension_share,
+                    medical_share,
+                    unemployment_share,
                     input.remark,
                     now
                 ],
@@ -5200,6 +5262,9 @@ pub fn upsert_social_profile(
         ss_personal_rate: ss_p,
         hf_employer_rate: hf_e,
         hf_personal_rate: hf_p,
+        pension_personal_rate: pension_share,
+        medical_personal_rate: medical_share,
+        unemployment_personal_rate: unemployment_share,
         remark: input.remark.clone(),
         created_at: Some(now.clone()),
         updated_at: Some(now),
@@ -5257,8 +5322,9 @@ pub fn copy_social_profiles(
         conn.execute(
             "INSERT INTO social_insurance_profiles
              (employee_no, profile_year, ss_base, hf_base, ss_employer_rate, ss_personal_rate,
-              hf_employer_rate, hf_personal_rate, remark, created_at, updated_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?10)",
+              hf_employer_rate, hf_personal_rate, pension_personal_rate, medical_personal_rate,
+              unemployment_personal_rate, remark, created_at, updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?13)",
             params![
                 p.employee_no,
                 to_year,
@@ -5268,6 +5334,9 @@ pub fn copy_social_profiles(
                 p.ss_personal_rate,
                 p.hf_employer_rate,
                 p.hf_personal_rate,
+                p.pension_personal_rate,
+                p.medical_personal_rate,
+                p.unemployment_personal_rate,
                 p.remark,
                 now
             ],
@@ -7459,7 +7528,8 @@ pub fn save_reimbursement_claim(
         if existing.status != "draft" {
             return Err(AppError::InvalidParam(format!(
                 "报销单 {} 当前状态「{}」，仅草稿可编辑；请先撤回/反审批",
-                existing.claim_no, existing.status
+                existing.claim_no,
+                crate::cashier::reimbursement_status_label(&existing.status)
             )));
         }
         if active_payment_item_exists(conn, "reimbursement_claim", id)? {
@@ -10887,6 +10957,31 @@ pub mod tests {
         assert_eq!(link_count, 1);
     }
 
+    /// 报销 save 非草稿编辑报错中文化（Minor 8）：提示内嵌中文状态标签，不带英文状态码
+    #[test]
+    fn test_update_submitted_reimbursement_error_is_chinese() {
+        let conn = setup_financial_db();
+        // 种子报销单 BX202608001 已是 approved（已审批），直接触发非草稿编辑拦截
+        let _operator = seed_claim_operator(&conn);
+
+        let err = save_reimbursement_claim(
+            &conn,
+            &ReimbursementClaimInput {
+                id: Some(1),
+                employee_id: Some(1),
+                belong_month: "2026-08".into(),
+                title: "已审批时编辑".into(),
+                invoice_ids: vec![1],
+                remark: None,
+            },
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("已审批"), "应内嵌中文状态标签：{msg}");
+        assert!(!msg.contains("approved"), "不得内嵌英文状态码：{msg}");
+        assert!(!msg.contains("draft"), "不得内嵌英文状态码：{msg}");
+    }
+
     #[test]
     fn test_update_attendance_keeps_identity_when_input_is_blank() {
         let conn = setup_financial_db();
@@ -11188,10 +11283,28 @@ mod social_tests {
             ss_personal_rate: Some(0.105),
             hf_employer_rate: Some(0.12),
             hf_personal_rate: Some(0.12),
+            // 三险个人分摊份额（spec 8）：0.6 + 0.3 + 0.1 = 100%
+            pension_personal_rate: Some(0.6),
+            medical_personal_rate: Some(0.3),
+            unemployment_personal_rate: Some(0.1),
             remark: None,
         };
         let saved = upsert_social_profile(&conn, &input).unwrap();
         assert!(saved.id > 0);
+        assert_eq!(saved.pension_personal_rate, 0.6);
+        assert_eq!(saved.medical_personal_rate, 0.3);
+        assert_eq!(saved.unemployment_personal_rate, 0.1);
+        // 回显：get 与保存口径一致（Task 9 挂账 → Minor 13 前端入口透传）
+        let reloaded = &get_social_profiles(&conn, 2026).unwrap()[0];
+        assert_eq!(reloaded.pension_personal_rate, 0.6);
+        assert_eq!(reloaded.medical_personal_rate, 0.3);
+        assert_eq!(reloaded.unemployment_personal_rate, 0.1);
+        // 份额超界拦截（0~1）
+        let bad = SocialInsuranceProfileInput {
+            pension_personal_rate: Some(1.2),
+            ..input.clone()
+        };
+        assert!(upsert_social_profile(&conn, &bad).is_err());
         // 同员工同年度唯一
         assert!(upsert_social_profile(&conn, &input).is_err());
         // 上下限
@@ -11200,14 +11313,45 @@ mod social_tests {
             get_social_base_limits(&conn).unwrap(),
             (4590.0, 22950.0, 0.0, 0.0)
         );
-        // 调基复制：2027 基数上浮 5% 并 clamp
+        // 调基复制：2027 基数上浮 5% 并 clamp；三险份额随行复制
         let n = copy_social_profiles(&conn, 2026, 2027, 1.05, true).unwrap();
         assert_eq!(n, 1);
         let rows = get_social_profiles(&conn, 2027).unwrap();
         assert_eq!(rows[0].ss_base, 8400.0);
+        assert_eq!(rows[0].pension_personal_rate, 0.6);
+        assert_eq!(rows[0].unemployment_personal_rate, 0.1);
         // 目标年度已存在时拒绝
         assert!(copy_social_profiles(&conn, 2026, 2027, 1.05, true).is_err());
         assert!(delete_social_profile(&conn, saved.id).unwrap());
+    }
+
+    /// 全局三险份额规则 upsert（Minor 13）：首存插入、重存更新、空键拒绝，
+    /// 读取侧经 get_salary_rules enabled=1 过滤可见（excel.rs 全局比例口径）。
+    #[test]
+    fn test_upsert_salary_rule_key_insert_and_update() {
+        let conn = crate::db::tests::setup_financial_db();
+        // 首次保存：salary_rules 无该键 → 插入
+        upsert_salary_rule_key(&conn, "pension_personal_rate", "养老保险个人分摊份额", 0.6)
+            .unwrap();
+        let rules = get_salary_rules(&conn).unwrap();
+        let row = rules
+            .iter()
+            .find(|r| r.rule_key == "pension_personal_rate")
+            .unwrap();
+        assert_eq!(row.rule_value, 0.6);
+        assert_eq!(row.enabled, 1);
+        // 再次保存：更新而非新增（rule_key UNIQUE）
+        upsert_salary_rule_key(&conn, "pension_personal_rate", "养老保险个人分摊份额", 0.5)
+            .unwrap();
+        let rules = get_salary_rules(&conn).unwrap();
+        let rows: Vec<_> = rules
+            .iter()
+            .filter(|r| r.rule_key == "pension_personal_rate")
+            .collect();
+        assert_eq!(rows.len(), 1, "重复保存不得新增一行");
+        assert_eq!(rows[0].rule_value, 0.5);
+        // 空键拒绝
+        assert!(upsert_salary_rule_key(&conn, "  ", "x", 0.5).is_err());
     }
 
     #[test]

@@ -86,24 +86,43 @@ pub fn get_status(conn: &Connection, app_data_dir: &Path) -> AppResult<DataSafet
 
 /// 附件磁盘一致性统计（不产生告警消息，仅计数）：
 /// 孤儿 = 磁盘上有、business_attachments 无引用；缺失 = 有记录、磁盘上没有。
+/// 单遍聚合（Minor 5）：引用路径收进 HashSet 后一次遍历磁盘计数孤儿，
+/// 避免旧实现"逐文件 Vec::contains"的 O(n²) 比较；缺失侧同样线性扫描引用表。
 fn attachment_disk_stats(conn: &Connection, app_data_dir: &Path) -> AppResult<(i64, i64)> {
     let dir = app_data_dir.join(ATTACHMENT_DIR);
     if !dir.exists() {
         return Ok((0, 0));
     }
-    let referenced: Vec<String> = {
+    let referenced: std::collections::HashSet<String> = {
         let mut stmt = conn.prepare("SELECT file_path FROM business_attachments")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-        rows.collect::<Result<Vec<_>, _>>()?
+        rows.collect::<Result<std::collections::HashSet<_>, _>>()?
     };
-    let mut on_disk: Vec<String> = Vec::new();
-    collect_files_light(&dir, &mut on_disk)?;
-    let orphans = on_disk.iter().filter(|p| !referenced.contains(*p)).count() as i64;
+    let mut orphans = 0i64;
+    collect_files_counting_orphans(&dir, &referenced, &mut orphans)?;
     let missing = referenced
         .iter()
         .filter(|p| !Path::new(p).is_file())
         .count() as i64;
     Ok((orphans, missing))
+}
+
+/// 递归遍历目录，用引用集合 O(1) 判定孤儿并就地累加计数（不收集路径列表）
+fn collect_files_counting_orphans(
+    dir: &Path,
+    referenced: &std::collections::HashSet<String>,
+    orphans: &mut i64,
+) -> AppResult<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files_counting_orphans(&path, referenced, orphans)?;
+        } else if !referenced.contains(&path.to_string_lossy().to_string()) {
+            *orphans += 1;
+        }
+    }
+    Ok(())
 }
 
 pub fn backup_database(
@@ -418,6 +437,7 @@ pub fn verify_database(
 }
 
 /// 附件目录一致性体检（spec 4.6：数据体检必须覆盖 attachments/）。
+/// 与 attachment_disk_stats 同口径：HashSet 引用集 + 单遍磁盘计数，避免 O(n²)。
 fn check_attachment_consistency(
     conn: &Connection,
     app_data_dir: &Path,
@@ -428,16 +448,15 @@ fn check_attachment_consistency(
         return Ok(()); // 从未上传过附件：无可体检内容
     }
 
-    let referenced: Vec<String> = {
+    let referenced: std::collections::HashSet<String> = {
         let mut stmt = conn.prepare("SELECT file_path FROM business_attachments")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-        rows.collect::<Result<Vec<_>, _>>()?
+        rows.collect::<Result<std::collections::HashSet<_>, _>>()?
     };
 
-    let mut on_disk: Vec<String> = Vec::new();
-    collect_files_light(&dir, &mut on_disk)?;
+    let mut orphans = 0i64;
+    collect_files_counting_orphans(&dir, &referenced, &mut orphans)?;
 
-    let orphans = on_disk.iter().filter(|p| !referenced.contains(*p)).count();
     let missing = referenced
         .iter()
         .filter(|p| !Path::new(p).is_file())
@@ -455,20 +474,6 @@ fn check_attachment_consistency(
     }
     if orphans == 0 && missing == 0 {
         messages.push("附件目录一致性检查通过".to_string());
-    }
-    Ok(())
-}
-
-/// 轻量递归收集目录下全部文件绝对路径（不读文件内容，区别于打包用 collect_files）。
-fn collect_files_light(dir: &Path, out: &mut Vec<String>) -> AppResult<()> {
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_files_light(&path, out)?;
-        } else {
-            out.push(path.to_string_lossy().to_string());
-        }
     }
     Ok(())
 }
@@ -729,6 +734,46 @@ mod tests {
         )
         .expect("setup");
         state
+    }
+
+    /// 附件磁盘一致性统计（Minor 5 单遍聚合口径）：
+    /// 孤儿 = 磁盘上有、库中无引用；缺失 = 库中有记录、磁盘上没有；两者互斥同时计数。
+    #[test]
+    fn test_attachment_disk_stats_counts_orphans_and_missing() {
+        let (app_dir, conn) = seed_app("attachment-stats");
+        let att_dir = app_dir.join(ATTACHMENT_DIR);
+        fs::create_dir_all(&att_dir).unwrap();
+
+        // 引用文件 2 个（1 个存在 + 1 个缺失）、孤儿文件 1 个
+        let exist_path = att_dir.join("exist.txt");
+        let missing_rel = att_dir.join("missing.txt");
+        let orphan = att_dir.join("orphan.txt");
+        fs::write(&exist_path, "a").unwrap();
+        fs::write(&orphan, "b").unwrap();
+
+        for path in [&exist_path, &missing_rel] {
+            conn.execute(
+                "INSERT INTO business_attachments
+                    (entity_type, entity_id, file_name, file_path, encrypted, created_at)
+                 VALUES ('fund_document', 1, 'f.txt', ?1, 0, '2026-09-01')",
+                [path.to_string_lossy().to_string()],
+            )
+            .unwrap();
+        }
+
+        let (orphans, missing) = attachment_disk_stats(&conn, &app_dir).unwrap();
+        assert_eq!(orphans, 1, "仅 orphan.txt 是孤儿：{orphans}");
+        assert_eq!(missing, 1, "仅 missing.txt 缺失：{missing}");
+
+        // 目录不存在（从未上传过附件）时返回 (0, 0)
+        let empty_dir = temp_dir("attachment-stats-empty");
+        fs::create_dir_all(&empty_dir).unwrap();
+        let empty_conn = db::init_db(&empty_dir.to_string_lossy()).unwrap();
+        let (orphans2, missing2) = attachment_disk_stats(&empty_conn, &empty_dir).unwrap();
+        assert_eq!((orphans2, missing2), (0, 0));
+
+        let _ = fs::remove_dir_all(app_dir);
+        let _ = fs::remove_dir_all(empty_dir);
     }
 
     #[test]

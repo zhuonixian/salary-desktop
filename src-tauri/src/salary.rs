@@ -277,7 +277,9 @@ fn calculate_single_employee(
     let profile: Option<SocialInsuranceProfile> = conn
         .query_row(
             "SELECT id, employee_no, profile_year, ss_base, hf_base, ss_employer_rate,
-                    ss_personal_rate, hf_employer_rate, hf_personal_rate, remark, created_at, updated_at
+                    ss_personal_rate, hf_employer_rate, hf_personal_rate,
+                    pension_personal_rate, medical_personal_rate, unemployment_personal_rate,
+                    remark, created_at, updated_at
              FROM social_insurance_profiles WHERE employee_no = ?1 AND profile_year = ?2",
             params![emp.employee_no, profile_year],
             |r| {
@@ -291,9 +293,12 @@ fn calculate_single_employee(
                     ss_personal_rate: r.get(6)?,
                     hf_employer_rate: r.get(7)?,
                     hf_personal_rate: r.get(8)?,
-                    remark: r.get(9)?,
-                    created_at: r.get(10)?,
-                    updated_at: r.get(11)?,
+                    pension_personal_rate: r.get(9)?,
+                    medical_personal_rate: r.get(10)?,
+                    unemployment_personal_rate: r.get(11)?,
+                    remark: r.get(12)?,
+                    created_at: r.get(13)?,
+                    updated_at: r.get(14)?,
                 })
             },
         )

@@ -1499,6 +1499,11 @@ pub struct SocialInsuranceProfile {
     pub ss_personal_rate: f64,
     pub hf_employer_rate: f64,
     pub hf_personal_rate: f64,
+    /// 三险个人分摊比例——占社保个人总额的份额（spec 8：三者之和应≈100%，容差 0.005；
+    /// 0 = 未配置，个税申报表导出退回合并展示）
+    pub pension_personal_rate: f64,
+    pub medical_personal_rate: f64,
+    pub unemployment_personal_rate: f64,
     pub remark: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
@@ -1516,6 +1521,10 @@ pub struct SocialInsuranceProfileInput {
     pub ss_personal_rate: Option<f64>,
     pub hf_employer_rate: Option<f64>,
     pub hf_personal_rate: Option<f64>,
+    /// 三险个人分摊份额（0~1）；缺省/0 = 未配置
+    pub pension_personal_rate: Option<f64>,
+    pub medical_personal_rate: Option<f64>,
+    pub unemployment_personal_rate: Option<f64>,
     pub remark: Option<String>,
 }
 

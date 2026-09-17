@@ -355,6 +355,43 @@ pub fn update_salary_rule(
     Ok(result)
 }
 
+/// 三险个人分摊份额白名单（spec 8 全局键，Minor 13 前端入口）：
+/// upsert 仅允许这三个键，防止前端任意写 salary_rules。
+const SOCIAL_SHARE_RULE_KEYS: [&str; 3] = [
+    "pension_personal_rate",
+    "medical_personal_rate",
+    "unemployment_personal_rate",
+];
+
+/// 全局三险个人分摊份额 upsert（0~1 小数；0 = 未配置，申报表导出退合并展示）
+#[tauri::command]
+pub fn upsert_salary_rule_key(
+    key: String,
+    rule_name: String,
+    rule_value: f64,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<(), AppError> {
+    if !SOCIAL_SHARE_RULE_KEYS.contains(&key.as_str()) {
+        return Err(AppError::InvalidParam(format!(
+            "不支持的全局规则键：{key}（允许：{}）",
+            SOCIAL_SHARE_RULE_KEYS.join(" / ")
+        )));
+    }
+    if !(0.0..=1.0).contains(&rule_value) {
+        return Err(AppError::InvalidParam("份额必须在 0~1 之间".into()));
+    }
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    db::upsert_salary_rule_key(&conn, &key, rule_name.trim(), rule_value)?;
+    db::log_operation(
+        &conn,
+        "upsert_salary_rule_key",
+        &format!("保存全局规则 {key}={rule_value}"),
+        "system",
+        None,
+    )?;
+    Ok(())
+}
+
 #[tauri::command]
 pub fn get_tax_rules(state: tauri::State<'_, Mutex<Connection>>) -> Result<Vec<TaxRule>, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;

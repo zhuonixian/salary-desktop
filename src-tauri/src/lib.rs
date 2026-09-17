@@ -133,6 +133,7 @@ pub fn run() {
         commands::delete_attendance_record,
         commands::get_salary_rules,
         commands::update_salary_rule,
+        commands::upsert_salary_rule_key,
         commands::get_tax_rules,
         commands::update_tax_rule,
         commands::calculate_salary,
