@@ -1335,6 +1335,10 @@ export interface SocialInsuranceProfile {
   ss_personal_rate: number;
   hf_employer_rate: number;
   hf_personal_rate: number;
+  /** 三险个人分摊份额（占社保个人总额比例 0~1；0=未配置，导出退合并展示） */
+  pension_personal_rate: number;
+  medical_personal_rate: number;
+  unemployment_personal_rate: number;
   remark: string | null;
   created_at: string | null;
   updated_at: string | null;
@@ -1350,6 +1354,10 @@ export interface SocialInsuranceProfileInput {
   ss_personal_rate?: number;
   hf_employer_rate?: number;
   hf_personal_rate?: number;
+  /** 三险个人分摊份额（0~1）；0=未配置；三者之和应≈100% */
+  pension_personal_rate?: number;
+  medical_personal_rate?: number;
+  unemployment_personal_rate?: number;
   remark?: string;
 }
 

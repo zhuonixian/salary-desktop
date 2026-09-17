@@ -50,6 +50,10 @@ interface ProfileFormValues {
   ss_personal_rate?: number;
   hf_employer_rate?: number;
   hf_personal_rate?: number;
+  /** 三险个人分摊份额（按 % 录入，保存时 /100 转小数份额） */
+  pension_share_pct?: number;
+  medical_share_pct?: number;
+  unemployment_share_pct?: number;
   remark?: string;
 }
 
@@ -119,6 +123,15 @@ const SocialInsurance: React.FC = () => {
       ss_personal_rate: record.ss_personal_rate,
       hf_employer_rate: record.hf_employer_rate,
       hf_personal_rate: record.hf_personal_rate,
+      pension_share_pct: record.pension_personal_rate
+        ? record.pension_personal_rate * 100
+        : undefined,
+      medical_share_pct: record.medical_personal_rate
+        ? record.medical_personal_rate * 100
+        : undefined,
+      unemployment_share_pct: record.unemployment_personal_rate
+        ? record.unemployment_personal_rate * 100
+        : undefined,
       remark: record.remark ?? undefined,
     });
     setProfileOpen(true);
@@ -126,6 +139,18 @@ const SocialInsurance: React.FC = () => {
 
   const handleSaveProfile = async () => {
     const values = await form.validateFields();
+    // 三险份额校验（spec 8）：任一 > 0 时三者之和应≈100%（容差 0.5）；全 0 = 未配置
+    const shares = [
+      values.pension_share_pct ?? 0,
+      values.medical_share_pct ?? 0,
+      values.unemployment_share_pct ?? 0,
+    ];
+    if (shares.some((s) => s > 0) && Math.abs(shares.reduce((a, b) => a + b, 0) - 100) > 0.5) {
+      message.error(
+        `三险个人分摊份额之和应为 100%（当前 ${shares.reduce((a, b) => a + b, 0)}%）；全部留 0 表示未配置`,
+      );
+      return;
+    }
     setProfileSaving(true);
     try {
       const data: SocialInsuranceProfileInput = {
@@ -138,6 +163,9 @@ const SocialInsurance: React.FC = () => {
         ss_personal_rate: values.ss_personal_rate ?? 0,
         hf_employer_rate: values.hf_employer_rate ?? 0,
         hf_personal_rate: values.hf_personal_rate ?? 0,
+        pension_personal_rate: (values.pension_share_pct ?? 0) / 100,
+        medical_personal_rate: (values.medical_share_pct ?? 0) / 100,
+        unemployment_personal_rate: (values.unemployment_share_pct ?? 0) / 100,
         remark: values.remark?.trim() || undefined,
       };
       await saveSocialProfile(data);
@@ -224,6 +252,19 @@ const SocialInsurance: React.FC = () => {
       { title: '社保个人率', dataIndex: 'ss_personal_rate', key: 'ss_personal_rate', align: 'right' },
       { title: '公积金单位率', dataIndex: 'hf_employer_rate', key: 'hf_employer_rate', align: 'right' },
       { title: '公积金个人率', dataIndex: 'hf_personal_rate', key: 'hf_personal_rate', align: 'right' },
+      {
+        title: '三险分摊份额',
+        key: 'tri_share',
+        width: 150,
+        render: (_, record) => {
+          const { pension_personal_rate: p, medical_personal_rate: m, unemployment_personal_rate: u } = record;
+          if (p <= 0 && m <= 0 && u <= 0) {
+            return <Typography.Text type="secondary">未配置（合并展示）</Typography.Text>;
+          }
+          const pct = (v: number) => `${Math.round(v * 1000) / 10}%`;
+          return `养老 ${pct(p)} / 医疗 ${pct(m)} / 失业 ${pct(u)}`;
+        },
+      },
       { title: '备注', dataIndex: 'remark', key: 'remark', ellipsis: true },
       {
         title: '操作',
@@ -324,6 +365,25 @@ const SocialInsurance: React.FC = () => {
               <InputNumber min={0} max={1} step={0.001} placeholder={RATE_PLACEHOLDER} style={{ width: 160 }} />
             </Form.Item>
           </Space>
+          <Form.Item
+            label="三险个人分摊份额（占社保个人总额，%）"
+            tooltip="个税扣缴申报表三险拆列依据：三者之和应为 100%；全部留空/为 0 表示未配置，申报表按社保个人总额合并展示"
+          >
+            <Space size="middle" style={{ display: 'flex' }}>
+              <Form.Item name="pension_share_pct" label="养老 %" noStyle>
+                <InputNumber min={0} max={100} step={0.1} style={{ width: 110 }} placeholder="60" />
+              </Form.Item>
+              <Form.Item name="medical_share_pct" label="医疗 %" noStyle>
+                <InputNumber min={0} max={100} step={0.1} style={{ width: 110 }} placeholder="30" />
+              </Form.Item>
+              <Form.Item name="unemployment_share_pct" label="失业 %" noStyle>
+                <InputNumber min={0} max={100} step={0.1} style={{ width: 110 }} placeholder="10" />
+              </Form.Item>
+            </Space>
+          </Form.Item>
+          <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 12 }}>
+            三项之和应为 100%；0 表示未配置（导出退回合并展示，不拆列）
+          </Typography.Text>
           <Form.Item name="remark" label="备注">
             <Input.TextArea rows={2} placeholder="备注（可选）" />
           </Form.Item>

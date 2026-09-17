@@ -161,6 +161,7 @@ type BackendSalaryRule = {
   id: number;
   rule_key: string;
   rule_value: number;
+  enabled?: number;
 };
 
 type BackendTaxRule = {
@@ -2198,10 +2199,21 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
     case 'set_reminder_advance_days':
       mockReminderAdvanceDays = Number(args?.days ?? 7);
       return true;
-    default:
-      if (command.startsWith('get_') || command.startsWith('query_')) return [];
-      if (command.startsWith('export_') || command.startsWith('delete_') || command.startsWith('update_')) return true;
-      return true;
+    default: {
+      // 预览模式兜底（Minor 8）：不再无差别 return true——只读命令按语义返回空集合，
+      // 其余（写操作/状态机命令）抛中文错误，避免浏览器预览里
+      // “提示成功、数据未变”的假反馈（如冲正/取消核销/审批类命令）。
+      if (command.startsWith('get_') || command.startsWith('query_') || command.startsWith('list_')) {
+        return [];
+      }
+      if (command.startsWith('export_')) {
+        return '';
+      }
+      if (command.startsWith('is_') || command.startsWith('has_')) {
+        return false;
+      }
+      throw new Error(`预览模式暂不支持「${command}」，请在桌面应用中操作`);
+    }
   }
 };
 
@@ -2818,6 +2830,43 @@ export async function saveSalaryRule(data: SalaryRule): Promise<SalaryRule> {
     })
   );
   return getSalaryRule();
+}
+
+/** 全局三险个人分摊份额（占社保个人总额 %；null = 未配置，申报表导出合并展示，Minor 13） */
+export interface SocialShareRates {
+  pension: number | null;
+  medical: number | null;
+  unemployment: number | null;
+}
+
+export async function getSocialShareRates(): Promise<SocialShareRates> {
+  const rules = await invoke<BackendSalaryRule[]>('get_salary_rules');
+  const byKey = new Map(
+    rules.filter((rule) => rule.enabled !== 0).map((rule) => [rule.rule_key, rule]),
+  );
+  // 份额 0 视为未配置（导出退合并展示），与后端 valid_rates 口径一致
+  const pct = (key: string): number | null => {
+    const raw = byKey.get(key)?.rule_value ?? 0;
+    return raw > 0 ? raw * 100 : null;
+  };
+  return {
+    pension: pct('pension_personal_rate'),
+    medical: pct('medical_personal_rate'),
+    unemployment: pct('unemployment_personal_rate'),
+  };
+}
+
+export async function saveSocialShareRates(rates: SocialShareRates): Promise<void> {
+  const entries: Array<[string, string, number]> = [
+    ['pension_personal_rate', '养老保险个人分摊份额', (rates.pension ?? 0) / 100],
+    ['medical_personal_rate', '医疗保险个人分摊份额', (rates.medical ?? 0) / 100],
+    ['unemployment_personal_rate', '失业保险个人分摊份额', (rates.unemployment ?? 0) / 100],
+  ];
+  await Promise.all(
+    entries.map(([key, name, value]) =>
+      invoke('upsert_salary_rule_key', { key, ruleName: name, ruleValue: value }),
+    ),
+  );
 }
 
 export async function getTaxRules(): Promise<TaxRule[]> {

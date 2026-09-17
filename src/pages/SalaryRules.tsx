@@ -1,11 +1,18 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
-  Tabs, Form, InputNumber, Button, Table, message, Spin, Card, Popconfirm, Select, Input, Alert,
+  Tabs, Form, InputNumber, Button, Table, message, Spin, Card, Popconfirm, Select, Input, Alert, Space,
 } from 'antd';
 import { SaveOutlined, PlusOutlined, DeleteOutlined } from '@ant-design/icons';
 import { useSearchParams } from 'react-router-dom';
-import { getSalaryRule, saveSalaryRule, getTaxRules, saveTaxRules, getOcrSettings, saveOcrSettings } from '@/api';
+import { getSalaryRule, saveSalaryRule, getSocialShareRates, saveSocialShareRates, getTaxRules, saveTaxRules, getOcrSettings, saveOcrSettings } from '@/api';
 import type { OcrSettingsInput, SalaryRule, TaxRule, TaxRuleInput } from '@/types';
+
+/** 三险个人分摊份额（%，null=未配置，申报表导出退合并展示，Minor 13） */
+interface ShareFormValues {
+  pension_pct?: number;
+  medical_pct?: number;
+  unemployment_pct?: number;
+}
 
 const SalaryRules: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -17,6 +24,9 @@ const SalaryRules: React.FC = () => {
   const [ruleForm] = Form.useForm();
   const [ruleId, setRuleId] = useState<number>(0);
   const [systemForm] = Form.useForm<OcrSettingsInput>();
+  // 三险个人分摊份额（全局可选键，Minor 13）
+  const [shareForm] = Form.useForm<ShareFormValues>();
+  const [shareSaving, setShareSaving] = useState(false);
 
   // 个税税率表
   const [taxRules, setTaxRules] = useState<TaxRuleInput[]>([]);
@@ -73,11 +83,57 @@ const SalaryRules: React.FC = () => {
     }
   }, [systemForm]);
 
+  const fetchShareRates = useCallback(async () => {
+    try {
+      const rates = await getSocialShareRates();
+      shareForm.setFieldsValue({
+        pension_pct: rates.pension ?? undefined,
+        medical_pct: rates.medical ?? undefined,
+        unemployment_pct: rates.unemployment ?? undefined,
+      });
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      message.error('获取三险分摊份额失败: ' + msg);
+    }
+  }, [shareForm]);
+
   useEffect(() => {
     fetchRule();
     fetchTaxRules();
     fetchOcrSettings();
-  }, [fetchRule, fetchTaxRules, fetchOcrSettings]);
+    fetchShareRates();
+  }, [fetchRule, fetchTaxRules, fetchOcrSettings, fetchShareRates]);
+
+  const handleSaveShareRates = async () => {
+    let values: ShareFormValues;
+    try {
+      values = await shareForm.validateFields();
+    } catch {
+      return;
+    }
+    const shares = [values.pension_pct ?? 0, values.medical_pct ?? 0, values.unemployment_pct ?? 0];
+    if (shares.some((s) => s > 0) && Math.abs(shares.reduce((a, b) => a + b, 0) - 100) > 0.5) {
+      message.error(
+        `三险个人分摊份额之和应为 100%（当前 ${shares.reduce((a, b) => a + b, 0)}%）；全部留空表示未配置`,
+      );
+      return;
+    }
+    setShareSaving(true);
+    try {
+      await saveSocialShareRates({
+        pension: values.pension_pct ?? null,
+        medical: values.medical_pct ?? null,
+        unemployment: values.unemployment_pct ?? null,
+      });
+      message.success('三险分摊份额已保存');
+      fetchShareRates();
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      message.error('保存失败: ' + msg);
+    } finally {
+      setShareSaving(false);
+    }
+  };
 
   const handleSaveRule = async () => {
     setSaving(true);
@@ -286,6 +342,31 @@ const SalaryRules: React.FC = () => {
             <Form.Item>
               <Button type="primary" icon={<SaveOutlined />} onClick={handleSaveRule} loading={saving}>
                 保存规则
+              </Button>
+            </Form.Item>
+          </Form>
+
+          <Alert
+            showIcon
+            type="info"
+            style={{ maxWidth: 600, marginTop: 8, marginBottom: 16 }}
+            title="三险个人分摊份额用于「个税扣缴申报表」拆列：占社保个人总额的比例，三项之和应为 100%；全部留空表示未配置，申报表按社保个人总额合并展示。员工在「社保台账」按年度单独配置的份额优先于这里的全局值。"
+          />
+          <Form form={shareForm} layout="vertical" style={{ maxWidth: 600 }}>
+            <Space size="middle" style={{ display: 'flex' }}>
+              <Form.Item name="pension_pct" label="养老份额(%)">
+                <InputNumber min={0} max={100} step={0.1} precision={1} style={{ width: 140 }} addonAfter="%" placeholder="60" />
+              </Form.Item>
+              <Form.Item name="medical_pct" label="医疗份额(%)">
+                <InputNumber min={0} max={100} step={0.1} precision={1} style={{ width: 140 }} addonAfter="%" placeholder="30" />
+              </Form.Item>
+              <Form.Item name="unemployment_pct" label="失业份额(%)">
+                <InputNumber min={0} max={100} step={0.1} precision={1} style={{ width: 140 }} addonAfter="%" placeholder="10" />
+              </Form.Item>
+            </Space>
+            <Form.Item>
+              <Button type="primary" icon={<SaveOutlined />} onClick={handleSaveShareRates} loading={shareSaving}>
+                保存三险份额
               </Button>
             </Form.Item>
           </Form>
