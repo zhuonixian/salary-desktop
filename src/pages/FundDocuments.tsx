@@ -63,6 +63,7 @@ import {
   APPROVAL_ACTION_LABEL,
   FUND_DOCUMENT_STATUS_LABEL,
   FUND_DOCUMENT_TYPE_LABEL,
+  SETTLEMENT_MODE_LABEL,
 } from '@/types';
 import type {
   ApprovalEvent,
@@ -421,6 +422,11 @@ const DocumentTab: React.FC<{ docType?: string; shared: SharedOptions; makerChec
         target_account_id: isTransfer || values.document_type === 'receipt' ? values.target_account_id ?? null : null,
         counter_account_code: values.counter_account_code ?? '',
         remark: values.remark?.trim() ?? '',
+        // 本表单不编辑借款/核销专属字段：编辑草稿时透传原值，避免后端把
+        // settlement_mode 抹成缺省 cash_return、或借款单因缺预计归还日校验失败
+        // （stage7 Minor：核销草稿编辑透传 settlement_mode/due_date）
+        settlement_mode: editing?.settlement_mode ?? null,
+        due_date: editing?.due_date ?? null,
       };
       if (editing) {
         await updateFundDocument(data);
@@ -1195,6 +1201,21 @@ const DocumentTab: React.FC<{ docType?: string; shared: SharedOptions; makerChec
                       .filter(Boolean)
                       .join(' / ') || '-',
                 },
+                ...(detail.document.document_type === 'advance_settlement'
+                  ? [
+                      {
+                        key: 'settlement_mode',
+                        label: '核销方式',
+                        children: detail.document.settlement_mode
+                          ? SETTLEMENT_MODE_LABEL[detail.document.settlement_mode] ??
+                            detail.document.settlement_mode
+                          : '-',
+                      },
+                    ]
+                  : []),
+                ...(detail.document.document_type === 'advance'
+                  ? [{ key: 'due_date', label: '预计归还日', children: detail.document.due_date ?? '-' }]
+                  : []),
                 {
                   key: 'submit',
                   label: '提交',

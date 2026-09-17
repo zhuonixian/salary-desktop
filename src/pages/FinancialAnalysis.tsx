@@ -16,6 +16,7 @@ import {
   exportExpenseAnalysisReport,
   exportMonthCloseReport,
   getFinancialAnalysis,
+  getInvoiceExpenseTypes,
   saveBudget,
 } from '@/api';
 import { SensitiveText } from '@/components/SensitiveText';
@@ -29,6 +30,7 @@ import type {
   ExpenseTypeTrend,
   FinancialAnalysisQuery,
   FinancialAnalysisReport,
+  InvoiceExpenseType,
   MonthlyComparison,
 } from '@/types';
 
@@ -62,6 +64,7 @@ const FinancialAnalysis: React.FC = () => {
   const [report, setReport] = useState<FinancialAnalysisReport | null>(null);
   const [budgetModalOpen, setBudgetModalOpen] = useState(false);
   const [savingBudget, setSavingBudget] = useState(false);
+  const [expenseTypes, setExpenseTypes] = useState<InvoiceExpenseType[]>([]);
   const [budgetForm] = Form.useForm<BudgetInput & { scope: 'total' | 'department' | 'expense' }>();
 
   const query = useMemo<FinancialAnalysisQuery>(() => ({
@@ -84,6 +87,14 @@ const FinancialAnalysis: React.FC = () => {
     fetchData();
   }, [fetchData]);
 
+  // 费用类型字典（invoice_expense_types 表）：预算下拉的权威选项来源（Minor 6），
+  // 预算统计按 code 精确匹配，自由文本易与字典脱节导致统计漏计
+  useEffect(() => {
+    getInvoiceExpenseTypes()
+      .then(setExpenseTypes)
+      .catch(() => setExpenseTypes([]));
+  }, []);
+
   const totals = useMemo(() => {
     const current = report?.monthly_comparison.find((item) => item.month === query.month);
     const previous = report?.monthly_comparison.find((item) => item.month !== query.month);
@@ -105,9 +116,20 @@ const FinancialAnalysis: React.FC = () => {
     ...(report?.budget_executions ?? []).map((item) => item.budget.department).filter(Boolean) as string[],
   ])).map((department) => ({ value: department, label: department })), [report]);
 
-  const expenseTypeOptions = useMemo(() => Array.from(new Map(
-    (report?.expense_trends ?? []).map((item) => [item.expense_type_code, item.expense_type_name]),
-  )).map(([value, label]) => ({ value, label })), [report]);
+  // 预算下拉选项：以字典表为主（仅启用项），合并报表中出现过的类型
+  // （含已停用但有历史预算的 code，保证旧预算回显）
+  const expenseTypeOptions = useMemo(() => {
+    const merged = new Map<string, string>();
+    expenseTypes
+      .filter((t) => t.enabled === 1)
+      .forEach((t) => merged.set(t.code, t.name));
+    (report?.expense_trends ?? []).forEach((item) => {
+      if (!merged.has(item.expense_type_code)) {
+        merged.set(item.expense_type_code, item.expense_type_name);
+      }
+    });
+    return Array.from(merged).map(([value, label]) => ({ value, label }));
+  }, [expenseTypes, report]);
 
   const handleExport = async (
     type: 'department' | 'expense' | 'monthClose',

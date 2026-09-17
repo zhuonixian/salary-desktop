@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import type { ReactNode } from 'react';
 import {
   Button,
   Card,
@@ -22,6 +23,7 @@ import {
 import type { ColumnsType } from 'antd/es/table';
 import {
   DownloadOutlined,
+  InfoCircleOutlined,
   ReloadOutlined,
   RollbackOutlined,
   PlusOutlined,
@@ -78,6 +80,16 @@ const STATUS_COLOR: Record<string, string> = {
 
 /** 其他应收款科目（借款单对方科目，缺省 1221 其他应收款） */
 const ADVANCE_DEFAULT_GL = '1221';
+
+/** 统计卡标题 + 口径说明图标（Minor 7）：悬停展示统计口径，含未发放借款的说明 */
+const withCaliberHint = (label: string, tip: string): ReactNode => (
+  <span>
+    {label}{' '}
+    <Tooltip title={tip}>
+      <InfoCircleOutlined style={{ color: '#8c8c8c', fontSize: 13 }} />
+    </Tooltip>
+  </span>
+);
 
 type CommentAction =
   | { type: 'approve'; docId: number; docNo: string }
@@ -600,20 +612,35 @@ const Advances: React.FC = () => {
         <Row gutter={[16, 16]} className="mb-16">
           <Col xs={24} sm={12} lg={8}>
             <Card className="stat-card">
-              <SensitiveStatistic title="借款总额" value={ledger?.rows.reduce((s, r) => s + r.amount, 0) ?? 0} />
+              <SensitiveStatistic
+                title={withCaliberHint(
+                  '借款总额',
+                  '台账内全部借款单金额合计，含尚未经付款批次发放的草稿/审批中借款（未发放借款资金尚未实际付出）',
+                )}
+                value={ledger?.rows.reduce((s, r) => s + r.amount, 0) ?? 0}
+              />
             </Card>
           </Col>
           <Col xs={24} sm={12} lg={8}>
             <Card className="stat-card">
               <SensitiveStatistic
-                title="累计已核销"
+                title={withCaliberHint(
+                  '累计已核销',
+                  '各借款单 active 核销记录金额合计（核销单冲正/取消后相应核销额会扣减）',
+                )}
                 value={ledger?.rows.reduce((s, r) => s + r.settled_amount, 0) ?? 0}
               />
             </Card>
           </Col>
           <Col xs={24} sm={12} lg={8}>
             <Card className="stat-card">
-              <SensitiveStatistic title="未核销余额" value={ledger?.total_outstanding ?? 0} />
+              <SensitiveStatistic
+                title={withCaliberHint(
+                  '未核销余额',
+                  '借款总额 − 累计已核销；含未发放借款的全额余额（该部分资金尚未实际付出，仅作台账口径）',
+                )}
+                value={ledger?.total_outstanding ?? 0}
+              />
             </Card>
           </Col>
         </Row>

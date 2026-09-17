@@ -92,6 +92,14 @@ const AMOUNT_TOLERANCE = 0.005;
 const fmtMoney = (value?: number | null) =>
   (value ?? 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
+/** 伪未达项：状态是待匹配，但新对账引擎仍有 active 核销额（常见于旧匹配取消后核销未释放） */
+const hasAllocationResidual = (tx: Pick<BankTransaction, 'status' | 'allocated_amount'>): boolean =>
+  tx.status === 'unmatched' && (tx.allocated_amount ?? 0) > AMOUNT_TOLERANCE;
+
+/** 伪未达项两步恢复引导（stage7 Minor 11） */
+const RESIDUAL_RECOVERY_HINT =
+  '两步恢复：① 在「对账工作台」取消该流水的相关核销，释放残留核销额；② 回到本页重新匹配批次或生成凭证/忽略。';
+
 const txSideAmount = (tx: Pick<BankTransaction, 'income_amount' | 'expense_amount'>) =>
   tx.income_amount > tx.expense_amount ? tx.income_amount : tx.expense_amount;
 
@@ -1003,12 +1011,28 @@ const BankTransactions: React.FC = () => {
   };
 
   // 取消旧式批次匹配（旧 bank_transaction_matches 只读保留一个版本周期；
-  // 新引擎核销走「对账工作台」，取消核销在该页完成）
+  // 新引擎核销走「对账工作台」，取消核销在该页完成）。
+  // 取消只作废旧匹配并把流水打回待匹配，不动新引擎核销：若流水仍有 active
+  // 核销残留则给出两步恢复引导（Minor 11），避免当作普通待匹配流水重复匹配/入账。
   const handleCancelMatch = async (tx: BankTransaction) => {
     setAction(`cancel-${tx.id}`);
     try {
       await cancelBankTransactionMatch(tx.id);
-      message.success('匹配已取消');
+      let residual = 0;
+      try {
+        const fresh = await queryBankTransactions({ belong_month: tx.belong_month });
+        residual = fresh.find((r) => r.id === tx.id)?.allocated_amount ?? 0;
+      } catch {
+        // 查询失败不阻断取消流程，仅退回普通提示
+      }
+      if (residual > AMOUNT_TOLERANCE) {
+        message.warning(
+          `匹配已取消，但该流水在新对账引擎仍有核销残留 ${fmtMoney(residual)} 元（伪未达项）。${RESIDUAL_RECOVERY_HINT}`,
+          8,
+        );
+      } else {
+        message.success('匹配已取消');
+      }
       await fetchData();
     } catch (e: unknown) {
       message.error('取消匹配失败: ' + (e instanceof Error ? e.message : String(e)));
@@ -1069,8 +1093,19 @@ const BankTransactions: React.FC = () => {
       title: '状态',
       dataIndex: 'status',
       key: 'status',
-      width: 90,
-      render: (status: BankTransactionStatus) => <Tag color={statusMeta[status].color}>{statusMeta[status].text}</Tag>,
+      width: 120,
+      render: (status: BankTransactionStatus, tx: BankTransaction) => (
+        <Space size={4} wrap>
+          <Tag color={statusMeta[status].color}>{statusMeta[status].text}</Tag>
+          {hasAllocationResidual(tx) && (
+            <Tooltip
+              title={`伪未达项：流水仍有 ${fmtMoney(tx.allocated_amount)} 元未释放核销额（常见于旧匹配取消后核销未释放）。${RESIDUAL_RECOVERY_HINT}`}
+            >
+              <Tag color="orange">核销残留</Tag>
+            </Tooltip>
+          )}
+        </Space>
+      ),
     },
     {
       title: '资金账户',
