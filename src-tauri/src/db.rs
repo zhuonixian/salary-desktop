@@ -457,6 +457,7 @@ pub fn create_tables(conn: &Connection) -> AppResult<()> {
     )?;
     migrate_existing_schema(conn)?;
     migrate_stage7_schema(conn)?;
+    migrate_stage8_schema(conn)?;
 
     Ok(())
 }
@@ -1277,6 +1278,151 @@ pub(crate) fn record_stage7_state(
         )?;
     }
     Ok(())
+}
+
+// ==================== 第八阶段（票据台账/现金盘点）schema 迁移 ====================
+
+/// 第八阶段新表清单（迁移后自检用）
+const STAGE8_NEW_TABLES: &[&str] = &[
+    "negotiable_instruments",
+    "instrument_endorsements",
+    "cash_count_sheets",
+    "cash_count_denominations",
+];
+
+/// 建第八阶段票据与现金盘点四张新表与索引（全部 IF NOT EXISTS，幂等）。
+/// 表结构逐字取 spec 3.1-3.3：
+/// - 票据号唯一（非 void）：partial unique index `(instrument_type, instrument_no) WHERE status != 'void'`，
+///   同号同类型仅一条有效票据，作废（void）后同号可再录；
+/// - 背书序号同一票据内递增唯一：unique index `(instrument_id, endorse_order)`（spec 3.2 注释语义）。
+fn create_stage8_tables(conn: &Connection) -> AppResult<()> {
+    conn.execute_batch(
+        "
+        -- 票据台账（spec 3.1）：received 持有链 holding→endorsed_out/discounted/collecting→collected，
+        -- issued 兑付链 issued_outstanding→paid，void 为通用终态旁路（仅未资金流转时）
+        CREATE TABLE IF NOT EXISTS negotiable_instruments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            instrument_type TEXT NOT NULL CHECK (instrument_type IN ('bank_acceptance','commercial_acceptance','check')),
+            direction TEXT NOT NULL CHECK (direction IN ('received','issued')),
+            instrument_no TEXT NOT NULL,
+            face_amount REAL NOT NULL CHECK (face_amount > 0),
+            issue_date TEXT NOT NULL,
+            due_date TEXT NOT NULL,
+            drawer TEXT,
+            acceptor TEXT,
+            payee TEXT,
+            partner_id INTEGER,
+            fund_account_id INTEGER,
+            counter_account_code TEXT,
+            status TEXT NOT NULL DEFAULT 'holding' CHECK (status IN ('holding','endorsed_out','discounted','collecting','collected','issued_outstanding','paid','void')),
+            voucher_id INTEGER,
+            remark TEXT,
+            created_by TEXT, created_at TEXT, updated_at TEXT,
+            FOREIGN KEY (partner_id) REFERENCES business_partners(id),
+            FOREIGN KEY (fund_account_id) REFERENCES fund_accounts(id)
+        );
+        -- 票据号 + 类型唯一（非 void）
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_negotiable_instruments_type_no_active
+            ON negotiable_instruments(instrument_type, instrument_no) WHERE status != 'void';
+        -- 状态筛选与账期提醒（status IN holding/collecting/issued_outstanding + due_date 扫描）
+        CREATE INDEX IF NOT EXISTS idx_negotiable_instruments_status_due
+            ON negotiable_instruments(status, due_date);
+
+        -- 背书链（spec 3.2）：追加式；本期约定全额背书（金额=票面校验在领域层）
+        CREATE TABLE IF NOT EXISTS instrument_endorsements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            instrument_id INTEGER NOT NULL,
+            endorse_order INTEGER NOT NULL,
+            endorsee TEXT NOT NULL,
+            endorse_date TEXT NOT NULL,
+            purpose TEXT,
+            amount REAL NOT NULL CHECK (amount > 0),
+            voucher_id INTEGER NOT NULL,
+            created_by TEXT, created_at TEXT,
+            FOREIGN KEY (instrument_id) REFERENCES negotiable_instruments(id)
+        );
+        -- 背书序号同一票据内递增唯一（兼作按票据查背书链的索引）
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_instrument_endorsements_order
+            ON instrument_endorsements(instrument_id, endorse_order);
+
+        -- 现金盘点单（spec 3.3/6）：difference = 实存 − 账面（领域层自动算）；
+        -- belong_month 冗余月份用于月结保护；差异≠0 确认时生成盘盈亏凭证
+        CREATE TABLE IF NOT EXISTS cash_count_sheets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            count_date TEXT NOT NULL,
+            belong_month TEXT NOT NULL,
+            fund_account_id INTEGER NOT NULL,
+            book_balance REAL NOT NULL,
+            counted_amount REAL NOT NULL CHECK (counted_amount >= 0),
+            difference REAL NOT NULL,
+            difference_reason TEXT,
+            status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','confirmed','void')),
+            voucher_id INTEGER,
+            remark TEXT,
+            created_by TEXT, created_at TEXT, updated_at TEXT,
+            FOREIGN KEY (fund_account_id) REFERENCES fund_accounts(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_cash_count_sheets_account_date
+            ON cash_count_sheets(fund_account_id, count_date);
+
+        -- 面额明细（可选子表）：subtotal = denomination × quantity，入库校验在领域层
+        CREATE TABLE IF NOT EXISTS cash_count_denominations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sheet_id INTEGER NOT NULL,
+            denomination REAL NOT NULL CHECK (denomination > 0),
+            quantity INTEGER NOT NULL CHECK (quantity >= 0),
+            subtotal REAL NOT NULL,
+            FOREIGN KEY (sheet_id) REFERENCES cash_count_sheets(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_cash_count_denominations_sheet
+            ON cash_count_denominations(sheet_id);
+        ",
+    )?;
+    Ok(())
+}
+
+/// 第八阶段 schema 迁移入口（幂等，可在新旧库上重复执行）：
+/// 1. 建四张新表（票据 / 背书链 / 现金盘点单 / 面额明细）与索引，结构自检防部分建表被静默吞掉；
+/// 2. `reminder_advance_days` 缺省写入 app_settings（INSERT OR IGNORE：用户已自定义则不覆盖）；
+/// 3. 迁移结束运行 `PRAGMA foreign_key_check`，发现悬空引用整体回滚。
+///
+/// 无存量数据迁移（spec 3.5）；全程在单事务中执行，任一步失败整体回滚（含建表/建索引），
+/// 不留半成品。注意：票据表引用 stage7 的 business_partners / fund_accounts，
+/// 调用链保证 migrate_stage7_schema 先于本迁移执行。
+pub fn migrate_stage8_schema(conn: &Connection) -> AppResult<()> {
+    run_migration_in_transaction(conn, |c| {
+        create_stage8_tables(c)?;
+
+        // 新表自检：防止部分建表被静默吞掉
+        for table in STAGE8_NEW_TABLES {
+            let exists: i64 = c.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                params![table],
+                |r| r.get(0),
+            )?;
+            if exists == 0 {
+                return Err(AppError::General(format!(
+                    "第八阶段迁移异常：表 {table} 创建失败"
+                )));
+            }
+        }
+
+        // 账期提醒提前天数缺省 7（spec 3.4）：仅首次写入，不回置用户自定义值
+        c.execute(
+            "INSERT OR IGNORE INTO app_settings (key, value) VALUES (?1, ?2)",
+            params![
+                SETTING_REMINDER_ADVANCE_DAYS,
+                DEFAULT_REMINDER_ADVANCE_DAYS.to_string()
+            ],
+        )?;
+
+        // 外键一致性校验：存量脏数据（悬空引用）视为升级阻断项，整体回滚
+        let fk_errors = count_fk_check_violations(c)?;
+        if fk_errors > 0 {
+            return Err(fk_gate_error("第八阶段迁移", fk_errors, c));
+        }
+        Ok(())
+    })
 }
 
 // ==================== Task 12：旧银行匹配迁移为多对多核销（spec 4.9/9.4） ====================
@@ -11485,5 +11631,443 @@ mod stage7_tests {
             .expect("销售部预算存在");
         // 工资 12200 + 发票 0（inv1 已入报销单 1 去重）+ 报销 300 = 12500
         assert!((sales.actual_amount - 12_500.0).abs() < 0.005);
+    }
+
+    // ==================== 第八阶段：票据台账 / 现金盘点 DDL 迁移 ====================
+
+    const STAGE8_TEST_TABLES: &[&str] = &[
+        "negotiable_instruments",
+        "instrument_endorsements",
+        "cash_count_sheets",
+        "cash_count_denominations",
+    ];
+
+    /// 直插一张票据（db 层测试既有模式：SQL 直插验证约束层行为），返回 id
+    fn t8_seed_instrument(
+        conn: &Connection,
+        instrument_type: &str,
+        direction: &str,
+        instrument_no: &str,
+        status: &str,
+    ) -> AppResult<i64> {
+        conn.execute(
+            "INSERT INTO negotiable_instruments
+                (instrument_type, direction, instrument_no, face_amount, issue_date, due_date,
+                 status, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 100000, '2026-09-01', '2026-12-01', ?4, '2026-09-01', '2026-09-01')",
+            params![instrument_type, direction, instrument_no, status],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// 种一个现金资金账户（gl_account_code 引用 1001），返回账户 id
+    fn t8_seed_cash_account(conn: &Connection, code: &str) -> i64 {
+        conn.execute(
+            "INSERT INTO fund_accounts (account_code, name, account_type, gl_account_code)
+             VALUES (?1, '库存现金', 'cash', '1001')",
+            params![code],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    /// 空库初始化：四表齐全、票据号 partial 唯一索引就位、reminder_advance_days 缺省 7、
+    /// CHECK 白名单与默认值生效；二次执行 stage8 迁移无变化（幂等）。
+    #[test]
+    fn test_stage8_fresh_db_initializes_notes_tables() {
+        let conn = setup_financial_db();
+        // bundled SQLite 默认开启外键（SQLITE_DEFAULT_FOREIGN_KEYS=1），先种真实父行
+        let account_id = t8_seed_cash_account(&conn, "CASH-001");
+        for table in STAGE8_TEST_TABLES {
+            assert!(stage7_table_exists(&conn, table), "空库初始化缺表 {table}");
+        }
+        // 票据号唯一索引必须为 partial（WHERE status != 'void'），保证作废后同号可再录
+        let idx_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='index'
+                 AND name='idx_negotiable_instruments_type_no_active'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            idx_sql.contains("status != 'void'"),
+            "票据号唯一索引应为 partial：{idx_sql}"
+        );
+        // reminder_advance_days 缺省 7（spec 3.4）
+        assert_eq!(
+            stage7_setting(&conn, "reminder_advance_days").as_deref(),
+            Some("7")
+        );
+        assert_eq!(stage7_fk_violation_count(&conn), 0);
+
+        // CHECK 白名单：非法类型/方向/状态/票面金额均被拒
+        let bad = conn.execute(
+            "INSERT INTO negotiable_instruments
+                (instrument_type, direction, instrument_no, face_amount, issue_date, due_date)
+             VALUES ('bogus','received','X1',100,'2026-09-01','2026-12-01')",
+            [],
+        );
+        assert!(bad.is_err(), "非法票据类型应被 CHECK 拦截");
+        let bad = conn.execute(
+            "INSERT INTO negotiable_instruments
+                (instrument_type, direction, instrument_no, face_amount, issue_date, due_date)
+             VALUES ('bank_acceptance','transfer','X1',100,'2026-09-01','2026-12-01')",
+            [],
+        );
+        assert!(bad.is_err(), "非法方向应被 CHECK 拦截");
+        let bad = conn.execute(
+            "INSERT INTO negotiable_instruments
+                (instrument_type, direction, instrument_no, face_amount, issue_date, due_date)
+             VALUES ('bank_acceptance','received','X1',0,'2026-09-01','2026-12-01')",
+            [],
+        );
+        assert!(bad.is_err(), "票面金额必须 > 0");
+        let bad = conn.execute(
+            "INSERT INTO negotiable_instruments
+                (instrument_type, direction, instrument_no, face_amount, issue_date, due_date, status)
+             VALUES ('bank_acceptance','received','X1',100,'2026-09-01','2026-12-01','bogus')",
+            [],
+        );
+        assert!(bad.is_err(), "非法状态应被 CHECK 拦截");
+        let bad = conn.execute(
+            "INSERT INTO cash_count_sheets
+                (count_date, belong_month, fund_account_id, book_balance, counted_amount, difference)
+             VALUES ('2026-09-15','2026-09',?1,1000,-1,-1)",
+            params![account_id],
+        );
+        assert!(bad.is_err(), "实存金额必须 >= 0");
+
+        // 默认值：票据缺省 holding、盘点单缺省 draft
+        let id = t8_seed_instrument(&conn, "bank_acceptance", "received", "YZ2026001", "holding")
+            .unwrap();
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM negotiable_instruments WHERE id=?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "holding");
+        conn.execute(
+            "INSERT INTO cash_count_sheets
+                (count_date, belong_month, fund_account_id, book_balance, counted_amount, difference)
+             VALUES ('2026-09-15','2026-09',?1,1000,990,-10)",
+            params![account_id],
+        )
+        .unwrap();
+        let sheet_status: String = conn
+            .query_row("SELECT status FROM cash_count_sheets WHERE id=1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(sheet_status, "draft");
+
+        // 幂等：空库初始化后二次执行 stage8 迁移无变化
+        migrate_stage8_schema(&conn).unwrap();
+        assert_eq!(
+            stage7_setting(&conn, "reminder_advance_days").as_deref(),
+            Some("7"),
+            "重跑迁移不得重复或改写缺省值"
+        );
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM negotiable_instruments", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1, "重跑迁移不得产生或丢失数据");
+        assert_eq!(stage7_fk_violation_count(&conn), 0);
+    }
+
+    /// 旧库升级（先 stage7 后 stage8）：四表补齐；外键开启下引用真实父行可写入、
+    /// 悬空引用被拒；reminder_advance_days 缺省写入。
+    #[test]
+    fn test_stage8_migration_upgrades_legacy_db() {
+        let conn = setup_stage7_legacy_db();
+        migrate_stage7_schema(&conn).unwrap();
+        // 种 stage7 父行：往来单位 + 现金账户
+        conn.execute(
+            "INSERT INTO business_partners (partner_code, name, partner_type, status)
+             VALUES ('P001', '甲公司', 'customer', 'active')",
+            [],
+        )
+        .unwrap();
+        let account_id = t8_seed_cash_account(&conn, "CASH-001");
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+
+        migrate_stage8_schema(&conn).unwrap();
+        for table in STAGE8_TEST_TABLES {
+            assert!(stage7_table_exists(&conn, table), "旧库升级缺表 {table}");
+        }
+        assert_eq!(
+            stage7_setting(&conn, "reminder_advance_days").as_deref(),
+            Some("7")
+        );
+
+        // 引用真实父行可写入（partner/fund_account 外键贯通）
+        conn.execute(
+            "INSERT INTO negotiable_instruments
+                (instrument_type, direction, instrument_no, face_amount, issue_date, due_date,
+                 partner_id, fund_account_id, created_at, updated_at)
+             VALUES ('bank_acceptance','received','YZ2026001',100000,'2026-09-01','2026-12-01',
+                     1, ?1, '2026-09-01', '2026-09-01')",
+            params![account_id],
+        )
+        .unwrap();
+        // 悬空引用被拒
+        let orphan = conn.execute(
+            "INSERT INTO negotiable_instruments
+                (instrument_type, direction, instrument_no, face_amount, issue_date, due_date,
+                 partner_id, created_at, updated_at)
+             VALUES ('bank_acceptance','received','YZ2026002',100000,'2026-09-01','2026-12-01',
+                     9999, '2026-09-01', '2026-09-01')",
+            [],
+        );
+        assert!(orphan.is_err(), "悬空 partner_id 应被外键拦截");
+        assert_eq!(stage7_fk_violation_count(&conn), 0);
+    }
+
+    /// 旧库升级后幂等：已有业务数据时重跑 stage8 迁移不产生/丢失数据，
+    /// 用户自定义 reminder_advance_days 不被回置为缺省值。
+    #[test]
+    fn test_stage8_migration_idempotent() {
+        let conn = setup_stage7_legacy_db();
+        migrate_stage7_schema(&conn).unwrap();
+        migrate_stage8_schema(&conn).unwrap();
+
+        // 写入业务数据后重跑迁移
+        let account_id = t8_seed_cash_account(&conn, "CASH-001");
+        t8_seed_instrument(&conn, "bank_acceptance", "received", "YZ2026001", "holding").unwrap();
+        conn.execute(
+            "INSERT INTO cash_count_sheets
+                (count_date, belong_month, fund_account_id, book_balance, counted_amount,
+                 difference, status, created_at, updated_at)
+             VALUES ('2026-09-15','2026-09',?1,1000,990,-10,'draft','2026-09-15','2026-09-15')",
+            params![account_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cash_count_denominations (sheet_id, denomination, quantity, subtotal)
+             VALUES (1, 100, 9, 900)",
+            [],
+        )
+        .unwrap();
+        // 用户自定义提前天数
+        set_setting(&conn, "reminder_advance_days", "15").unwrap();
+
+        migrate_stage8_schema(&conn).unwrap();
+        let instruments: i64 = conn
+            .query_row("SELECT COUNT(*) FROM negotiable_instruments", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(instruments, 1, "重跑迁移不得产生重复票据");
+        let sheets: i64 = conn
+            .query_row("SELECT COUNT(*) FROM cash_count_sheets", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(sheets, 1);
+        let denoms: i64 = conn
+            .query_row("SELECT COUNT(*) FROM cash_count_denominations", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(denoms, 1);
+        assert_eq!(
+            stage7_setting(&conn, "reminder_advance_days").as_deref(),
+            Some("15"),
+            "重跑迁移不得回置用户自定义的提前天数"
+        );
+        // 唯一索引仍在（未被重建或删除）
+        let idx_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index'
+                 AND name IN ('idx_negotiable_instruments_type_no_active',
+                              'idx_instrument_endorsements_order')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx_count, 2);
+        assert_eq!(stage7_fk_violation_count(&conn), 0);
+    }
+
+    /// 票据号唯一索引生效：同类型同号仅一条有效票据；不同类型同号允许；
+    /// 作废（void）后同号可再录，多条 void 同号共存。
+    #[test]
+    fn test_stage8_instrument_no_unique_index() {
+        let conn = setup_financial_db();
+        t8_seed_instrument(&conn, "bank_acceptance", "received", "YZ001", "holding").unwrap();
+        // 同类型同号（非 void）拒绝
+        let dup = t8_seed_instrument(&conn, "bank_acceptance", "received", "YZ001", "holding");
+        assert!(dup.is_err(), "同类型同号第二条有效票据应被唯一索引拒绝");
+        // 不同类型同号允许（银承与商承编号体系独立）
+        t8_seed_instrument(
+            &conn,
+            "commercial_acceptance",
+            "received",
+            "YZ001",
+            "holding",
+        )
+        .unwrap();
+        // void 后同号可再录；多条 void 同号共存
+        t8_seed_instrument(&conn, "bank_acceptance", "issued", "ZP001", "void").unwrap();
+        t8_seed_instrument(
+            &conn,
+            "bank_acceptance",
+            "issued",
+            "ZP001",
+            "issued_outstanding",
+        )
+        .unwrap();
+        t8_seed_instrument(&conn, "bank_acceptance", "issued", "ZP001", "void").unwrap();
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM negotiable_instruments", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(total, 5);
+        assert_eq!(stage7_fk_violation_count(&conn), 0);
+    }
+
+    /// 迁移中途失败（部分建表后注入错误）整体回滚：四表与缺省键均不残留，库保持可用。
+    #[test]
+    fn test_stage8_partial_ddl_rolls_back() {
+        let conn = setup_stage7_legacy_db();
+        migrate_stage7_schema(&conn).unwrap();
+        let result: AppResult<()> = run_migration_in_transaction(&conn, |c| {
+            create_stage8_tables(c)?;
+            c.execute(
+                "INSERT INTO negotiable_instruments
+                    (instrument_type, direction, instrument_no, face_amount, issue_date, due_date,
+                     created_at, updated_at)
+                 VALUES ('bank_acceptance','received','YZ001',100000,'2026-09-01','2026-12-01',
+                         '2026-09-01','2026-09-01')",
+                [],
+            )?;
+            Err(AppError::General("模拟第八阶段迁移中途失败".into()))
+        });
+        assert!(result.is_err());
+        for table in STAGE8_TEST_TABLES {
+            assert!(
+                !stage7_table_exists(&conn, table),
+                "失败回滚后不应残留 {table}"
+            );
+        }
+        assert!(stage7_setting(&conn, "reminder_advance_days").is_none());
+        // 库仍可用：stage7 老数据完整
+        let batches: i64 = conn
+            .query_row("SELECT COUNT(*) FROM payment_batches", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(batches, 1);
+        assert_eq!(stage7_fk_violation_count(&conn), 0);
+    }
+
+    /// 存量脏数据（外键悬空引用）阻断第八阶段迁移并整体回滚，报错给出表名与处理指引。
+    #[test]
+    fn test_stage8_migration_rejects_orphan_foreign_keys() {
+        let conn = setup_stage7_legacy_db();
+        migrate_stage7_schema(&conn).unwrap();
+        // 模拟 stage7 之后、stage8 之前混入的脏数据（旧版本/外部工具关闭外键写入）
+        conn.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+        conn.execute(
+            "INSERT INTO voucher_lines (voucher_id, account_code, debit_amount, credit_amount, line_order)
+             VALUES (1, 'ZZZ9', 1, 0, 9)",
+            [],
+        )
+        .unwrap();
+        let result = migrate_stage8_schema(&conn);
+        assert!(result.is_err(), "存在外键悬空引用时迁移应中止");
+        let err_msg = result.err().unwrap().to_string();
+        assert!(
+            err_msg.contains("第八阶段迁移"),
+            "错误文案应标明迁移阶段: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("voucher_lines"),
+            "错误文案应包含悬空引用所在表名: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("备份"),
+            "错误文案应给出备份与修复指引: {err_msg}"
+        );
+        // 回滚：新表与缺省键均不残留
+        for table in STAGE8_TEST_TABLES {
+            assert!(!stage7_table_exists(&conn, table), "回滚后不应残留 {table}");
+        }
+        assert!(stage7_setting(&conn, "reminder_advance_days").is_none());
+    }
+
+    /// 背书链与面额明细约束：背书序号同一票据内递增唯一（跨票据允许同序号）、
+    /// 面额数量/面额 CHECK、盘点单删除级联清理明细。
+    #[test]
+    fn test_stage8_endorsement_and_denomination_constraints() {
+        let conn = setup_financial_db();
+        let inst1 =
+            t8_seed_instrument(&conn, "bank_acceptance", "received", "YZ001", "holding").unwrap();
+        conn.execute(
+            "INSERT INTO instrument_endorsements
+                (instrument_id, endorse_order, endorsee, endorse_date, amount, voucher_id)
+             VALUES (?1, 1, '乙公司', '2026-09-05', 100000, 1)",
+            params![inst1],
+        )
+        .unwrap();
+        // 同票据同序号拒绝
+        let dup = conn.execute(
+            "INSERT INTO instrument_endorsements
+                (instrument_id, endorse_order, endorsee, endorse_date, amount, voucher_id)
+             VALUES (?1, 1, '丙公司', '2026-09-06', 100000, 2)",
+            params![inst1],
+        );
+        assert!(dup.is_err(), "同一票据背书序号应递增唯一");
+        // 不同票据允许同序号
+        let inst2 =
+            t8_seed_instrument(&conn, "bank_acceptance", "received", "YZ002", "holding").unwrap();
+        conn.execute(
+            "INSERT INTO instrument_endorsements
+                (instrument_id, endorse_order, endorsee, endorse_date, amount, voucher_id)
+             VALUES (?1, 1, '丁公司', '2026-09-05', 100000, 3)",
+            params![inst2],
+        )
+        .unwrap();
+
+        // 面额明细 CHECK：数量 >= 0、面额 > 0
+        let account_id = t8_seed_cash_account(&conn, "CASH-001");
+        conn.execute(
+            "INSERT INTO cash_count_sheets
+                (count_date, belong_month, fund_account_id, book_balance, counted_amount,
+                 difference, status, created_at, updated_at)
+             VALUES ('2026-09-15','2026-09',?1,1000,990,-10,'draft','2026-09-15','2026-09-15')",
+            params![account_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cash_count_denominations (sheet_id, denomination, quantity, subtotal)
+             VALUES (1, 100, 9, 900)",
+            [],
+        )
+        .unwrap();
+        let bad = conn.execute(
+            "INSERT INTO cash_count_denominations (sheet_id, denomination, quantity, subtotal)
+             VALUES (1, 50, -1, -50)",
+            [],
+        );
+        assert!(bad.is_err(), "面额数量必须 >= 0");
+        let bad = conn.execute(
+            "INSERT INTO cash_count_denominations (sheet_id, denomination, quantity, subtotal)
+             VALUES (1, 0, 1, 0)",
+            [],
+        );
+        assert!(bad.is_err(), "面额必须 > 0");
+
+        // 级联删除：删除盘点单清理面额明细
+        conn.execute("DELETE FROM cash_count_sheets WHERE id=1", [])
+            .unwrap();
+        let denoms: i64 = conn
+            .query_row("SELECT COUNT(*) FROM cash_count_denominations", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(denoms, 0, "删除盘点单应级联删除面额明细");
+        assert_eq!(stage7_fk_violation_count(&conn), 0);
     }
 }

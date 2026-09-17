@@ -1,4 +1,5 @@
 mod accounting;
+mod cash_count;
 mod cashier;
 mod commands;
 mod data_safety;
@@ -8,6 +9,7 @@ mod excel;
 mod invoice;
 mod legacy_migration;
 mod models;
+mod notes;
 mod ocr;
 mod salary;
 pub mod security;
