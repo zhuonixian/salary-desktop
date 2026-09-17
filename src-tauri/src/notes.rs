@@ -65,7 +65,7 @@ pub struct InstrumentEndorseInput {
     pub counter_account_code: Option<String>,
 }
 
-/// 贴现入参（discount_instrument）：财务费用 = 票面 − 实收（差额 0 免财务费用腿）
+/// 贴现入参（discount_instrument）：财务费用 = 票面 − 实收（任何正差额显式成腿，差额 0 免腿）
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct InstrumentDiscountInput {
     pub instrument_id: i64,
@@ -705,7 +705,8 @@ pub fn endorse_instrument(
 }
 
 /// 贴现（holding → discounted）：借资金账户实收（带 fund_account_id）
-/// + 借 6603 财务费用（票面 − 实收，差额 0 免腿）/ 贷 1121 票面；
+/// + 借 6603 财务费用（票面 − 实收，任何正差额显式成腿、仅差额 0 免腿——凭证恒借贷平）
+/// / 贷 1121 票面；
 /// 实收不得大于票面（严格大于即拒，不容差——防负差额免 6603 腿入库借贷不平凭证）。
 pub fn discount_instrument(
     conn: &mut Connection,
@@ -744,8 +745,9 @@ pub fn discount_instrument(
             let fee = inst.face_amount - input.proceeds;
             let summary = format!("票据贴现 {}", inst.instrument_no);
             let mut lines = vec![gl_line(gl, input.proceeds, 0.0, Some(account), &summary)];
-            // 财务费用 = 票面 − 实收；差额为 0（容差内）时免财务费用腿
-            if fee > AMOUNT_TOLERANCE {
+            // 财务费用 = 票面 − 实收；任何正差额（不设容差）显式成 6603 腿，
+            // 使借方合计恒等于票面贷方、凭证永远借贷平；仅等额贴现（fee == 0）免腿
+            if fee > 0.0 {
                 lines.push(gl_line(GL_FINANCE_EXPENSE.into(), fee, 0.0, None, &summary));
             }
             lines.push(gl_line(
@@ -1634,6 +1636,49 @@ mod tests {
         );
         let lines = voucher_lines(&env.conn, voucher_id);
         assert_eq!(lines.len(), 2, "差额 0 免财务费用腿");
+    }
+
+    #[test]
+    fn test_discount_tiny_fee_gets_expense_leg_and_balanced() {
+        let mut env = notes_env();
+        let mut input = register_input("bank_acceptance", "received", "YZ2026019");
+        input.fund_account_id = Some(env.bank_account_id);
+        let inst = register_instrument(&mut env.conn, &input, OPERATOR).unwrap();
+        // 少收 0.004（容差内正差额）：任何正差额显式成 6603 腿，凭证恒借贷平
+        let discounted = discount_instrument(
+            &mut env.conn,
+            &discount_input(inst.id, 99_999.996),
+            OPERATOR,
+        )
+        .unwrap();
+        assert_eq!(discounted.status, "discounted");
+        let voucher_id = flow_voucher_id(&env.conn, inst.id, "discount");
+        let lines = voucher_lines(&env.conn, voucher_id);
+        let expect = [
+            ("1002", 99_999.996, 0.0, Some(env.bank_account_id)),
+            ("6603", 0.004, 0.0, None),
+            ("1121", 0.0, 100_000.0, None),
+        ];
+        assert_eq!(lines.len(), 3, "正差额 0.004 须显式出 6603 财务费用腿");
+        for (actual, expected) in lines.iter().zip(expect.iter()) {
+            assert_eq!(actual.0, expected.0, "贴现凭证科目不符");
+            assert!(
+                (actual.1 - expected.1).abs() < AMOUNT_TOLERANCE,
+                "借方不符：{actual:?} vs {expected:?}"
+            );
+            assert!(
+                (actual.2 - expected.2).abs() < AMOUNT_TOLERANCE,
+                "贷方不符：{actual:?} vs {expected:?}"
+            );
+            assert_eq!(actual.3, expected.3, "fund_account_id 不符");
+        }
+        // 凭证级借贷平衡：借方合计（实收+贴现息）= 贷方票面
+        let total_debit: f64 = lines.iter().map(|l| l.1).sum();
+        let total_credit: f64 = lines.iter().map(|l| l.2).sum();
+        assert!(
+            (total_debit - total_credit).abs() < AMOUNT_TOLERANCE,
+            "贴现凭证借贷不平衡：借 {total_debit} / 贷 {total_credit}"
+        );
     }
 
     #[test]
