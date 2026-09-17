@@ -13,6 +13,7 @@ use crate::db;
 use crate::errors::{AppError, AppResult};
 use crate::excel;
 use crate::models::*;
+use crate::notes;
 use crate::ocr;
 use crate::salary;
 
@@ -3037,6 +3038,225 @@ pub fn reverse_fund_document(
         )),
     )?;
     Ok(reversal)
+}
+
+// ==================== Notes Commands（第八阶段 票据台账） ====================
+//
+// 票据状态只能经状态机命令流转（spec 4.1）；notes 层函数自带事务（状态更新、审批事件与
+// 凭证生成同事务）。命令层经 require_current_operator 解析操作人姓名传入领域层
+//（领域函数收 operator 姓名，approval_events 署名用 id 在领域层内解析），成功后写操作日志。
+// get 类命令不记日志。
+
+#[tauri::command]
+pub fn get_negotiable_instruments(
+    query: notes::InstrumentQuery,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<NegotiableInstrument>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(notes::get_instruments(&conn, &query)?)
+}
+
+/// 详情含背书链（endorse_order 升序），供台账页 Drawer 时间线展示
+#[tauri::command]
+pub fn get_instrument_detail(
+    id: i64,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<notes::InstrumentDetail, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(notes::get_instrument_detail(&conn, id)?)
+}
+
+#[tauri::command]
+pub fn register_instrument(
+    data: InstrumentRegisterInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<NegotiableInstrument, AppError> {
+    let mut conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let operator = cashier::require_current_operator(&conn, &current)?.1;
+    let inst = notes::register_instrument(&mut conn, &data, &operator)?;
+    db::log_operation(
+        &conn,
+        "register_instrument",
+        &format!(
+            "登记{} {} {} 金额 {:.2}（{}）",
+            if data.direction == "issued" {
+                "开出"
+            } else {
+                "收到"
+            },
+            notes::instrument_type_label(&inst.instrument_type),
+            inst.instrument_no,
+            inst.face_amount,
+            notes::status_label(&inst.status),
+        ),
+        &operator,
+        Some(&format!("instrument_id={}", inst.id)),
+    )?;
+    Ok(inst)
+}
+
+#[tauri::command]
+pub fn endorse_instrument(
+    data: notes::InstrumentEndorseInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<notes::InstrumentEndorseResult, AppError> {
+    let mut conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let operator = cashier::require_current_operator(&conn, &current)?.1;
+    let result = notes::endorse_instrument(&mut conn, &data, &operator)?;
+    db::log_operation(
+        &conn,
+        "endorse_instrument",
+        &format!(
+            "背书转出票据 {} 被背书人「{}」金额 {:.2}",
+            result.instrument.instrument_no,
+            data.endorsee.trim(),
+            result.endorsement.amount
+        ),
+        &operator,
+        Some(&format!(
+            "instrument_id={} endorsement_id={}",
+            result.instrument.id, result.endorsement.id
+        )),
+    )?;
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn discount_instrument(
+    data: notes::InstrumentDiscountInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<NegotiableInstrument, AppError> {
+    let mut conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let operator = cashier::require_current_operator(&conn, &current)?.1;
+    let inst = notes::discount_instrument(&mut conn, &data, &operator)?;
+    db::log_operation(
+        &conn,
+        "discount_instrument",
+        &format!(
+            "贴现票据 {} 实收 {:.2}（贴现息 {:.2}）",
+            inst.instrument_no,
+            data.proceeds,
+            (inst.face_amount - data.proceeds).max(0.0)
+        ),
+        &operator,
+        Some(&format!("instrument_id={}", inst.id)),
+    )?;
+    Ok(inst)
+}
+
+#[tauri::command]
+pub fn start_collection(
+    id: i64,
+    operate_date: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<NegotiableInstrument, AppError> {
+    let mut conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let operator = cashier::require_current_operator(&conn, &current)?.1;
+    let inst = notes::start_collection(&mut conn, id, &operate_date, &operator)?;
+    db::log_operation(
+        &conn,
+        "start_collection",
+        &format!(
+            "发起托收票据 {}（托收日期 {}，在途不记账）",
+            inst.instrument_no,
+            operate_date.trim()
+        ),
+        &operator,
+        Some(&format!("instrument_id={}", inst.id)),
+    )?;
+    Ok(inst)
+}
+
+#[tauri::command]
+pub fn confirm_collection(
+    data: notes::InstrumentCollectConfirmInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<NegotiableInstrument, AppError> {
+    let mut conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let operator = cashier::require_current_operator(&conn, &current)?.1;
+    let inst = notes::confirm_collection(&mut conn, &data, &operator)?;
+    db::log_operation(
+        &conn,
+        "confirm_collection",
+        &format!(
+            "托收到账确认票据 {} 金额 {:.2}",
+            inst.instrument_no, inst.face_amount
+        ),
+        &operator,
+        Some(&format!("instrument_id={}", inst.id)),
+    )?;
+    Ok(inst)
+}
+
+#[tauri::command]
+pub fn settle_issued_instrument(
+    data: notes::InstrumentSettleInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<NegotiableInstrument, AppError> {
+    let mut conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let operator = cashier::require_current_operator(&conn, &current)?.1;
+    let inst = notes::settle_issued_instrument(&mut conn, &data, &operator)?;
+    db::log_operation(
+        &conn,
+        "settle_issued_instrument",
+        &format!(
+            "兑付开出票据 {} 金额 {:.2}",
+            inst.instrument_no, inst.face_amount
+        ),
+        &operator,
+        Some(&format!("instrument_id={}", inst.id)),
+    )?;
+    Ok(inst)
+}
+
+#[tauri::command]
+pub fn void_instrument(
+    id: i64,
+    reason: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<NegotiableInstrument, AppError> {
+    let mut conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let operator = cashier::require_current_operator(&conn, &current)?.1;
+    let inst = notes::void_instrument(&mut conn, id, &reason, &operator)?;
+    db::log_operation(
+        &conn,
+        "void_instrument",
+        &format!("作废票据 {}，原因：{}", inst.instrument_no, reason.trim()),
+        &operator,
+        Some(&format!("instrument_id={}", inst.id)),
+    )?;
+    Ok(inst)
+}
+
+#[tauri::command]
+pub fn reverse_instrument_flow(
+    data: notes::InstrumentReverseInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<NegotiableInstrument, AppError> {
+    let mut conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let operator = cashier::require_current_operator(&conn, &current)?.1;
+    let inst = notes::reverse_instrument_flow(&mut conn, &data, &operator)?;
+    db::log_operation(
+        &conn,
+        "reverse_instrument_flow",
+        &format!(
+            "红字冲正票据 {}（恢复为「{}」），原因：{}",
+            inst.instrument_no,
+            notes::status_label(&inst.status),
+            data.reason.trim()
+        ),
+        &operator,
+        Some(&format!("instrument_id={}", inst.id)),
+    )?;
+    Ok(inst)
 }
 
 #[cfg(test)]

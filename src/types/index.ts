@@ -1656,3 +1656,160 @@ export const APPROVAL_ACTION_LABEL: Record<string, string> = {
   settle: '结算',
   reverse: '冲正',
 };
+
+// ==================== 票据台账（第八阶段 Task 3） ====================
+
+// 字段与后端 src-tauri/src/models.rs NegotiableInstrument / InstrumentEndorsement /
+// InstrumentRegisterInput 及 src-tauri/src/notes.rs 入出参结构 1:1 对齐（serde snake_case）。
+// 状态只能经状态机命令流转（register/endorse/discount/collect/confirm_collect/settle/void/reverse），
+// 前端按钮完全由后端返回的 status 决定。
+
+export interface NegotiableInstrument {
+  id: number;
+  instrument_type: string;
+  direction: string;
+  instrument_no: string;
+  face_amount: number;
+  issue_date: string;
+  due_date: string;
+  drawer: string | null;
+  /** 承兑人（承兑汇票） */
+  acceptor: string | null;
+  payee: string | null;
+  partner_id: number | null;
+  /** 贴现/托收/兑付入出账资金账户（承兑类资金流转用） */
+  fund_account_id: number | null;
+  counter_account_code: string | null;
+  status: string;
+  /** 登记凭证 id */
+  voucher_id: number | null;
+  remark: string | null;
+  created_by: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface InstrumentEndorsement {
+  id: number;
+  instrument_id: number;
+  /** 背书序号（同一票据内递增） */
+  endorse_order: number;
+  endorsee: string;
+  endorse_date: string;
+  purpose: string | null;
+  /** 本期约定全额背书（= 票面） */
+  amount: number;
+  /** 背书凭证 id */
+  voucher_id: number;
+  created_by: string | null;
+  created_at: string | null;
+}
+
+export interface InstrumentQuery {
+  direction?: string;
+  instrument_type?: string;
+  status?: string;
+  /** 登记月（YYYY-MM，按出票日所在月过滤） */
+  belong_month?: string;
+  keyword?: string;
+}
+
+export interface InstrumentRegisterInput {
+  instrument_type: string;
+  direction: string;
+  instrument_no: string;
+  face_amount: number;
+  issue_date: string;
+  /** 到期日（支票可等于出票日） */
+  due_date: string;
+  drawer?: string | null;
+  acceptor?: string | null;
+  payee?: string | null;
+  partner_id?: number | null;
+  /** 支票登记即结算必选；承兑类供托收/贴现/兑付缺省 */
+  fund_account_id?: number | null;
+  counter_account_code?: string | null;
+  remark?: string | null;
+}
+
+export interface InstrumentEndorseInput {
+  instrument_id: number;
+  endorsee: string;
+  endorse_date: string;
+  /** 必须等于票面（全额背书） */
+  amount: number;
+  purpose?: string | null;
+  counter_account_code?: string | null;
+}
+
+export interface InstrumentDiscountInput {
+  instrument_id: number;
+  discount_date: string;
+  /** 不得大于票面；财务费用 = 票面 − 实收 */
+  proceeds: number;
+  fund_account_id?: number | null;
+}
+
+export interface InstrumentCollectConfirmInput {
+  instrument_id: number;
+  received_date: string;
+  fund_account_id?: number | null;
+}
+
+export interface InstrumentSettleInput {
+  instrument_id: number;
+  settle_date: string;
+  fund_account_id?: number | null;
+}
+
+export interface InstrumentReverseInput {
+  instrument_id: number;
+  reverse_date: string;
+  /** 必填，approval_events 留痕 */
+  reason: string;
+}
+
+export interface InstrumentEndorseResult {
+  instrument: NegotiableInstrument;
+  endorsement: InstrumentEndorsement;
+}
+
+export interface InstrumentDetail {
+  instrument: NegotiableInstrument;
+  endorsements: InstrumentEndorsement[];
+}
+
+// 枚举取值与后端 models.rs INSTRUMENT_TYPES / INSTRUMENT_DIRECTIONS /
+// INSTRUMENT_STATUSES 及 notes.rs 状态机动作一致
+export const INSTRUMENT_TYPE_LABEL: Record<string, string> = {
+  bank_acceptance: '银行承兑汇票',
+  commercial_acceptance: '商业承兑汇票',
+  check: '支票',
+};
+
+export const INSTRUMENT_DIRECTION_LABEL: Record<string, string> = {
+  received: '收到',
+  issued: '开出',
+};
+
+export const INSTRUMENT_STATUS_LABEL: Record<string, string> = {
+  holding: '持有',
+  endorsed_out: '已背书转出',
+  discounted: '已贴现',
+  collecting: '托收中',
+  collected: '已到账',
+  issued_outstanding: '已开出未兑付',
+  paid: '已兑付',
+  void: '已作废',
+};
+
+/** 票据审批事件动作（approval_events.action，entity_type='negotiable_instrument'） */
+export const INSTRUMENT_ACTION_LABEL: Record<string, string> = {
+  endorse: '背书转出',
+  discount: '贴现',
+  collect: '发起托收',
+  confirm_collect: '托收到账确认',
+  settle: '兑付',
+  void: '作废',
+  reverse: '红字冲正',
+};

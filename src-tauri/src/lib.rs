@@ -287,6 +287,17 @@ pub fn run() {
         commands::void_fund_document,
         commands::settle_fund_document,
         commands::reverse_fund_document,
+        // ===== Notes（第八阶段 票据台账） =====
+        commands::get_negotiable_instruments,
+        commands::get_instrument_detail,
+        commands::register_instrument,
+        commands::endorse_instrument,
+        commands::discount_instrument,
+        commands::start_collection,
+        commands::confirm_collection,
+        commands::settle_issued_instrument,
+        commands::void_instrument,
+        commands::reverse_instrument_flow,
         // ===== Security（Task 6） =====
         security_commands::is_security_initialized,
         security_commands::setup_security,

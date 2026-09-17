@@ -109,7 +109,19 @@ import type {
   AdvanceSettlementLink,
   FundDocumentDetail,
   FundDocumentReverseInput,
+  NegotiableInstrument,
+  InstrumentEndorsement,
+  InstrumentQuery,
+  InstrumentRegisterInput,
+  InstrumentEndorseInput,
+  InstrumentDiscountInput,
+  InstrumentCollectConfirmInput,
+  InstrumentSettleInput,
+  InstrumentReverseInput,
+  InstrumentEndorseResult,
+  InstrumentDetail,
 } from '@/types';
+import { INSTRUMENT_STATUS_LABEL } from '@/types';
 
 type BackendDashboardSummary = {
   employee_count?: number;
@@ -577,6 +589,157 @@ const mockPushEvent = (
     comment: comment ?? null,
     created_at: new Date().toISOString(),
   });
+};
+
+// ==================== 票据台账预览数据（第八阶段） ====================
+// 内存态轻量状态机：与后端 notes.rs 同规则（登记四组合、托收在途不记账、红字冲正恢复状态、
+// 支票登记即终态/冲正即作废），演示 收到承兑→背书/贴现/托收到账 与 开出→兑付 全流程。
+const mockMonthDate = (monthShift: number, day: number): string => {
+  const d = new Date();
+  d.setDate(1);
+  d.setMonth(d.getMonth() + monthShift);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+};
+
+const baseMockInstrument = (over: Partial<NegotiableInstrument> & Pick<NegotiableInstrument, 'id' | 'instrument_type' | 'direction' | 'instrument_no' | 'face_amount' | 'issue_date' | 'due_date' | 'status'>): NegotiableInstrument => ({
+  drawer: null,
+  acceptor: null,
+  payee: null,
+  partner_id: null,
+  fund_account_id: 1,
+  counter_account_code: null,
+  voucher_id: null,
+  remark: null,
+  created_by: '张会计',
+  created_at: new Date().toISOString(),
+  updated_at: new Date().toISOString(),
+  ...over,
+});
+
+const mockInstruments: NegotiableInstrument[] = [
+  // 收到承兑：holding（可走 背书/贴现/托收/作废）
+  baseMockInstrument({
+    id: 1, instrument_type: 'bank_acceptance', direction: 'received', instrument_no: 'YZ2026A001',
+    face_amount: 100000, issue_date: mockMonthDate(0, 1), due_date: mockMonthDate(3, 1),
+    drawer: '出票人甲公司', acceptor: 'XX银行', payee: '本公司', status: 'holding',
+    remark: '收货款承兑',
+  }),
+  // 开出承兑：issued_outstanding（可兑付/作废）
+  baseMockInstrument({
+    id: 2, instrument_type: 'commercial_acceptance', direction: 'issued', instrument_no: 'YC2026B001',
+    face_amount: 80000, issue_date: mockMonthDate(0, 5), due_date: mockMonthDate(2, 5),
+    drawer: '本公司', acceptor: '本公司', payee: '供应商丙公司', status: 'issued_outstanding',
+  }),
+  // 收到支票：collected（登记即到账终态，冲正恢复走作废）
+  baseMockInstrument({
+    id: 3, instrument_type: 'check', direction: 'received', instrument_no: 'ZP2026C001',
+    face_amount: 5000, issue_date: mockMonthDate(0, 10), due_date: mockMonthDate(0, 10),
+    drawer: '客户丁公司', payee: '本公司', status: 'collected',
+  }),
+  // 开出支票：paid（登记即付款终态）
+  baseMockInstrument({
+    id: 4, instrument_type: 'check', direction: 'issued', instrument_no: 'ZP2026C002',
+    face_amount: 3000, issue_date: mockMonthDate(0, 12), due_date: mockMonthDate(0, 12),
+    drawer: '本公司', payee: '房东戊', status: 'paid',
+  }),
+  // 已背书转出（含背书链一条，冲正可恢复 holding）
+  baseMockInstrument({
+    id: 5, instrument_type: 'commercial_acceptance', direction: 'received', instrument_no: 'YZ2026A002',
+    face_amount: 120000, issue_date: mockMonthDate(-1, 20), due_date: mockMonthDate(2, 20),
+    drawer: '出票人己公司', acceptor: '己公司', payee: '本公司', status: 'endorsed_out',
+  }),
+  // 已贴现（冲正可恢复 holding）
+  baseMockInstrument({
+    id: 6, instrument_type: 'bank_acceptance', direction: 'received', instrument_no: 'YZ2026A003',
+    face_amount: 60000, issue_date: mockMonthDate(-1, 15), due_date: mockMonthDate(1, 15),
+    drawer: '出票人庚公司', acceptor: 'YY银行', payee: '本公司', status: 'discounted',
+  }),
+  // 托收中（可到账确认）
+  baseMockInstrument({
+    id: 7, instrument_type: 'bank_acceptance', direction: 'received', instrument_no: 'YZ2026A004',
+    face_amount: 90000, issue_date: mockMonthDate(-2, 10), due_date: mockMonthDate(0, 30),
+    drawer: '出票人辛公司', acceptor: 'ZZ银行', payee: '本公司', status: 'collecting',
+  }),
+  // 开出承兑已兑付（冲正可恢复 issued_outstanding）
+  baseMockInstrument({
+    id: 8, instrument_type: 'bank_acceptance', direction: 'issued', instrument_no: 'YC2026B002',
+    face_amount: 70000, issue_date: mockMonthDate(-1, 1), due_date: mockMonthDate(0, 1),
+    drawer: '本公司', acceptor: '本公司', payee: '供应商壬公司', status: 'paid',
+  }),
+  // 已作废（纯终态，无操作）
+  baseMockInstrument({
+    id: 9, instrument_type: 'check', direction: 'received', instrument_no: 'ZP2026C003',
+    face_amount: 2000, issue_date: mockMonthDate(-1, 8), due_date: mockMonthDate(-1, 8),
+    drawer: '客户癸公司', payee: '本公司', status: 'void',
+    remark: '票面录错作废',
+  }),
+];
+
+const mockInstrumentEndorsements: InstrumentEndorsement[] = [
+  {
+    id: 1,
+    instrument_id: 5,
+    endorse_order: 1,
+    endorsee: '供应商丙公司',
+    endorse_date: mockMonthDate(0, 2),
+    purpose: '付货款',
+    amount: 120000,
+    voucher_id: 9001,
+    created_by: '张会计',
+    created_at: new Date().toISOString(),
+  },
+];
+
+const mockNextInstrumentId = (): number =>
+  mockInstruments.reduce((max, i) => Math.max(max, i.id), 0) + 1;
+
+const mockFindInstrument = (id: number): NegotiableInstrument => {
+  const inst = mockInstruments.find((i) => i.id === id);
+  if (!inst) throw new Error(`票据ID=${id}未找到`);
+  return inst;
+};
+
+const mockPushInstrumentEvent = (
+  entityId: number,
+  action: string,
+  fromStatus: string | null,
+  toStatus: string | null,
+  comment?: string | null,
+): void => {
+  mockApprovalEvents.push({
+    id: mockNextEventId(),
+    entity_type: 'negotiable_instrument',
+    entity_id: entityId,
+    action,
+    from_status: fromStatus,
+    to_status: toStatus,
+    operator_id: mockCurrentOperatorId,
+    comment: comment ?? null,
+    created_at: new Date().toISOString(),
+  });
+};
+
+// 票据轻量状态机：与后端 notes.rs transition_instrument 同规则（来源状态门禁 + 原因必填）
+const mockTransitionInstrument = (
+  id: number,
+  fromStatuses: string[],
+  toStatus: string,
+  action: string,
+  comment?: string | null,
+  requireComment = false,
+): NegotiableInstrument => {
+  const inst = mockFindInstrument(id);
+  if (!fromStatuses.includes(inst.status)) {
+    throw new Error(
+      `票据 ${inst.instrument_no} 当前状态「${INSTRUMENT_STATUS_LABEL[inst.status] ?? inst.status}」不允许该操作`,
+    );
+  }
+  const trimmed = (comment ?? '').trim();
+  if (requireComment && !trimmed) throw new Error('该操作必须填写原因');
+  inst.status = toStatus;
+  inst.updated_at = new Date().toISOString();
+  mockPushInstrumentEvent(inst.id, action, fromStatuses[0] ?? null, toStatus, trimmed || null);
+  return inst;
 };
 
 // 轻量状态机模拟：与后端 cashier.rs 同规则（演示完整 草稿→提交→审批→结算 流程）
@@ -1102,6 +1265,191 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
       mockPushEvent(original.id, 'reverse', 'settled', 'reversed', data.comment.trim());
       mockPushEvent(reversal.id, 'reverse', null, 'settled', data.comment.trim());
       return reversal;
+    }
+    // ==================== 票据台账（第八阶段） ====================
+    // 内存态轻量状态机，校验口径与后端 notes.rs 一致（支票登记即终态、托收在途不记账、
+    // 贴现实收不得大于票面、背书全额、void/reverse 原因必填）；凭证不模拟（voucher_id 置空/占位）。
+    case 'get_negotiable_instruments': {
+      const query = (args?.query ?? {}) as InstrumentQuery;
+      return mockInstruments.filter((i) => {
+        if (query.direction && i.direction !== query.direction) return false;
+        if (query.instrument_type && i.instrument_type !== query.instrument_type) return false;
+        if (query.status && i.status !== query.status) return false;
+        if (query.belong_month && i.issue_date.slice(0, 7) !== query.belong_month) return false;
+        if (
+          query.keyword &&
+          !`${i.instrument_no}${i.drawer ?? ''}${i.acceptor ?? ''}${i.payee ?? ''}${i.remark ?? ''}`.includes(
+            query.keyword,
+          )
+        ) {
+          return false;
+        }
+        return true;
+      });
+    }
+    case 'get_instrument_detail': {
+      const instrument = mockFindInstrument(Number(args?.id ?? 0));
+      return {
+        instrument,
+        endorsements: mockInstrumentEndorsements
+          .filter((e) => e.instrument_id === instrument.id)
+          .sort((a, b) => a.endorse_order - b.endorse_order),
+      };
+    }
+    case 'register_instrument': {
+      const data = args?.data as InstrumentRegisterInput | undefined;
+      if (!data) throw new Error('票据登记入参缺失');
+      const no = data.instrument_no?.trim();
+      if (!no) throw new Error('票据号码必填');
+      if (!(Number(data.face_amount) > 0)) throw new Error('票面金额必须大于 0');
+      if (!['bank_acceptance', 'commercial_acceptance', 'check'].includes(data.instrument_type)) {
+        throw new Error(`票据类型无效：${data.instrument_type}`);
+      }
+      if (!['received', 'issued'].includes(data.direction)) {
+        throw new Error(`票据方向无效：${data.direction}`);
+      }
+      if (data.due_date < data.issue_date) throw new Error('到期日不能早于出票日');
+      if (
+        mockInstruments.some(
+          (i) =>
+            i.instrument_type === data.instrument_type &&
+            i.instrument_no === no &&
+            i.status !== 'void',
+        )
+      ) {
+        throw new Error(`票据号 ${no} 已存在同类型有效票据（作废后同号可重新登记）`);
+      }
+      const isCheck = data.instrument_type === 'check';
+      if (isCheck && !data.fund_account_id) {
+        throw new Error(
+          data.direction === 'received'
+            ? '收到支票登记即到账，必须选择入账资金账户'
+            : '开出支票登记即付款，必须选择出账资金账户',
+        );
+      }
+      const now = new Date().toISOString();
+      const inst = baseMockInstrument({
+        id: mockNextInstrumentId(),
+        instrument_type: data.instrument_type,
+        direction: data.direction,
+        instrument_no: no,
+        face_amount: Number(data.face_amount),
+        issue_date: data.issue_date,
+        due_date: data.due_date,
+        drawer: data.drawer ?? null,
+        acceptor: data.acceptor ?? null,
+        payee: data.payee ?? null,
+        partner_id: data.partner_id ?? null,
+        fund_account_id: data.fund_account_id ?? null,
+        counter_account_code: data.counter_account_code ?? null,
+        // 支票登记即终态；承兑按方向进 holding / issued_outstanding
+        status: isCheck
+          ? data.direction === 'received'
+            ? 'collected'
+            : 'paid'
+          : data.direction === 'received'
+            ? 'holding'
+            : 'issued_outstanding',
+        remark: data.remark ?? null,
+        created_at: now,
+        updated_at: now,
+      });
+      mockInstruments.unshift(inst);
+      return inst;
+    }
+    case 'endorse_instrument': {
+      const data = args?.data as InstrumentEndorseInput | undefined;
+      const inst = mockFindInstrument(Number(data?.instrument_id ?? 0));
+      if (inst.status !== 'holding') {
+        throw new Error(`票据 ${inst.instrument_no} 当前状态「${INSTRUMENT_STATUS_LABEL[inst.status] ?? inst.status}」不允许背书`);
+      }
+      const endorsee = data?.endorsee?.trim();
+      if (!endorsee) throw new Error('被背书人必填');
+      if (Math.abs(Number(data?.amount ?? 0) - inst.face_amount) > 0.005) {
+        throw new Error(
+          `背书金额 ${data?.amount} 必须等于票面 ${inst.face_amount}（本期仅支持全额背书）`,
+        );
+      }
+      const updated = mockTransitionInstrument(inst.id, ['holding'], 'endorsed_out', 'endorse');
+      const endorsement: InstrumentEndorsement = {
+        id: Date.now(),
+        instrument_id: inst.id,
+        endorse_order:
+          mockInstrumentEndorsements.filter((e) => e.instrument_id === inst.id).length + 1,
+        endorsee,
+        endorse_date: data?.endorse_date ?? '',
+        purpose: data?.purpose?.trim() || null,
+        amount: Number(data?.amount ?? 0),
+        // mock 不生成凭证，背书凭证 id 用 9xxx 占位段
+        voucher_id: 9000 + mockInstrumentEndorsements.length + 1,
+        created_by: '张会计',
+        created_at: new Date().toISOString(),
+      };
+      mockInstrumentEndorsements.push(endorsement);
+      return { instrument: updated, endorsement };
+    }
+    case 'discount_instrument': {
+      const data = args?.data as InstrumentDiscountInput | undefined;
+      const inst = mockFindInstrument(Number(data?.instrument_id ?? 0));
+      const proceeds = Number(data?.proceeds ?? 0);
+      if (proceeds <= 0) throw new Error('贴现实收金额必须大于 0');
+      if (proceeds > inst.face_amount) {
+        throw new Error(`贴现实收 ${proceeds.toFixed(2)} 不得大于票面 ${inst.face_amount.toFixed(2)}`);
+      }
+      const account = data?.fund_account_id ?? inst.fund_account_id;
+      if (!account) throw new Error('贴现必须选择贴现入账资金账户');
+      const updated = mockTransitionInstrument(inst.id, ['holding'], 'discounted', 'discount');
+      updated.fund_account_id = account;
+      return updated;
+    }
+    case 'start_collection': {
+      const id = Number(args?.id ?? 0);
+      mockFindInstrument(id);
+      return mockTransitionInstrument(id, ['holding'], 'collecting', 'collect');
+    }
+    case 'confirm_collection': {
+      const data = args?.data as InstrumentCollectConfirmInput | undefined;
+      const inst = mockFindInstrument(Number(data?.instrument_id ?? 0));
+      const account = data?.fund_account_id ?? inst.fund_account_id;
+      if (!account) throw new Error('到账确认必须选择入账资金账户');
+      const updated = mockTransitionInstrument(
+        inst.id, ['collecting'], 'collected', 'confirm_collect',
+      );
+      updated.fund_account_id = account;
+      return updated;
+    }
+    case 'settle_issued_instrument': {
+      const data = args?.data as InstrumentSettleInput | undefined;
+      const inst = mockFindInstrument(Number(data?.instrument_id ?? 0));
+      const account = data?.fund_account_id ?? inst.fund_account_id;
+      if (!account) throw new Error('兑付必须选择出账资金账户');
+      const updated = mockTransitionInstrument(inst.id, ['issued_outstanding'], 'paid', 'settle');
+      updated.fund_account_id = account;
+      return updated;
+    }
+    case 'void_instrument': {
+      const id = Number(args?.id ?? 0);
+      const reason = String(args?.reason ?? '').trim();
+      if (!reason) throw new Error('作废必须填写原因');
+      return mockTransitionInstrument(id, ['holding', 'issued_outstanding'], 'void', 'void', reason, true);
+    }
+    case 'reverse_instrument_flow': {
+      const data = args?.data as InstrumentReverseInput | undefined;
+      const inst = mockFindInstrument(Number(data?.instrument_id ?? 0));
+      if (!data?.reason?.trim()) throw new Error('冲正必须填写原因');
+      const isCheck = inst.instrument_type === 'check';
+      // 恢复状态与后端 reverse_instrument_flow 同口径：撤销最后一次流转；支票登记即终态的
+      // 纠错直接作废（同号可重录）
+      const restore: Record<string, string> = isCheck
+        ? { collected: 'void', paid: 'void' }
+        : { endorsed_out: 'holding', discounted: 'holding', collected: 'holding', paid: 'issued_outstanding' };
+      const toStatus = restore[inst.status];
+      if (!toStatus) {
+        throw new Error(
+          `票据 ${inst.instrument_no} 当前无可冲正的流转（仅已背书/已贴现/已到账/已兑付可冲正；未流转票据请使用作废）`,
+        );
+      }
+      return mockTransitionInstrument(inst.id, [inst.status], toStatus, 'reverse', data.reason.trim(), true);
     }
     // ==================== Task 14：员工借款备用金与核销（spec 4.11） ====================
     case 'get_advance_ledger': {
@@ -2696,4 +3044,55 @@ export async function exportAdvanceLedger(
   path: string,
 ): Promise<string> {
   return invoke<string>('export_advance_ledger', { query, path });
+}
+
+// ==================== 票据台账（第八阶段 Task 3） ====================
+// invoke 参数 key 用 camelCase（Tauri 2 自动映射 snake_case）。状态命令的按钮可见性
+// 完全由后端返回的 status 决定；void/reverse 原因必填、贴现实收不超票面、背书全额
+// 等校验以后端为准。
+
+export async function getNegotiableInstruments(
+  query: InstrumentQuery = {},
+): Promise<NegotiableInstrument[]> {
+  return invoke<NegotiableInstrument[]>('get_negotiable_instruments', { query });
+}
+
+export async function getInstrumentDetail(id: number): Promise<InstrumentDetail> {
+  return invoke<InstrumentDetail>('get_instrument_detail', { id });
+}
+
+export async function registerInstrument(
+  data: InstrumentRegisterInput,
+): Promise<NegotiableInstrument> {
+  return invoke<NegotiableInstrument>('register_instrument', { data });
+}
+
+export async function endorseInstrument(data: InstrumentEndorseInput): Promise<InstrumentEndorseResult> {
+  return invoke<InstrumentEndorseResult>('endorse_instrument', { data });
+}
+
+export async function discountInstrument(data: InstrumentDiscountInput): Promise<NegotiableInstrument> {
+  return invoke<NegotiableInstrument>('discount_instrument', { data });
+}
+
+export async function startCollection(id: number, operateDate: string): Promise<NegotiableInstrument> {
+  return invoke<NegotiableInstrument>('start_collection', { id, operateDate });
+}
+
+export async function confirmCollection(
+  data: InstrumentCollectConfirmInput,
+): Promise<NegotiableInstrument> {
+  return invoke<NegotiableInstrument>('confirm_collection', { data });
+}
+
+export async function settleIssuedInstrument(data: InstrumentSettleInput): Promise<NegotiableInstrument> {
+  return invoke<NegotiableInstrument>('settle_issued_instrument', { data });
+}
+
+export async function voidInstrument(id: number, reason: string): Promise<NegotiableInstrument> {
+  return invoke<NegotiableInstrument>('void_instrument', { id, reason });
+}
+
+export async function reverseInstrumentFlow(data: InstrumentReverseInput): Promise<NegotiableInstrument> {
+  return invoke<NegotiableInstrument>('reverse_instrument_flow', { data });
 }

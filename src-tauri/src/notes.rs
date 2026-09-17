@@ -5,11 +5,6 @@
 // 流转/冲正凭证 source_type='instrument_flow'（source_id=审批事件 id，每次流转唯一，
 // 天然满足 vouchers (source_type, source_id) active 部分唯一索引，冲正后同型流转可重做）。
 //
-// 本模块 pub API 由 Task 3 命令层（commands.rs）消费，接入前整段暂不可达，
-// 以模块级 allow 放行 dead_code（同时作为 models.rs 已摘 allow 的票据类型的活性根）；
-// Task 3 接线合入时必须移除本 allow。
-#![allow(dead_code)]
-
 use crate::accounting;
 use crate::cashier::{ensure_fund_voucher_lines, fund_account_gl_code};
 use crate::db::ensure_month_open;
@@ -20,7 +15,8 @@ use crate::models::{
     INSTRUMENT_DIRECTION_RECEIVED, INSTRUMENT_STATUS_COLLECTED, INSTRUMENT_STATUS_COLLECTING,
     INSTRUMENT_STATUS_DISCOUNTED, INSTRUMENT_STATUS_ENDORSED_OUT, INSTRUMENT_STATUS_HOLDING,
     INSTRUMENT_STATUS_ISSUED_OUTSTANDING, INSTRUMENT_STATUS_PAID, INSTRUMENT_STATUS_VOID,
-    INSTRUMENT_TYPES, INSTRUMENT_TYPE_CHECK,
+    INSTRUMENT_TYPES, INSTRUMENT_TYPE_BANK_ACCEPTANCE, INSTRUMENT_TYPE_CHECK,
+    INSTRUMENT_TYPE_COMMERCIAL_ACCEPTANCE,
 };
 use chrono::{NaiveDate, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -114,10 +110,171 @@ pub struct InstrumentEndorseResult {
     pub endorsement: InstrumentEndorsement,
 }
 
+/// 票据查询条件（get_negotiable_instruments）：方向/类型/状态/登记月（出票日所在月）/关键字，
+/// 全部可选，命中即返回；关键字模糊匹配票据号码/出票人/承兑人/收款人/备注
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct InstrumentQuery {
+    pub direction: Option<String>,
+    pub instrument_type: Option<String>,
+    pub status: Option<String>,
+    /// 登记月（YYYY-MM，按出票日所在月过滤，与月结"登记月"口径一致）
+    pub belong_month: Option<String>,
+    pub keyword: Option<String>,
+}
+
+/// 票据详情：票据 + 按背书序号升序的背书链
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct InstrumentDetail {
+    pub instrument: NegotiableInstrument,
+    pub endorsements: Vec<InstrumentEndorsement>,
+}
+
+/// 票据类型中文标签（命令层操作日志与前端展示用）
+pub fn instrument_type_label(instrument_type: &str) -> &'static str {
+    match instrument_type {
+        INSTRUMENT_TYPE_BANK_ACCEPTANCE => "银行承兑汇票",
+        INSTRUMENT_TYPE_COMMERCIAL_ACCEPTANCE => "商业承兑汇票",
+        INSTRUMENT_TYPE_CHECK => "支票",
+        _ => "票据",
+    }
+}
+
+// ==================== 查询 ====================
+
+/// 票据台账列表（get_negotiable_instruments）：按 id 降序（新登记在前）
+pub fn get_instruments(
+    conn: &Connection,
+    query: &InstrumentQuery,
+) -> AppResult<Vec<NegotiableInstrument>> {
+    let mut conditions: Vec<String> = Vec::new();
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    if let Some(direction) = query
+        .direction
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        params.push(Box::new(direction.to_string()));
+        conditions.push(format!("direction = ?{}", params.len()));
+    }
+    if let Some(t) = query
+        .instrument_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        params.push(Box::new(t.to_string()));
+        conditions.push(format!("instrument_type = ?{}", params.len()));
+    }
+    if let Some(status) = query
+        .status
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        params.push(Box::new(status.to_string()));
+        conditions.push(format!("status = ?{}", params.len()));
+    }
+    if let Some(month) = query
+        .belong_month
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        params.push(Box::new(month.to_string()));
+        conditions.push(format!("substr(issue_date, 1, 7) = ?{}", params.len()));
+    }
+    if let Some(keyword) = query
+        .keyword
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        params.push(Box::new(format!("%{keyword}%")));
+        let n = params.len();
+        conditions.push(format!(
+            "(instrument_no LIKE ?{n} OR IFNULL(drawer,'') LIKE ?{n}
+              OR IFNULL(acceptor,'') LIKE ?{n} OR IFNULL(payee,'') LIKE ?{n}
+              OR IFNULL(remark,'') LIKE ?{n})"
+        ));
+    }
+    let where_clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", conditions.join(" AND "))
+    };
+    let sql = format!(
+        "SELECT id, instrument_type, direction, instrument_no, face_amount, issue_date, due_date,
+                drawer, acceptor, payee, partner_id, fund_account_id, counter_account_code,
+                status, voucher_id, remark, created_by, created_at, updated_at
+         FROM negotiable_instruments {where_clause} ORDER BY id DESC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+            |r| {
+                Ok(NegotiableInstrument {
+                    id: r.get(0)?,
+                    instrument_type: r.get(1)?,
+                    direction: r.get(2)?,
+                    instrument_no: r.get(3)?,
+                    face_amount: r.get(4)?,
+                    issue_date: r.get(5)?,
+                    due_date: r.get(6)?,
+                    drawer: r.get(7)?,
+                    acceptor: r.get(8)?,
+                    payee: r.get(9)?,
+                    partner_id: r.get(10)?,
+                    fund_account_id: r.get(11)?,
+                    counter_account_code: r.get(12)?,
+                    status: r.get(13)?,
+                    voucher_id: r.get(14)?,
+                    remark: r.get(15)?,
+                    created_by: r.get(16)?,
+                    created_at: r.get(17)?,
+                    updated_at: r.get(18)?,
+                })
+            },
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// 票据详情（get_instrument_detail）：票据 + 背书链（endorse_order 升序）
+pub fn get_instrument_detail(conn: &Connection, id: i64) -> AppResult<InstrumentDetail> {
+    let instrument = get_instrument(conn, id)?;
+    let mut stmt = conn.prepare(
+        "SELECT id, instrument_id, endorse_order, endorsee, endorse_date, purpose, amount,
+                voucher_id, created_by, created_at
+         FROM instrument_endorsements WHERE instrument_id = ?1 ORDER BY endorse_order",
+    )?;
+    let endorsements = stmt
+        .query_map(params![id], |r| {
+            Ok(InstrumentEndorsement {
+                id: r.get(0)?,
+                instrument_id: r.get(1)?,
+                endorse_order: r.get(2)?,
+                endorsee: r.get(3)?,
+                endorse_date: r.get(4)?,
+                purpose: r.get(5)?,
+                amount: r.get(6)?,
+                voucher_id: r.get(7)?,
+                created_by: r.get(8)?,
+                created_at: r.get(9)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(InstrumentDetail {
+        instrument,
+        endorsements,
+    })
+}
+
 // ==================== 通用 helper ====================
 
-/// 票据状态中文标签（报错展示用）
-fn status_label(status: &str) -> &str {
+/// 票据状态中文标签（报错展示与命令层操作日志用）
+pub fn status_label(status: &str) -> &str {
     match status {
         INSTRUMENT_STATUS_HOLDING => "持有",
         INSTRUMENT_STATUS_ENDORSED_OUT => "已背书转出",
@@ -2035,5 +2192,107 @@ mod tests {
         reverse.reverse_date = "2026-09-30".into();
         let reversed = reverse_instrument_flow(&mut env.conn, &reverse, OPERATOR).unwrap();
         assert_eq!(reversed.status, "holding");
+    }
+
+    // ---------- 查询 ----------
+
+    #[test]
+    fn test_get_instruments_filters_and_detail() {
+        let mut env = notes_env();
+        let received = register_instrument(
+            &mut env.conn,
+            &register_input("bank_acceptance", "received", "YZ2026020"),
+            OPERATOR,
+        )
+        .unwrap();
+        register_instrument(
+            &mut env.conn,
+            &register_input("bank_acceptance", "issued", "YC2026020"),
+            OPERATOR,
+        )
+        .unwrap();
+        let check = register_instrument(
+            &mut env.conn,
+            &register_input("check", "received", "ZP2026020"),
+            OPERATOR,
+        )
+        .unwrap_err(); // 支票缺账户登记失败，仅为确认错误路径不影响查询
+        assert!(check.to_string().contains("资金账户"));
+
+        // 全量 2 张，id 降序
+        let all = get_instruments(&env.conn, &InstrumentQuery::default()).unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(all[0].id > all[1].id, "列表应按 id 降序");
+
+        // 方向 + 状态过滤
+        let only_received = get_instruments(
+            &env.conn,
+            &InstrumentQuery {
+                direction: Some("received".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(only_received.len(), 1);
+        assert_eq!(only_received[0].id, received.id);
+        let holding = get_instruments(
+            &env.conn,
+            &InstrumentQuery {
+                status: Some("holding".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(holding.len(), 1);
+
+        // 登记月过滤
+        let month_hits = get_instruments(
+            &env.conn,
+            &InstrumentQuery {
+                belong_month: Some("2026-09".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(month_hits.len(), 2);
+        let month_miss = get_instruments(
+            &env.conn,
+            &InstrumentQuery {
+                belong_month: Some("2026-01".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(month_miss.is_empty());
+
+        // 关键字命中票据号 / 收款人
+        let by_no = get_instruments(
+            &env.conn,
+            &InstrumentQuery {
+                keyword: Some("YC2026".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(by_no.len(), 1);
+        let by_payee = get_instruments(
+            &env.conn,
+            &InstrumentQuery {
+                keyword: Some("本公司".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(by_payee.len(), 2);
+
+        // 详情含背书链：背书后返回 1 条且序号 1
+        endorse_instrument(&mut env.conn, &endorse_input(received.id), OPERATOR).unwrap();
+        let detail = get_instrument_detail(&env.conn, received.id).unwrap();
+        assert_eq!(detail.instrument.id, received.id);
+        assert_eq!(detail.endorsements.len(), 1);
+        assert_eq!(detail.endorsements[0].endorse_order, 1);
+        // 不存在的票据
+        let err = get_instrument_detail(&env.conn, 9999).unwrap_err();
+        assert!(err.to_string().contains("票据不存在"), "{err}");
     }
 }
