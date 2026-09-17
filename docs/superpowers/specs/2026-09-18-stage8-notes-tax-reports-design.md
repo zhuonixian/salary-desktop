@@ -126,14 +126,14 @@ CREATE TABLE cash_count_denominations (     -- 面额明细（可选子表）
 | 命令 | 前置状态 | 后置状态 | 凭证 |
 |---|---|---|---|
 | register（收到承兑登记） | — | holding | 借 1121 应收票据 / 贷 counter_account（缺省 1122 应收账款） |
-| register（开出承兑登记） | — | issued_outstanding | 借 counter_account（缺省 2201 应付账款）/ 贷 2202 应付票据 |
+| register（开出承兑登记） | — | issued_outstanding | 借 counter_account（缺省 2202 应付账款）/ 贷 2201 应付票据 |
 | register（收到支票） | — | collected | 借 1002（所选账户挂接科目）/ 贷 counter_account（缺省 1122） |
-| register（开出支票） | — | paid | 借 counter_account（缺省 2201）/ 贷 1002 |
-| endorse（背书转出） | holding | endorsed_out | 借 counter_account（缺省 2201 应付账款）/ 贷 1121 |
+| register（开出支票） | — | paid | 借 counter_account（缺省 2202 应付账款）/ 贷 1002 |
+| endorse（背书转出） | holding | endorsed_out | 借 counter_account（缺省 2202 应付账款）/ 贷 1121 |
 | discount（贴现） | holding | discounted | 借 1002 实收 + 借 6603 财务费用（票面-实收）/ 贷 1121 票面 |
 | collect（托收） | holding | collecting | 无（在途不记账） |
 | confirm_collection（托收到账确认） | collecting | collected | 借 1002 / 贷 1121 |
-| settle_issued（开出承兑兑付） | issued_outstanding | paid | 借 2202 / 贷 1002 |
+| settle_issued（开出承兑兑付） | issued_outstanding | paid | 借 2201 应付票据 / 贷 1002 |
 | void | holding / issued_outstanding（未流转） | void | 作废登记凭证 |
 
 约束：
