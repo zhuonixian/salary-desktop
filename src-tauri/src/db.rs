@@ -357,7 +357,7 @@ pub fn create_tables(conn: &Connection) -> AppResult<()> {
             source_type TEXT NOT NULL CHECK (source_type IN (
                 'salary_accrual','salary_payment','reimbursement_accrual',
                 'reimbursement_payment','invoice_expense','bank_manual','period_close',
-                'fund_document')),
+                'fund_document','instrument','instrument_flow','cash_count')),
             source_id INTEGER NOT NULL,
             total_amount REAL NOT NULL DEFAULT 0,
             status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','void')),
@@ -1009,11 +1009,12 @@ fn create_stage7_tables(conn: &Connection) -> AppResult<()> {
         -- 及报销审批治理（unapprove=反审批，spec 5.2）
         CREATE TABLE IF NOT EXISTS approval_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            entity_type TEXT NOT NULL CHECK (entity_type IN ('reimbursement_claim','fund_document')),
+            entity_type TEXT NOT NULL CHECK (entity_type IN
+                ('reimbursement_claim','fund_document','negotiable_instrument')),
             entity_id INTEGER NOT NULL,
             action TEXT NOT NULL CHECK (action IN
                 ('submit','approve','reject','settle','void','reverse','withdraw','batch',
-                 'unbatch','unapprove')),
+                 'unbatch','unapprove','endorse','discount','collect','confirm_collect')),
             from_status TEXT,
             to_status TEXT,
             operator_id INTEGER,
@@ -1381,15 +1382,195 @@ fn create_stage8_tables(conn: &Connection) -> AppResult<()> {
     Ok(())
 }
 
+/// 重建 `vouchers` 表扩展 `source_type` CHECK 白名单（第八阶段：`'instrument'`/`'instrument_flow'`
+/// /`'cash_count'`，spec 4.1/6）。旧库 CHECK 固化在表定义里，只能重建表放行新类型；
+/// 新库 DDL 已含该类型时跳过（幂等）。模式照搬第七阶段 `rebuild_vouchers_source_type_check`：
+/// 独立事务 + 原序复制 + 列清单防漂移 + `PRAGMA foreign_key_check` 兜底；vouchers 是
+/// voucher_lines 的父表，重建期间临时关闭外键（事务内切换 pragma 无效，必须 autocommit），
+/// 函数返回时恢复连接原有外键开关状态。
+fn rebuild_vouchers_source_type_check_stage8(conn: &Connection) -> AppResult<()> {
+    let create_sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='vouchers'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(None);
+    // 表不存在（最小测试库）或已是新定义时无需重建
+    let Some(sql) = create_sql else {
+        return Ok(());
+    };
+    if sql.contains("'instrument'") {
+        return Ok(());
+    }
+    // 库内已有外键悬空引用（存量脏数据）时跳过重建：让主迁移事务的
+    // `fk_gate_error` 统一报"第八阶段迁移…"并给出备份修复指引后整体回滚，
+    // 避免本函数抢先报错丢失标准文案与回滚语义（见迁移阻断测试）。
+    let orphan_count = count_fk_check_violations(conn)?;
+    if orphan_count > 0 {
+        return Ok(());
+    }
+    let fk_before: i64 = conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0))?;
+    conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
+    let result = run_migration_in_transaction(conn, |c| {
+        // 列清单必须与 create_tables 中 vouchers 定义一致；新增列时同步此处
+        c.execute_batch(
+            "
+            CREATE TABLE vouchers_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                voucher_no TEXT UNIQUE NOT NULL,
+                voucher_date TEXT NOT NULL,
+                belong_month TEXT NOT NULL,
+                source_type TEXT NOT NULL CHECK (source_type IN (
+                    'salary_accrual','salary_payment','reimbursement_accrual',
+                    'reimbursement_payment','invoice_expense','bank_manual','period_close',
+                    'fund_document','instrument','instrument_flow','cash_count')),
+                source_id INTEGER NOT NULL,
+                total_amount REAL NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','void')),
+                remark TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            );
+            INSERT INTO vouchers_new
+                (id, voucher_no, voucher_date, belong_month, source_type, source_id,
+                 total_amount, status, remark, created_at, updated_at)
+            SELECT id, voucher_no, voucher_date, belong_month, source_type, source_id,
+                   total_amount, status, remark, created_at, updated_at
+            FROM vouchers ORDER BY id;
+            DROP TABLE vouchers;
+            ALTER TABLE vouchers_new RENAME TO vouchers;
+            CREATE INDEX IF NOT EXISTS idx_vouchers_month ON vouchers(belong_month, status);
+            CREATE INDEX IF NOT EXISTS idx_vouchers_source ON vouchers(source_type, source_id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_vouchers_source_active
+                ON vouchers(source_type, source_id) WHERE status = 'active';
+            ",
+        )?;
+        // 结构防漂移：重建后列清单必须与预期一致
+        assert_vouchers_columns(c)?;
+        // 外键兜底：关外键复制期间不允许引入悬空引用
+        let fk_errors = count_fk_check_violations(c)?;
+        if fk_errors > 0 {
+            return Err(AppError::General(format!(
+                "vouchers 表重建异常：发现 {fk_errors} 处外键悬空引用"
+            )));
+        }
+        Ok(())
+    });
+    if fk_before == 0 {
+        conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
+    } else {
+        conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+    }
+    result
+}
+
+/// 重建 `approval_events` 表扩展 `entity_type`（`'negotiable_instrument'`）与 `action`
+/// （`'endorse'`/`'discount'`/`'collect'`/`'confirm_collect'`）CHECK 白名单（spec 4 票据留痕；
+/// `'void'`/`'reverse'`/`'settle'` 沿用既有值）。模式照搬第七阶段 `rebuild_approval_events_action_check`：
+/// 本表无子表引用（无级联风险），普通事务即可，含列清单防漂移，幂等跳过。
+fn rebuild_approval_events_checks_stage8(conn: &Connection) -> AppResult<()> {
+    let create_sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='approval_events'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(None);
+    // 表不存在（最小测试库）或已是新定义时无需重建
+    let Some(sql) = create_sql else {
+        return Ok(());
+    };
+    if sql.contains("negotiable_instrument") {
+        return Ok(());
+    }
+    run_migration_in_transaction(conn, |c| {
+        // 列清单必须与 create_tables 中 approval_events 定义一致；新增列时同步此处
+        c.execute_batch(
+            "
+            CREATE TABLE approval_events_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_type TEXT NOT NULL CHECK (entity_type IN
+                    ('reimbursement_claim','fund_document','negotiable_instrument')),
+                entity_id INTEGER NOT NULL,
+                action TEXT NOT NULL CHECK (action IN
+                    ('submit','approve','reject','settle','void','reverse','withdraw','batch',
+                     'unbatch','unapprove','endorse','discount','collect','confirm_collect')),
+                from_status TEXT,
+                to_status TEXT,
+                operator_id INTEGER,
+                comment TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (operator_id) REFERENCES operator_profiles(id)
+            );
+            INSERT INTO approval_events_new
+                (id, entity_type, entity_id, action, from_status, to_status,
+                 operator_id, comment, created_at)
+            SELECT id, entity_type, entity_id, action, from_status, to_status,
+                   operator_id, comment, created_at
+            FROM approval_events ORDER BY id;
+            DROP TABLE approval_events;
+            ALTER TABLE approval_events_new RENAME TO approval_events;
+            CREATE INDEX IF NOT EXISTS idx_approval_events_entity
+                ON approval_events(entity_type, entity_id, id);
+            ",
+        )?;
+        // 结构防漂移：重建后列清单必须与预期一致
+        let actual: String = {
+            let mut stmt = c.prepare("PRAGMA table_info(approval_events)")?;
+            let names = stmt
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<Result<Vec<_>, _>>()?;
+            names.join(",")
+        };
+        let expected = "id,entity_type,entity_id,action,from_status,to_status,\
+                        operator_id,comment,created_at";
+        if actual != expected {
+            return Err(AppError::General(format!(
+                "approval_events 表重建异常：列清单与预期不一致（{actual}）"
+            )));
+        }
+        Ok(())
+    })
+}
+
+/// vouchers 重建后的列清单防漂移校验（与 create_tables 定义逐字对应）
+fn assert_vouchers_columns(conn: &Connection) -> AppResult<()> {
+    let actual: String = {
+        let mut stmt = conn.prepare("PRAGMA table_info(vouchers)")?;
+        let names = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        names.join(",")
+    };
+    let expected = "id,voucher_no,voucher_date,belong_month,source_type,source_id,\
+                    total_amount,status,remark,created_at,updated_at";
+    if actual != expected {
+        return Err(AppError::General(format!(
+            "vouchers 表重建异常：列清单与预期不一致（{actual}）"
+        )));
+    }
+    Ok(())
+}
+
 /// 第八阶段 schema 迁移入口（幂等，可在新旧库上重复执行）：
+/// 0. 重建 `vouchers` 表扩展 `source_type` 白名单（`'instrument'` 票据登记凭证、
+///    `'instrument_flow'` 票据流转/冲正凭证、`'cash_count'` 现金盘点差异凭证，spec 4.1/6），
+///    保留原 id、分录外键关系与全部索引；新库 DDL 已含该类型时跳过；
+/// 0b. 重建 `approval_events` 表扩展 `entity_type`（`'negotiable_instrument'`）与 `action`
+///    （`'endorse'`/`'discount'`/`'collect'`/`'confirm_collect'`）白名单（spec 4 留痕）；
 /// 1. 建四张新表（票据 / 背书链 / 现金盘点单 / 面额明细）与索引，结构自检防部分建表被静默吞掉；
 /// 2. `reminder_advance_days` 缺省写入 app_settings（INSERT OR IGNORE：用户已自定义则不覆盖）；
 /// 3. 迁移结束运行 `PRAGMA foreign_key_check`，发现悬空引用整体回滚。
 ///
-/// 无存量数据迁移（spec 3.5）；全程在单事务中执行，任一步失败整体回滚（含建表/建索引），
+/// 无存量数据迁移（spec 3.5）；建表全程在单事务中执行，任一步失败整体回滚（含建表/建索引），
 /// 不留半成品。注意：票据表引用 stage7 的 business_partners / fund_accounts，
 /// 调用链保证 migrate_stage7_schema 先于本迁移执行。
 pub fn migrate_stage8_schema(conn: &Connection) -> AppResult<()> {
+    // 两张既有表的 CHECK 白名单重建与 stage7 同理由：旧库 CHECK 固化在表定义里，只能重建放行；
+    // 必须在迁移事务外执行（vouchers 重建需在 autocommit 下切换外键开关）
+    rebuild_vouchers_source_type_check_stage8(conn)?;
+    rebuild_approval_events_checks_stage8(conn)?;
     run_migration_in_transaction(conn, |c| {
         create_stage8_tables(c)?;
 
@@ -11888,6 +12069,195 @@ mod stage7_tests {
             )
             .unwrap();
         assert_eq!(idx_count, 2);
+        assert_eq!(stage7_fk_violation_count(&conn), 0);
+    }
+
+    /// 旧 vouchers 表（source_type 无票据/盘点类型）升级：重建放行 `'instrument'` /
+    /// `'instrument_flow'` / `'cash_count'`，原凭证行与分录保留、id 不变，非法值仍被拒，
+    /// 幂等重跑不再重建。
+    #[test]
+    fn test_stage8_migration_rebuilds_vouchers_source_type() {
+        let conn = setup_financial_db();
+        // 复原旧结构（stage7 扩展后的白名单，无第八阶段三类型）；vouchers 是
+        // voucher_lines 的父表，替换需临时关外键（与生产重建同口径）
+        conn.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+        conn.execute_batch(
+            "
+            DELETE FROM voucher_lines;
+            DROP TABLE vouchers;
+            CREATE TABLE vouchers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                voucher_no TEXT UNIQUE NOT NULL,
+                voucher_date TEXT NOT NULL,
+                belong_month TEXT NOT NULL,
+                source_type TEXT NOT NULL CHECK (source_type IN (
+                    'salary_accrual','salary_payment','reimbursement_accrual',
+                    'reimbursement_payment','invoice_expense','bank_manual','period_close',
+                    'fund_document')),
+                source_id INTEGER NOT NULL,
+                total_amount REAL NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','void')),
+                remark TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            );
+            INSERT INTO vouchers
+                (id, voucher_no, voucher_date, belong_month, source_type, source_id,
+                 total_amount, status, created_at, updated_at)
+            VALUES (7, '记-202608-001', '2026-08-05', '2026-08', 'fund_document', 3,
+                    500, 'active', '2026-08-05', '2026-08-05');
+            INSERT INTO voucher_lines
+                (voucher_id, account_code, debit_amount, credit_amount, line_order)
+            VALUES (7, '1002', 500, 0, 0);
+            ",
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+
+        migrate_stage8_schema(&conn).unwrap();
+
+        // 原行与分录保留、id 不变
+        let (no, source): (String, String) = conn
+            .query_row(
+                "SELECT voucher_no, source_type FROM vouchers WHERE id = 7",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(no, "记-202608-001");
+        assert_eq!(source, "fund_document");
+        let lines: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM voucher_lines WHERE voucher_id = 7",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(lines, 1, "重建后原分录必须保留");
+
+        // 新白名单生效：票据/盘点来源可写，未知值仍被 CHECK 拒绝
+        for source_type in ["instrument", "instrument_flow", "cash_count"] {
+            let wrote = conn.execute(
+                "INSERT INTO vouchers
+                    (voucher_no, voucher_date, belong_month, source_type, source_id, total_amount,
+                     status, created_at, updated_at)
+                 VALUES (?1, '2026-09-10', '2026-09', ?2, 1, 100, 'active',
+                         '2026-09-10', '2026-09-10')",
+                params![format!("记-202609-{source_type}"), source_type],
+            );
+            assert!(wrote.is_ok(), "source_type {source_type} 应被放行");
+        }
+        let bogus = conn.execute(
+            "INSERT INTO vouchers
+                (voucher_no, voucher_date, belong_month, source_type, source_id, total_amount,
+                 status, created_at, updated_at)
+             VALUES ('记-202609-X', '2026-09-10', '2026-09', 'bogus', 1, 100, 'active',
+                     '2026-09-10', '2026-09-10')",
+            [],
+        );
+        assert!(bogus.is_err(), "未知 source_type 应被 CHECK 拦截");
+
+        // 幂等：重建后表 DDL 已含新类型，二次迁移跳过重建且数据不动
+        migrate_stage8_schema(&conn).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM vouchers", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 4);
+        assert_eq!(stage7_fk_violation_count(&conn), 0);
+    }
+
+    /// 旧 approval_events 表升级：重建放行票据实体与票据动作（endorse/discount/collect/
+    /// confirm_collect），原事件行保留，非法值仍被拒，幂等重跑不再重建。
+    #[test]
+    fn test_stage8_migration_rebuilds_approval_events_checks() {
+        let conn = setup_financial_db();
+        // 复原旧结构（entity 两种、action 无票据动作）；本表无子表引用，普通替换即可
+        conn.execute_batch(
+            "
+            DELETE FROM approval_events;
+            DROP TABLE approval_events;
+            CREATE TABLE approval_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_type TEXT NOT NULL CHECK (entity_type IN ('reimbursement_claim','fund_document')),
+                entity_id INTEGER NOT NULL,
+                action TEXT NOT NULL CHECK (action IN
+                    ('submit','approve','reject','settle','void','reverse','withdraw','batch',
+                     'unbatch','unapprove')),
+                from_status TEXT,
+                to_status TEXT,
+                operator_id INTEGER,
+                comment TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (operator_id) REFERENCES operator_profiles(id)
+            );
+            INSERT INTO approval_events
+                (id, entity_type, entity_id, action, from_status, to_status, created_at)
+            VALUES (3, 'fund_document', 9, 'settle', 'approved', 'settled', '2026-08-05');
+            ",
+        )
+        .unwrap();
+
+        migrate_stage8_schema(&conn).unwrap();
+
+        // 原事件行保留
+        let action: String = conn
+            .query_row("SELECT action FROM approval_events WHERE id = 3", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(action, "settle");
+
+        // 票据实体 + 票据动作可写（operator_id 引用真实操作人）
+        conn.execute(
+            "INSERT INTO operator_profiles (name, role, is_active, created_at, updated_at)
+             VALUES ('张会计', 'cashier', 1, '2026-09-01', '2026-09-01')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO approval_events
+                (entity_type, entity_id, action, from_status, to_status, operator_id, comment,
+                 created_at)
+             VALUES ('negotiable_instrument', 1, 'endorse', 'holding', 'endorsed_out', 1,
+                     NULL, '2026-09-10')",
+            [],
+        )
+        .unwrap();
+        for action in [
+            "discount",
+            "collect",
+            "confirm_collect",
+            "void",
+            "reverse",
+            "settle",
+        ] {
+            let wrote = conn.execute(
+                "INSERT INTO approval_events
+                    (entity_type, entity_id, action, created_at)
+                 VALUES ('negotiable_instrument', 1, ?1, '2026-09-10')",
+                params![action],
+            );
+            assert!(wrote.is_ok(), "action {action} 应被放行");
+        }
+        let bogus = conn.execute(
+            "INSERT INTO approval_events (entity_type, entity_id, action, created_at)
+             VALUES ('negotiable_instrument', 1, 'bogus', '2026-09-10')",
+            [],
+        );
+        assert!(bogus.is_err(), "未知 action 应被 CHECK 拦截");
+        let bogus_entity = conn.execute(
+            "INSERT INTO approval_events (entity_type, entity_id, action, created_at)
+             VALUES ('bank_document', 1, 'endorse', '2026-09-10')",
+            [],
+        );
+        assert!(bogus_entity.is_err(), "未知 entity_type 应被 CHECK 拦截");
+
+        // 幂等：二次迁移数据不动
+        migrate_stage8_schema(&conn).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM approval_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 8, "重跑迁移不得产生或丢失审批事件");
         assert_eq!(stage7_fk_violation_count(&conn), 0);
     }
 

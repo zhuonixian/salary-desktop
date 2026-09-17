@@ -1844,216 +1844,221 @@ pub struct FundAssignmentResult {
 
 // ==================== 第八阶段：票据台账 / 现金盘点 ====================
 // 状态与枚举值集中定义（与 DDL CHECK 白名单逐字一致），供 notes.rs / cash_count.rs 引用。
-// 模型与常量是 Task 2 / Task 6 的前置接口，本任务仅落库定义，允许整段暂未使用；
+// 票据项已由 Task 2（notes.rs）消费；盘点/提醒项待 Task 4/6 消费，逐项局部放行；
 // 经私有模块 glob 再导出，消费方仍走 crate::models 扁平路径。
+/// 票据类型：银行承兑汇票
+pub const INSTRUMENT_TYPE_BANK_ACCEPTANCE: &str = "bank_acceptance";
+/// 票据类型：商业承兑汇票
+pub const INSTRUMENT_TYPE_COMMERCIAL_ACCEPTANCE: &str = "commercial_acceptance";
+/// 票据类型：支票（登记即结算：received→collected / issued→paid）
+pub const INSTRUMENT_TYPE_CHECK: &str = "check";
+
+/// 票据类型清单（校验用，与 DDL CHECK 一致）
+pub const INSTRUMENT_TYPES: &[&str] = &[
+    INSTRUMENT_TYPE_BANK_ACCEPTANCE,
+    INSTRUMENT_TYPE_COMMERCIAL_ACCEPTANCE,
+    INSTRUMENT_TYPE_CHECK,
+];
+
+/// 票据方向：收到
+pub const INSTRUMENT_DIRECTION_RECEIVED: &str = "received";
+/// 票据方向：开出
+pub const INSTRUMENT_DIRECTION_ISSUED: &str = "issued";
+
+/// 票据方向清单（校验用，与 DDL CHECK 一致）
+pub const INSTRUMENT_DIRECTIONS: &[&str] =
+    &[INSTRUMENT_DIRECTION_RECEIVED, INSTRUMENT_DIRECTION_ISSUED];
+
+/// 票据状态：持有（received 登记后初始态）
+pub const INSTRUMENT_STATUS_HOLDING: &str = "holding";
+/// 票据状态：已背书转出（终态）
+pub const INSTRUMENT_STATUS_ENDORSED_OUT: &str = "endorsed_out";
+/// 票据状态：已贴现（终态）
+pub const INSTRUMENT_STATUS_DISCOUNTED: &str = "discounted";
+/// 票据状态：托收中（在途，不记账）
+pub const INSTRUMENT_STATUS_COLLECTING: &str = "collecting";
+/// 票据状态：已到账（终态）
+pub const INSTRUMENT_STATUS_COLLECTED: &str = "collected";
+/// 票据状态：已开出未兑付（issued 登记后初始态）
+pub const INSTRUMENT_STATUS_ISSUED_OUTSTANDING: &str = "issued_outstanding";
+/// 票据状态：已兑付（终态）
+pub const INSTRUMENT_STATUS_PAID: &str = "paid";
+/// 票据状态：已作废（通用终态旁路，仅未发生资金流转时允许；同号作废后可再录）
+pub const INSTRUMENT_STATUS_VOID: &str = "void";
+
+/// 票据状态清单（校验用，与 DDL CHECK 一致；Task 3 查询筛选消费）
 #[allow(dead_code)]
-mod stage8_notes_cash_count {
+pub const INSTRUMENT_STATUSES: &[&str] = &[
+    INSTRUMENT_STATUS_HOLDING,
+    INSTRUMENT_STATUS_ENDORSED_OUT,
+    INSTRUMENT_STATUS_DISCOUNTED,
+    INSTRUMENT_STATUS_COLLECTING,
+    INSTRUMENT_STATUS_COLLECTED,
+    INSTRUMENT_STATUS_ISSUED_OUTSTANDING,
+    INSTRUMENT_STATUS_PAID,
+    INSTRUMENT_STATUS_VOID,
+];
 
-    use serde::{Deserialize, Serialize};
+/// 现金盘点单状态：草稿（可改可作废；Task 6 消费）
+#[allow(dead_code)]
+pub const CASH_COUNT_STATUS_DRAFT: &str = "draft";
+/// 现金盘点单状态：已确认（不可改，冲正走红字；Task 6 消费）
+#[allow(dead_code)]
+pub const CASH_COUNT_STATUS_CONFIRMED: &str = "confirmed";
+/// 现金盘点单状态：已作废（Task 6 消费）
+#[allow(dead_code)]
+pub const CASH_COUNT_STATUS_VOID: &str = "void";
 
-    /// 票据类型：银行承兑汇票
-    pub const INSTRUMENT_TYPE_BANK_ACCEPTANCE: &str = "bank_acceptance";
-    /// 票据类型：商业承兑汇票
-    pub const INSTRUMENT_TYPE_COMMERCIAL_ACCEPTANCE: &str = "commercial_acceptance";
-    /// 票据类型：支票（登记即结算：received→collected / issued→paid）
-    pub const INSTRUMENT_TYPE_CHECK: &str = "check";
+/// 现金盘点单状态清单（校验用，与 DDL CHECK 一致；Task 6 消费）
+#[allow(dead_code)]
+pub const CASH_COUNT_STATUSES: &[&str] = &[
+    CASH_COUNT_STATUS_DRAFT,
+    CASH_COUNT_STATUS_CONFIRMED,
+    CASH_COUNT_STATUS_VOID,
+];
 
-    /// 票据类型清单（校验用，与 DDL CHECK 一致）
-    pub const INSTRUMENT_TYPES: &[&str] = &[
-        INSTRUMENT_TYPE_BANK_ACCEPTANCE,
-        INSTRUMENT_TYPE_COMMERCIAL_ACCEPTANCE,
-        INSTRUMENT_TYPE_CHECK,
-    ];
+/// app_settings 键：账期提醒提前天数（Task 4 消费）
+#[allow(dead_code)]
+pub const SETTING_REMINDER_ADVANCE_DAYS: &str = "reminder_advance_days";
+/// 账期提醒提前天数缺省值（spec 3.4；Task 4 消费）
+#[allow(dead_code)]
+pub const DEFAULT_REMINDER_ADVANCE_DAYS: i64 = 7;
 
-    /// 票据方向：收到
-    pub const INSTRUMENT_DIRECTION_RECEIVED: &str = "received";
-    /// 票据方向：开出
-    pub const INSTRUMENT_DIRECTION_ISSUED: &str = "issued";
-
-    /// 票据方向清单（校验用，与 DDL CHECK 一致）
-    pub const INSTRUMENT_DIRECTIONS: &[&str] =
-        &[INSTRUMENT_DIRECTION_RECEIVED, INSTRUMENT_DIRECTION_ISSUED];
-
-    /// 票据状态：持有（received 登记后初始态）
-    pub const INSTRUMENT_STATUS_HOLDING: &str = "holding";
-    /// 票据状态：已背书转出（终态）
-    pub const INSTRUMENT_STATUS_ENDORSED_OUT: &str = "endorsed_out";
-    /// 票据状态：已贴现（终态）
-    pub const INSTRUMENT_STATUS_DISCOUNTED: &str = "discounted";
-    /// 票据状态：托收中（在途，不记账）
-    pub const INSTRUMENT_STATUS_COLLECTING: &str = "collecting";
-    /// 票据状态：已到账（终态）
-    pub const INSTRUMENT_STATUS_COLLECTED: &str = "collected";
-    /// 票据状态：已开出未兑付（issued 登记后初始态）
-    pub const INSTRUMENT_STATUS_ISSUED_OUTSTANDING: &str = "issued_outstanding";
-    /// 票据状态：已兑付（终态）
-    pub const INSTRUMENT_STATUS_PAID: &str = "paid";
-    /// 票据状态：已作废（通用终态旁路，仅未发生资金流转时允许；同号作废后可再录）
-    pub const INSTRUMENT_STATUS_VOID: &str = "void";
-
-    /// 票据状态清单（校验用，与 DDL CHECK 一致）
-    pub const INSTRUMENT_STATUSES: &[&str] = &[
-        INSTRUMENT_STATUS_HOLDING,
-        INSTRUMENT_STATUS_ENDORSED_OUT,
-        INSTRUMENT_STATUS_DISCOUNTED,
-        INSTRUMENT_STATUS_COLLECTING,
-        INSTRUMENT_STATUS_COLLECTED,
-        INSTRUMENT_STATUS_ISSUED_OUTSTANDING,
-        INSTRUMENT_STATUS_PAID,
-        INSTRUMENT_STATUS_VOID,
-    ];
-
-    /// 现金盘点单状态：草稿（可改可作废）
-    pub const CASH_COUNT_STATUS_DRAFT: &str = "draft";
-    /// 现金盘点单状态：已确认（不可改，冲正走红字）
-    pub const CASH_COUNT_STATUS_CONFIRMED: &str = "confirmed";
-    /// 现金盘点单状态：已作废
-    pub const CASH_COUNT_STATUS_VOID: &str = "void";
-
-    /// 现金盘点单状态清单（校验用，与 DDL CHECK 一致）
-    pub const CASH_COUNT_STATUSES: &[&str] = &[
-        CASH_COUNT_STATUS_DRAFT,
-        CASH_COUNT_STATUS_CONFIRMED,
-        CASH_COUNT_STATUS_VOID,
-    ];
-
-    /// app_settings 键：账期提醒提前天数
-    pub const SETTING_REMINDER_ADVANCE_DAYS: &str = "reminder_advance_days";
-    /// 账期提醒提前天数缺省值（spec 3.4）
-    pub const DEFAULT_REMINDER_ADVANCE_DAYS: i64 = 7;
-
-    /// 票据（negotiable_instruments，spec 3.1）：承兑汇票与支票台账主表
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct NegotiableInstrument {
-        pub id: i64,
-        pub instrument_type: String,
-        pub direction: String,
-        pub instrument_no: String,
-        pub face_amount: f64,
-        pub issue_date: String,
-        pub due_date: String,
-        pub drawer: Option<String>,
-        pub acceptor: Option<String>,
-        pub payee: Option<String>,
-        /// 关联往来单位（business_partners）
-        pub partner_id: Option<i64>,
-        /// 托收/贴现/兑付入账账户（承兑类资金流转用）
-        pub fund_account_id: Option<i64>,
-        /// 对方科目编码（登记时点的贷/借方，缺省按类型与方向推导）
-        pub counter_account_code: Option<String>,
-        pub status: String,
-        /// 登记凭证
-        pub voucher_id: Option<i64>,
-        pub remark: Option<String>,
-        pub created_by: Option<String>,
-        pub created_at: Option<String>,
-        pub updated_at: Option<String>,
-    }
-
-    /// 背书链（instrument_endorsements，spec 3.2）：追加式，本期约定全额背书（金额=票面）
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct InstrumentEndorsement {
-        pub id: i64,
-        pub instrument_id: i64,
-        /// 背书序号（同一票据内递增唯一）
-        pub endorse_order: i64,
-        /// 被背书人
-        pub endorsee: String,
-        pub endorse_date: String,
-        /// 事由（付货款/转让等）
-        pub purpose: Option<String>,
-        /// 背书金额（本期约定全额背书，校验 = 票面）
-        pub amount: f64,
-        /// 背书凭证
-        pub voucher_id: i64,
-        pub created_by: Option<String>,
-        pub created_at: Option<String>,
-    }
-
-    /// 现金盘点单（cash_count_sheets，spec 3.3）：difference = 实存 − 账面，领域层自动算
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct CashCountSheet {
-        pub id: i64,
-        pub count_date: String,
-        /// 冗余月份，月结保护用
-        pub belong_month: String,
-        /// 限 account_type='cash' 的资金账户
-        pub fund_account_id: i64,
-        /// 账面余额快照（确认时点）
-        pub book_balance: f64,
-        pub counted_amount: f64,
-        /// 实存 − 账面，自动算
-        pub difference: f64,
-        /// 差异原因（差异≠0 时必填）
-        pub difference_reason: Option<String>,
-        pub status: String,
-        /// 差异≠0 且 confirmed 时生成的盘盈亏凭证
-        pub voucher_id: Option<i64>,
-        pub remark: Option<String>,
-        pub created_by: Option<String>,
-        pub created_at: Option<String>,
-        pub updated_at: Option<String>,
-    }
-
-    /// 现金盘点面额明细（cash_count_denominations，spec 3.3）：subtotal = denomination × quantity
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct CashCountDenomination {
-        pub id: i64,
-        pub sheet_id: i64,
-        /// 面额（100/50/20/10/5/1/0.5/0.1）
-        pub denomination: f64,
-        pub quantity: i64,
-        /// = denomination × quantity，入库校验
-        pub subtotal: f64,
-    }
-
-    /// 票据登记入参（register_instrument）：收到承兑→holding、开出承兑→issued_outstanding、
-    /// 收到支票→collected、开出支票→paid（spec 4.1，支票登记即终态）
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct InstrumentRegisterInput {
-        pub instrument_type: String,
-        pub direction: String,
-        pub instrument_no: String,
-        pub face_amount: f64,
-        /// 出票日
-        pub issue_date: String,
-        /// 到期日（支票可等于出票日）
-        pub due_date: String,
-        pub drawer: Option<String>,
-        /// 承兑人（承兑汇票）
-        pub acceptor: Option<String>,
-        pub payee: Option<String>,
-        /// 关联往来单位
-        pub partner_id: Option<i64>,
-        /// 入账账户（支票登记即结算必选；承兑类供托收/贴现/兑付时使用）
-        pub fund_account_id: Option<i64>,
-        /// 对方科目编码（缺省按类型与方向推导）
-        pub counter_account_code: Option<String>,
-        pub remark: Option<String>,
-    }
-
-    /// 面额明细入参（新建/更新盘点单时整表替换）
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct CashCountDenominationInput {
-        pub denomination: f64,
-        pub quantity: i64,
-    }
-
-    /// 现金盘点新建入参（create_count_sheet → draft）：账面余额由后端按确认/创建时点快照，
-    /// difference 自动算；面额明细可选，提供时合计必须与 counted_amount 一致才允许确认（spec 6）
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct CashCountCreateInput {
-        pub count_date: String,
-        /// 限 account_type='cash' 的资金账户
-        pub fund_account_id: i64,
-        /// 实存金额（快速模式直接填总额；面额明细模式由合计得出）
-        pub counted_amount: f64,
-        /// 差异原因（差异≠0 时必填）
-        pub difference_reason: Option<String>,
-        pub remark: Option<String>,
-        pub denominations: Option<Vec<CashCountDenominationInput>>,
-    }
+/// 票据（negotiable_instruments，spec 3.1）：承兑汇票与支票台账主表
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NegotiableInstrument {
+    pub id: i64,
+    pub instrument_type: String,
+    pub direction: String,
+    pub instrument_no: String,
+    pub face_amount: f64,
+    pub issue_date: String,
+    pub due_date: String,
+    pub drawer: Option<String>,
+    pub acceptor: Option<String>,
+    pub payee: Option<String>,
+    /// 关联往来单位（business_partners）
+    pub partner_id: Option<i64>,
+    /// 托收/贴现/兑付入账账户（承兑类资金流转用）
+    pub fund_account_id: Option<i64>,
+    /// 对方科目编码（登记时点的贷/借方，缺省按类型与方向推导）
+    pub counter_account_code: Option<String>,
+    pub status: String,
+    /// 登记凭证
+    pub voucher_id: Option<i64>,
+    pub remark: Option<String>,
+    pub created_by: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
 }
 
-// 保持 crate::models 扁平引用路径（Task 2/6 直接 use crate::models::NegotiableInstrument 等）
-pub use stage8_notes_cash_count::*;
+/// 背书链（instrument_endorsements，spec 3.2）：追加式，本期约定全额背书（金额=票面）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstrumentEndorsement {
+    pub id: i64,
+    pub instrument_id: i64,
+    /// 背书序号（同一票据内递增唯一）
+    pub endorse_order: i64,
+    /// 被背书人
+    pub endorsee: String,
+    pub endorse_date: String,
+    /// 事由（付货款/转让等）
+    pub purpose: Option<String>,
+    /// 背书金额（本期约定全额背书，校验 = 票面）
+    pub amount: f64,
+    /// 背书凭证
+    pub voucher_id: i64,
+    pub created_by: Option<String>,
+    pub created_at: Option<String>,
+}
+
+/// 现金盘点单（cash_count_sheets，spec 3.3）：difference = 实存 − 账面，领域层自动算
+///（Task 6 消费）
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CashCountSheet {
+    pub id: i64,
+    pub count_date: String,
+    /// 冗余月份，月结保护用
+    pub belong_month: String,
+    /// 限 account_type='cash' 的资金账户
+    pub fund_account_id: i64,
+    /// 账面余额快照（确认时点）
+    pub book_balance: f64,
+    pub counted_amount: f64,
+    /// 实存 − 账面，自动算
+    pub difference: f64,
+    /// 差异原因（差异≠0 时必填）
+    pub difference_reason: Option<String>,
+    pub status: String,
+    /// 差异≠0 且 confirmed 时生成的盘盈亏凭证
+    pub voucher_id: Option<i64>,
+    pub remark: Option<String>,
+    pub created_by: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+/// 现金盘点面额明细（cash_count_denominations，spec 3.3）：subtotal = denomination × quantity
+///（Task 6 消费）
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CashCountDenomination {
+    pub id: i64,
+    pub sheet_id: i64,
+    /// 面额（100/50/20/10/5/1/0.5/0.1）
+    pub denomination: f64,
+    pub quantity: i64,
+    /// = denomination × quantity，入库校验
+    pub subtotal: f64,
+}
+
+/// 票据登记入参（register_instrument）：收到承兑→holding、开出承兑→issued_outstanding、
+/// 收到支票→collected、开出支票→paid（spec 4.1，支票登记即终态）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstrumentRegisterInput {
+    pub instrument_type: String,
+    pub direction: String,
+    pub instrument_no: String,
+    pub face_amount: f64,
+    /// 出票日
+    pub issue_date: String,
+    /// 到期日（支票可等于出票日）
+    pub due_date: String,
+    pub drawer: Option<String>,
+    /// 承兑人（承兑汇票）
+    pub acceptor: Option<String>,
+    pub payee: Option<String>,
+    /// 关联往来单位
+    pub partner_id: Option<i64>,
+    /// 入账账户（支票登记即结算必选；承兑类供托收/贴现/兑付时使用）
+    pub fund_account_id: Option<i64>,
+    /// 对方科目编码（缺省按类型与方向推导）
+    pub counter_account_code: Option<String>,
+    pub remark: Option<String>,
+}
+
+/// 面额明细入参（新建/更新盘点单时整表替换；Task 6 消费）
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CashCountDenominationInput {
+    pub denomination: f64,
+    pub quantity: i64,
+}
+
+/// 现金盘点新建入参（create_count_sheet → draft）：账面余额由后端按确认/创建时点快照，
+/// difference 自动算；面额明细可选，提供时合计必须与 counted_amount 一致才允许确认
+///（spec 6；Task 6 消费）
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CashCountCreateInput {
+    pub count_date: String,
+    /// 限 account_type='cash' 的资金账户
+    pub fund_account_id: i64,
+    /// 实存金额（快速模式直接填总额；面额明细模式由合计得出）
+    pub counted_amount: f64,
+    /// 差异原因（差异≠0 时必填）
+    pub difference_reason: Option<String>,
+    pub remark: Option<String>,
+    pub denominations: Option<Vec<CashCountDenominationInput>>,
+}
