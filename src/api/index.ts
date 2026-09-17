@@ -64,6 +64,7 @@ import type {
   ReimbursementClaimInput,
   ReimbursementInvoice,
   ReimbursementQuery,
+  ReminderItem,
   SecurityStatus,
   UnlockResult,
   RevealResult,
@@ -538,6 +539,8 @@ const mockApprovalEvents: ApprovalEvent[] = [
 ];
 
 let mockMakerChecker = false;
+// 账期提醒提前天数（预览态内存值，缺省 7 与后端 app_settings 缺省一致）
+let mockReminderAdvanceDays = 7;
 
 // ==================== 付款批次预览数据（第七阶段 Task 9） ====================
 // 内存态模拟 payment_batches / payment_items 与批次-资金单状态机联动（演示用，
@@ -1841,6 +1844,43 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
     case 'copy_social_profiles':
     case 'set_social_base_limits':
       throw new Error('预览模式不支持该操作，请在桌面应用中操作');
+    // ==================== 账期提醒（第八阶段 Task 4） ====================
+    // 三类别各一条：借款临期 / 票据逾期 / 报销滞留；日期相对今天生成，预览始终有内容。
+    case 'get_dashboard_reminders': {
+      const dayStr = (offset: number) =>
+        new Date(Date.now() + offset * 86400000).toISOString().slice(0, 10);
+      return [
+        {
+          category: 'advance_due',
+          title: '张三 借款 JK2026090005',
+          due_date: dayStr(3),
+          days_left: 3,
+          amount: 2000,
+          ref_id: 1,
+        },
+        {
+          category: 'instrument_due',
+          title: '银行承兑汇票 YZ2026001',
+          due_date: dayStr(-2),
+          days_left: -2,
+          amount: 100000,
+          ref_id: 2,
+        },
+        {
+          category: 'payable_stuck',
+          title: '报销单 BX202608002 技术报销',
+          due_date: dayStr(-12),
+          days_left: 12,
+          amount: 500,
+          ref_id: 3,
+        },
+      ];
+    }
+    case 'get_reminder_advance_days':
+      return mockReminderAdvanceDays;
+    case 'set_reminder_advance_days':
+      mockReminderAdvanceDays = Number(args?.days ?? 7);
+      return true;
     default:
       if (command.startsWith('get_') || command.startsWith('query_')) return [];
       if (command.startsWith('export_') || command.startsWith('delete_') || command.startsWith('update_')) return true;
@@ -2035,6 +2075,21 @@ export async function getDashboardSummary(month: string): Promise<DashboardSumma
 
 export async function getMonthCloseWorkbench(month: string): Promise<MonthCloseWorkbench> {
   return invoke<MonthCloseWorkbench>('get_month_close_workbench', { month });
+}
+
+// ==================== 账期提醒（第八阶段 Task 4，spec 5） ====================
+
+export async function getDashboardReminders(): Promise<ReminderItem[]> {
+  return invoke<ReminderItem[]>('get_dashboard_reminders');
+}
+
+export async function getReminderAdvanceDays(): Promise<number> {
+  const days = numberOrZero(await invoke<number>('get_reminder_advance_days'));
+  return days > 0 ? days : 7;
+}
+
+export async function setReminderAdvanceDays(days: number): Promise<void> {
+  await invoke<void>('set_reminder_advance_days', { days });
 }
 
 export async function getMonthCloseStatus(month: string): Promise<MonthCloseRecord | undefined> {

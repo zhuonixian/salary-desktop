@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Row, Col, Card, Statistic, DatePicker, Spin, message, Tag, Table, Space } from 'antd';
+import { Row, Col, Card, Statistic, DatePicker, Spin, message, Tag, Table, Space, Select } from 'antd';
 import {
   TeamOutlined,
   CalculatorOutlined,
@@ -14,13 +14,26 @@ import {
   ScheduleOutlined,
   AccountBookOutlined,
   SwapOutlined,
+  BellOutlined,
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
-import { getDashboardSummary, getMonthCloseWorkbench } from '@/api';
+import {
+  getDashboardReminders,
+  getDashboardSummary,
+  getMonthCloseWorkbench,
+  getReminderAdvanceDays,
+  setReminderAdvanceDays,
+} from '@/api';
 import { SensitiveText } from '@/components/SensitiveText';
 import { SensitiveStatistic } from '@/components/SensitiveStatistic';
 import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
-import type { DashboardSummary, MonthCloseCheckItem, MonthCloseWorkbench } from '@/types';
+import type {
+  DashboardSummary,
+  MonthCloseCheckItem,
+  MonthCloseWorkbench,
+  ReminderCategory,
+  ReminderItem,
+} from '@/types';
 
 type ChartDatum = {
   label: string;
@@ -34,6 +47,32 @@ const statusMeta = {
   ok: { color: 'green', text: '正常' },
   warning: { color: 'gold', text: '提醒' },
   blocking: { color: 'red', text: '阻塞' },
+};
+
+// ==================== 账期提醒（第八阶段 Task 4，spec 5） ====================
+
+const reminderGroups: { category: ReminderCategory; label: string }[] = [
+  { category: 'advance_due', label: '借款到期' },
+  { category: 'instrument_due', label: '票据到期' },
+  { category: 'payable_stuck', label: '滞留应付' },
+];
+
+const reminderRoute: Record<ReminderCategory, string> = {
+  advance_due: '/advances',
+  instrument_due: '/notes-instruments',
+  payable_stuck: '/reimbursements',
+};
+
+// 借款/票据：逾期红、当天与临近橙；滞留应付：滞留即橙、满 30 天升级红
+const reminderBadge = (item: ReminderItem): { color: string; text: string } => {
+  if (item.category === 'payable_stuck') {
+    return item.days_left >= 30
+      ? { color: 'red', text: `滞留 ${item.days_left} 天` }
+      : { color: 'gold', text: `滞留 ${item.days_left} 天` };
+  }
+  if (item.days_left < 0) return { color: 'red', text: `逾期 ${-item.days_left} 天` };
+  if (item.days_left === 0) return { color: 'gold', text: '今日到期' };
+  return { color: 'gold', text: `剩 ${item.days_left} 天` };
 };
 
 const MiniBarChart: React.FC<{ data: ChartDatum[]; unit?: string }> = ({ data, unit = '' }) => {
@@ -134,21 +173,39 @@ const Dashboard: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [workbench, setWorkbench] = useState<MonthCloseWorkbench | null>(null);
+  const [reminders, setReminders] = useState<ReminderItem[]>([]);
+  const [reminderDays, setReminderDays] = useState(7);
 
   const fetchSummary = useCallback(async (m: string) => {
     setLoading(true);
     try {
-      const [dashboardData, monthCloseData] = await Promise.all([
+      const [dashboardData, monthCloseData, reminderItems, advanceDays] = await Promise.all([
         getDashboardSummary(m),
         getMonthCloseWorkbench(m),
+        getDashboardReminders(),
+        getReminderAdvanceDays(),
       ]);
       setSummary(dashboardData);
       setWorkbench(monthCloseData);
+      setReminders(reminderItems);
+      setReminderDays(advanceDays);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       message.error('获取仪表盘数据失败: ' + msg);
     } finally {
       setLoading(false);
+    }
+  }, []);
+
+  const handleReminderDaysChange = useCallback(async (days: number) => {
+    try {
+      await setReminderAdvanceDays(days);
+      setReminderDays(days);
+      setReminders(await getDashboardReminders());
+      message.success(`账期提醒提前天数已设为 ${days} 天`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      message.error('设置提前天数失败: ' + msg);
     }
   }, []);
 
@@ -395,6 +452,97 @@ const Dashboard: React.FC = () => {
                 center={`${closePercent}%`}
                 data={closeData}
               />
+            </Card>
+          </Col>
+        </Row>
+
+        <Row gutter={[16, 16]} className="mb-16">
+          <Col xs={24}>
+            <Card
+              title={<Space><BellOutlined />账期提醒</Space>}
+              extra={
+                <Space>
+                  <span style={{ color: '#5f6b7a', fontSize: 13 }}>提前天数</span>
+                  <Select
+                    value={reminderDays}
+                    onChange={handleReminderDaysChange}
+                    style={{ width: 88 }}
+                    options={[3, 7, 15, 30].map((d) => ({ value: d, label: `${d} 天` }))}
+                  />
+                </Space>
+              }
+            >
+              {reminders.length === 0 ? (
+                <div style={{ color: '#5f6b7a', padding: '12px 0' }}>暂无账期提醒</div>
+              ) : (
+                <Row gutter={[16, 16]}>
+                  {reminderGroups.map((group) => {
+                    const items = reminders.filter((r) => r.category === group.category);
+                    return (
+                      <Col xs={24} md={8} key={group.category}>
+                        <div style={{ fontWeight: 600, marginBottom: 10 }}>
+                          {group.label}
+                          <Tag
+                            color={items.length > 0 ? 'orange' : 'green'}
+                            style={{ marginLeft: 8 }}
+                          >
+                            {items.length} 项
+                          </Tag>
+                        </div>
+                        {items.length === 0 ? (
+                          <div style={{ color: '#8c98a8', fontSize: 13 }}>无到期或滞留项</div>
+                        ) : (
+                          <div style={{ display: 'grid', gap: 8 }}>
+                            {items.map((item) => {
+                              const badge = reminderBadge(item);
+                              return (
+                                <div
+                                  key={`${item.category}-${item.ref_id}`}
+                                  onClick={() => navigate(reminderRoute[item.category])}
+                                  style={{
+                                    display: 'grid',
+                                    gridTemplateColumns: '104px 1fr 96px',
+                                    alignItems: 'center',
+                                    gap: 8,
+                                    cursor: 'pointer',
+                                    padding: '6px 8px',
+                                    borderRadius: 6,
+                                    background: '#f7f9fc',
+                                  }}
+                                >
+                                  <Tag color={badge.color} style={{ margin: 0 }}>
+                                    {badge.text}
+                                  </Tag>
+                                  <span
+                                    style={{
+                                      overflow: 'hidden',
+                                      textOverflow: 'ellipsis',
+                                      whiteSpace: 'nowrap',
+                                      color: '#1f2a37',
+                                    }}
+                                    title={`${item.title}（${item.due_date}）`}
+                                  >
+                                    {item.title}
+                                  </span>
+                                  <span
+                                    style={{
+                                      textAlign: 'right',
+                                      fontVariantNumeric: 'tabular-nums',
+                                      color: '#5f6b7a',
+                                    }}
+                                  >
+                                    <SensitiveText type="amount" value={item.amount ?? 0} />
+                                  </span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </Col>
+                    );
+                  })}
+                </Row>
+              )}
             </Card>
           </Col>
         </Row>

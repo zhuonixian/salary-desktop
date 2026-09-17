@@ -229,6 +229,25 @@ export interface DashboardSummary {
   fund_total_balance: number;
 }
 
+// ==================== 账期提醒（第八阶段 Task 4）====================
+
+export type ReminderCategory = 'advance_due' | 'instrument_due' | 'payable_stuck';
+
+export interface ReminderItem {
+  /** 类别：借款到期 / 票据到期 / 滞留应付 */
+  category: ReminderCategory;
+  /** 展示标题 */
+  title: string;
+  /** 借款/票据为到期日，滞留应付为审批开始日（YYYY-MM-DD） */
+  due_date: string;
+  /** 借款/票据：距到期天数（当天 0、逾期负）；滞留应付：已滞留天数 */
+  days_left: number;
+  /** 金额：借款未清余额 / 票面金额 / 单据金额 */
+  amount: number | null;
+  /** 关联单据 id */
+  ref_id: number;
+}
+
 // ==================== 操作日志 ====================
 
 export interface OperationLog {

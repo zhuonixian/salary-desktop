@@ -3,6 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use chrono::Utc;
 use rusqlite::Connection;
 use tauri::Manager;
 
@@ -608,6 +609,47 @@ pub fn get_dashboard_summary(
 ) -> Result<DashboardSummary, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     db::get_dashboard_summary(&conn, &month)
+}
+
+// ==================== 账期提醒（spec 5，Task 4）====================
+
+/// 账期提醒三类查询（只读不记日志）：借款到期 / 票据到期 / 滞留应付。
+/// 基准日取本机今天，与月结检查 advance_overdue_stats 口径一致。
+#[tauri::command]
+pub fn get_dashboard_reminders(
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<ReminderItem>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let today = Utc::now().date_naive().format("%Y-%m-%d").to_string();
+    db::get_dashboard_reminders(&conn, &today)
+}
+
+/// 读取提前天数 N（只读不记日志），供提醒卡 Select 回显。
+#[tauri::command]
+pub fn get_reminder_advance_days(
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<i64, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    db::get_reminder_advance_days(&conn)
+}
+
+/// 写入提前天数 N（0..=365），随操作留痕。
+#[tauri::command]
+pub fn set_reminder_advance_days(
+    days: i64,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<(), AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    db::set_reminder_advance_days(&conn, days)?;
+    db::log_operation(
+        &conn,
+        "set_reminder_advance_days",
+        &format!("账期提醒提前天数设为 {days} 天"),
+        &cashier::current_operator_name(&conn, &current),
+        None,
+    )?;
+    Ok(())
 }
 
 #[tauri::command]

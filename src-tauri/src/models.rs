@@ -226,6 +226,35 @@ pub struct DashboardSummary {
     pub fund_total_balance: f64,
 }
 
+// ==================== 账期提醒（spec 5，Task 4）====================
+
+/// 提醒类别：借款到期（fund_documents type=advance status=settled，距 due_date ≤ N 天或已逾期）
+#[allow(dead_code)]
+pub const REMINDER_CATEGORY_ADVANCE_DUE: &str = "advance_due";
+/// 提醒类别：票据到期（negotiable_instruments holding/collecting/issued_outstanding）
+#[allow(dead_code)]
+pub const REMINDER_CATEGORY_INSTRUMENT_DUE: &str = "instrument_due";
+/// 提醒类别：滞留应付（已审批未付款报销单 + 已审批未结算 payment 类资金单，滞留 ≥ N 天）
+#[allow(dead_code)]
+pub const REMINDER_CATEGORY_PAYABLE_STUCK: &str = "payable_stuck";
+
+/// 账期提醒条目（仪表盘提醒卡，只读查询 `get_dashboard_reminders` 返回）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReminderItem {
+    /// 类别：advance_due / instrument_due / payable_stuck
+    pub category: String,
+    /// 展示标题（借款人+单号 / 票据类型+票号 / 单据号+摘要）
+    pub title: String,
+    /// 关键日期：借款/票据为到期日，滞留应付为审批开始日（YYYY-MM-DD）
+    pub due_date: String,
+    /// 借款/票据：距到期天数（当天为 0，逾期为负）；滞留应付：已滞留天数（正数）
+    pub days_left: i64,
+    /// 金额：借款为未清余额，票据为票面金额，滞留应付为单据金额（spec 5）
+    pub amount: Option<f64>,
+    /// 关联单据 id（fund_documents / negotiable_instruments / reimbursement_claims 主键）
+    pub ref_id: i64,
+}
+
 // ==================== Operation Log ====================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

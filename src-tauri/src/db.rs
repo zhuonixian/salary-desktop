@@ -3116,6 +3116,235 @@ pub(crate) fn advance_overdue_stats(conn: &Connection) -> AppResult<(i32, f64)> 
     )?)
 }
 
+// ==================== 账期提醒（spec 5，Task 4）====================
+
+/// 提前天数合法区间（`set_reminder_advance_days` 校验用）：0 表示仅当天与已逾期提醒
+pub const REMINDER_ADVANCE_DAYS_MIN: i64 = 0;
+pub const REMINDER_ADVANCE_DAYS_MAX: i64 = 365;
+
+/// 读取账期提醒提前天数 N（spec 5）：取 `app_settings.reminder_advance_days`，
+/// 未写入或值非法时回落缺省 7（迁移只保证新库有缺省，旧库与手工改坏场景都要兜底）。
+pub fn get_reminder_advance_days(conn: &Connection) -> AppResult<i64> {
+    Ok(get_setting(conn, SETTING_REMINDER_ADVANCE_DAYS)?
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .unwrap_or(DEFAULT_REMINDER_ADVANCE_DAYS))
+}
+
+/// 写入账期提醒提前天数 N：校验 0..=365，`set_setting` 幂等覆盖。
+pub fn set_reminder_advance_days(conn: &Connection, days: i64) -> AppResult<()> {
+    if !(REMINDER_ADVANCE_DAYS_MIN..=REMINDER_ADVANCE_DAYS_MAX).contains(&days) {
+        return Err(AppError::InvalidParam(format!(
+            "提前天数应在 {REMINDER_ADVANCE_DAYS_MIN} 到 {REMINDER_ADVANCE_DAYS_MAX} 之间：{days}"
+        )));
+    }
+    set_setting(conn, SETTING_REMINDER_ADVANCE_DAYS, &days.to_string())
+}
+
+/// 账期提醒（spec 5，Task 4）：借款到期 / 票据到期 / 滞留应付三类，只读。
+///
+/// - 借款到期：fund_documents type=advance status=settled due_date 非空，距到期 ≤ N 天或已逾期；
+///   未清余额 = 借款额 − active 核销合计（与借款台账 get_advance_ledger、
+///   月结检查 advance_overdue_stats 同口径，>0.005 才算未清）；
+/// - 票据到期：negotiable_instruments status ∈ holding/collecting/issued_outstanding，
+///   距 due_date ≤ N 天或已逾期，金额取票面；
+/// - 滞留应付：已审批未付款报销单（status=approved 且 payment_status != paid）+
+///   已审批未结算 payment 类资金单（status ∈ approved/batched），按审批时间算滞留天数 ≥ N。
+///   审批时间优先取审批留痕/审批字段，缺失时回落 updated_at（stage7 前的存量单）。
+///
+/// `today` 为基准日（YYYY-MM-DD），由调用方传入以便测试；`days_left` 对借款/票据为
+/// 距到期天数（当天为 0、逾期为负），对滞留应付为已滞留天数。
+pub fn get_dashboard_reminders(conn: &Connection, today: &str) -> AppResult<Vec<ReminderItem>> {
+    let n = get_reminder_advance_days(conn)?;
+    let today_date = NaiveDate::parse_from_str(today, "%Y-%m-%d")
+        .map_err(|_| AppError::InvalidParam(format!("基准日格式应为 YYYY-MM-DD：{today}")))?;
+    let horizon = today_date + chrono::Duration::days(n);
+    let horizon_str = horizon.format("%Y-%m-%d").to_string();
+    let mut items: Vec<ReminderItem> = Vec::new();
+
+    // 1. 借款到期（未清余额口径与借款台账一致；reversed/void 天然被 status='settled' 排除）
+    let mut stmt = conn.prepare(
+        "SELECT a.id, a.document_no, COALESCE(e.name, a.summary), a.due_date, a.amount,
+                (SELECT COALESCE(SUM(l.allocated_amount), 0) FROM advance_settlement_links l
+                 WHERE l.advance_id = a.id AND l.status = 'active')
+         FROM fund_documents a
+         LEFT JOIN employees e ON e.id = a.employee_id
+         WHERE a.document_type = 'advance' AND a.status = 'settled'
+           AND a.due_date IS NOT NULL AND a.due_date != ''
+           AND a.due_date <= ?1
+           AND a.amount - (SELECT COALESCE(SUM(l.allocated_amount), 0)
+                 FROM advance_settlement_links l
+                 WHERE l.advance_id = a.id AND l.status = 'active') > 0.005
+         ORDER BY a.due_date, a.id",
+    )?;
+    let advance_rows = stmt
+        .query_map(params![horizon_str], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, f64>(4)?,
+                row.get::<_, f64>(5)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+    for (id, document_no, who, due_date, amount, settled) in advance_rows {
+        // 日期异常的脏数据跳过不提醒（与借款台账 parse 失败容进口径一致）
+        let Ok(due) = NaiveDate::parse_from_str(&due_date, "%Y-%m-%d") else {
+            continue;
+        };
+        let outstanding = (amount - settled).max(0.0);
+        items.push(ReminderItem {
+            category: REMINDER_CATEGORY_ADVANCE_DUE.to_string(),
+            title: format!("{who} 借款 {document_no}"),
+            days_left: (due - today_date).num_days(),
+            amount: Some((outstanding * 100.0).round() / 100.0),
+            due_date,
+            ref_id: id,
+        });
+    }
+
+    // 2. 票据到期（到期即临期口径：holding/collecting/issued_outstanding；endorsed_out/
+    //    discounted/collected/paid/void 均已出表或终态，不再提醒）
+    let mut stmt = conn.prepare(
+        "SELECT id, instrument_no, instrument_type, due_date, face_amount
+         FROM negotiable_instruments
+         WHERE status IN ('holding','collecting','issued_outstanding')
+           AND due_date <= ?1
+         ORDER BY due_date, id",
+    )?;
+    let instrument_rows = stmt
+        .query_map(params![horizon_str], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, f64>(4)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+    for (id, instrument_no, instrument_type, due_date, face_amount) in instrument_rows {
+        let Ok(due) = NaiveDate::parse_from_str(&due_date, "%Y-%m-%d") else {
+            continue;
+        };
+        items.push(ReminderItem {
+            category: REMINDER_CATEGORY_INSTRUMENT_DUE.to_string(),
+            title: format!(
+                "{} {instrument_no}",
+                crate::notes::instrument_type_label(&instrument_type)
+            ),
+            days_left: (due - today_date).num_days(),
+            amount: Some(face_amount),
+            due_date,
+            ref_id: id,
+        });
+    }
+
+    // 3. 滞留应付：报销单（已审批未付款）+ payment 类资金单（已审批未结算）
+    //    审批时间：报销单取 approval_events 里最近一次 approve 留痕，资金单取 approved_at；
+    //    均缺失时回落 updated_at（stage7 前存量单无审批留痕）。
+    let mut stmt = conn.prepare(
+        "SELECT c.id, c.claim_no, c.title, c.total_amount, c.updated_at,
+                (SELECT MAX(e.created_at) FROM approval_events e
+                 WHERE e.entity_type = 'reimbursement_claim' AND e.entity_id = c.id
+                   AND e.action = 'approve')
+         FROM reimbursement_claims c
+         WHERE c.status = 'approved' AND c.payment_status != 'paid'",
+    )?;
+    let claim_rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, f64>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+    for (id, claim_no, title, total_amount, updated_at, approved_at) in claim_rows {
+        let approved = approved_at.unwrap_or(updated_at);
+        push_stuck_item(
+            &mut items,
+            today_date,
+            n,
+            REMINDER_CATEGORY_PAYABLE_STUCK,
+            id,
+            format!("报销单 {claim_no} {title}"),
+            total_amount,
+            &approved,
+        );
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT d.id, d.document_no, d.summary, d.amount, COALESCE(d.approved_at, d.updated_at)
+         FROM fund_documents d
+         WHERE d.document_type = 'payment' AND d.status IN ('approved', 'batched')",
+    )?;
+    let payment_rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, f64>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+    for (id, document_no, summary, amount, approved_at) in payment_rows {
+        push_stuck_item(
+            &mut items,
+            today_date,
+            n,
+            REMINDER_CATEGORY_PAYABLE_STUCK,
+            id,
+            format!("付款单 {document_no} {summary}"),
+            amount,
+            &approved_at,
+        );
+    }
+
+    Ok(items)
+}
+
+/// 组装滞留应付提醒：审批时间取前 10 位日期，滞留天数 ≥ N 才提醒（spec 5）。
+#[allow(clippy::too_many_arguments)]
+fn push_stuck_item(
+    items: &mut Vec<ReminderItem>,
+    today: NaiveDate,
+    n: i64,
+    category: &str,
+    ref_id: i64,
+    title: String,
+    amount: f64,
+    approved_at: &str,
+) {
+    let Ok(approved_date) =
+        NaiveDate::parse_from_str(approved_at.get(..10).unwrap_or(""), "%Y-%m-%d")
+    else {
+        return;
+    };
+    let stuck_days = (today - approved_date).num_days();
+    if stuck_days < n {
+        return;
+    }
+    items.push(ReminderItem {
+        category: category.to_string(),
+        title,
+        due_date: approved_date.format("%Y-%m-%d").to_string(),
+        days_left: stuck_days,
+        amount: Some(amount),
+        ref_id,
+    });
+}
+
 pub fn get_month_close_workbench(conn: &Connection, month: &str) -> AppResult<MonthCloseWorkbench> {
     let active_employee_count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM employees WHERE status = 'active'",
@@ -12439,5 +12668,472 @@ mod stage7_tests {
             .unwrap();
         assert_eq!(denoms, 0, "删除盘点单应级联删除面额明细");
         assert_eq!(stage7_fk_violation_count(&conn), 0);
+    }
+
+    // ==================== Task 4：账期提醒（spec 5） ====================
+
+    /// 直插一张资金单（含到期日/审批时间可选），返回单据 id
+    fn t4_seed_doc(
+        conn: &Connection,
+        doc_no: &str,
+        doc_type: &str,
+        status: &str,
+        amount: f64,
+        due_date: Option<&str>,
+        employee_id: Option<i64>,
+        approved_at: Option<&str>,
+        updated_at: &str,
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO fund_documents
+                (document_no, document_type, belong_month, document_date, amount, summary,
+                 status, due_date, employee_id, approved_at, created_at, updated_at)
+             VALUES (?1, ?2, '2026-09', '2026-09-05', ?3, '测试单据', ?4, ?5, ?6, ?7,
+                     '2026-09-05', ?8)",
+            params![
+                doc_no,
+                doc_type,
+                amount,
+                status,
+                due_date,
+                employee_id,
+                approved_at,
+                updated_at
+            ],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    /// 直插一条 active 借款核销链（settlement_id 需真实存在的资金单），返回核销额
+    fn t4_seed_link(conn: &Connection, advance_id: i64, settlement_id: i64, allocated: f64) {
+        conn.execute(
+            "INSERT INTO advance_settlement_links
+                (advance_id, settlement_id, allocated_amount, status, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'active', '2026-09-10', '2026-09-10')",
+            params![advance_id, settlement_id, allocated],
+        )
+        .unwrap();
+    }
+
+    /// 直插一张指定状态与到期日的票据，返回 id
+    fn t4_seed_instrument(conn: &Connection, no: &str, status: &str, due_date: &str) -> i64 {
+        conn.execute(
+            "INSERT INTO negotiable_instruments
+                (instrument_type, direction, instrument_no, face_amount, issue_date, due_date,
+                 status, created_at, updated_at)
+             VALUES ('bank_acceptance', 'received', ?1, 80000, '2026-09-01', ?2, ?3,
+                     '2026-09-01', '2026-09-01')",
+            params![no, due_date, status],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    /// 直插一张报销单（可选审批留痕 approve 事件），返回 id
+    fn t4_seed_claim(
+        conn: &Connection,
+        claim_no: &str,
+        status: &str,
+        payment_status: &str,
+        approved_at: Option<&str>,
+        updated_at: &str,
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO reimbursement_claims
+                (claim_no, employee_id, belong_month, title, total_amount, invoice_count,
+                 status, payment_status, created_at, updated_at)
+             VALUES (?1, 1, '2026-09', '测试报销', 600, 1, ?2, ?3, '2026-09-01', ?4)",
+            params![claim_no, status, payment_status, updated_at],
+        )
+        .unwrap();
+        let id = conn.last_insert_rowid();
+        if let Some(at) = approved_at {
+            conn.execute(
+                "INSERT INTO approval_events
+                    (entity_type, entity_id, action, from_status, to_status, operator_id,
+                     comment, created_at)
+                 VALUES ('reimbursement_claim', ?1, 'approve', 'submitted', 'approved',
+                         NULL, NULL, ?2)",
+                params![id, at],
+            )
+            .unwrap();
+        }
+        id
+    }
+
+    /// 中和 setup_financial_db 预置报销单对滞留应付口径的干扰（种单 2 为 approved+unpaid）
+    fn t4_neutralize_seed_claims(conn: &Connection) {
+        conn.execute(
+            "UPDATE reimbursement_claims SET payment_status = 'paid'",
+            [],
+        )
+        .unwrap();
+    }
+
+    fn t4_by_category<'a>(items: &'a [ReminderItem], category: &str) -> Vec<&'a ReminderItem> {
+        items.iter().filter(|i| i.category == category).collect()
+    }
+
+    /// 借款到期边界：due 当天（0）、前 N 天（7）、N+1 天不报、逾期负数；
+    /// 未清余额扣 active 核销（全核销不报、部分核销报差额）；非 settled 状态不报。
+    #[test]
+    fn test_dashboard_reminders_advance_due_boundaries() {
+        let conn = setup_financial_db();
+        let settle_doc = t4_seed_doc(
+            &conn,
+            "HX2026090001",
+            "advance_settlement",
+            "settled",
+            1000.0,
+            None,
+            None,
+            None,
+            "2026-09-10",
+        );
+        let due_today = t4_seed_doc(
+            &conn,
+            "JK2026090001",
+            "advance",
+            "settled",
+            1000.0,
+            Some("2026-09-18"),
+            Some(1),
+            None,
+            "2026-09-05",
+        );
+        let due_at_n = t4_seed_doc(
+            &conn,
+            "JK2026090002",
+            "advance",
+            "settled",
+            2000.0,
+            Some("2026-09-25"),
+            None,
+            None,
+            "2026-09-05",
+        );
+        let due_after_n = t4_seed_doc(
+            &conn,
+            "JK2026090003",
+            "advance",
+            "settled",
+            3000.0,
+            Some("2026-09-26"),
+            None,
+            None,
+            "2026-09-05",
+        );
+        let overdue = t4_seed_doc(
+            &conn,
+            "JK2026090004",
+            "advance",
+            "settled",
+            4000.0,
+            Some("2026-09-10"),
+            Some(2),
+            None,
+            "2026-09-05",
+        );
+        let fully_settled = t4_seed_doc(
+            &conn,
+            "JK2026090005",
+            "advance",
+            "settled",
+            1000.0,
+            Some("2026-09-25"),
+            None,
+            None,
+            "2026-09-05",
+        );
+        t4_seed_link(&conn, fully_settled, settle_doc, 1000.0);
+        let partially_settled = t4_seed_doc(
+            &conn,
+            "JK2026090006",
+            "advance",
+            "settled",
+            1000.0,
+            Some("2026-09-25"),
+            None,
+            None,
+            "2026-09-05",
+        );
+        t4_seed_link(&conn, partially_settled, settle_doc, 400.0);
+        // 已审批未放款（非 settled）与已作废：均不提醒
+        t4_seed_doc(
+            &conn,
+            "JK2026090007",
+            "advance",
+            "approved",
+            500.0,
+            Some("2026-09-25"),
+            None,
+            None,
+            "2026-09-05",
+        );
+        t4_seed_doc(
+            &conn,
+            "JK2026090008",
+            "advance",
+            "void",
+            500.0,
+            Some("2026-09-25"),
+            None,
+            None,
+            "2026-09-05",
+        );
+
+        let items = get_dashboard_reminders(&conn, "2026-09-18").unwrap();
+        let advances = t4_by_category(&items, REMINDER_CATEGORY_ADVANCE_DUE);
+        assert_eq!(advances.len(), 4, "应报 4 笔：当天/前7天/逾期/部分核销");
+        assert_eq!(advances[0].ref_id, overdue, "按到期日升序，逾期最早");
+        assert_eq!(advances[0].days_left, -8, "逾期为负数");
+        assert_eq!(advances[0].title, "李四 借款 JK2026090004");
+        assert_eq!(advances[1].ref_id, due_today);
+        assert_eq!(advances[1].days_left, 0, "到期当天 days_left 为 0");
+        assert!((advances[1].amount.unwrap() - 1000.0).abs() < 0.005);
+        assert_eq!(advances[2].ref_id, due_at_n);
+        assert_eq!(advances[2].days_left, 7, "恰好提前 N 天应报");
+        assert_eq!(advances[3].ref_id, partially_settled);
+        assert!(
+            (advances[3].amount.unwrap() - 600.0).abs() < 0.005,
+            "未清余额 = 借款额 − active 核销合计"
+        );
+        assert!(advances.iter().all(|i| i.ref_id != due_after_n));
+        assert!(advances.iter().all(|i| i.ref_id != fully_settled));
+    }
+
+    /// 票据状态过滤：仅 holding/collecting/issued_outstanding 报；
+    /// endorsed_out/discounted/collected/paid/void 不报；逾期为负数。
+    #[test]
+    fn test_dashboard_reminders_instrument_status_filter() {
+        let conn = setup_financial_db();
+        let holding = t4_seed_instrument(&conn, "YZ2026001", "holding", "2026-09-23");
+        let collecting = t4_seed_instrument(&conn, "YZ2026002", "collecting", "2026-09-18");
+        let issued = t4_seed_instrument(&conn, "ZP2026001", "issued_outstanding", "2026-09-15");
+        t4_seed_instrument(&conn, "YZ2026003", "endorsed_out", "2026-09-23");
+        t4_seed_instrument(&conn, "YZ2026004", "discounted", "2026-09-23");
+        t4_seed_instrument(&conn, "YZ2026005", "collected", "2026-09-23");
+        t4_seed_instrument(&conn, "ZP2026002", "paid", "2026-09-23");
+        t4_seed_instrument(&conn, "ZP2026003", "void", "2026-09-23");
+        t4_seed_instrument(&conn, "YZ2026006", "holding", "2026-09-26");
+
+        let items = get_dashboard_reminders(&conn, "2026-09-18").unwrap();
+        let instruments = t4_by_category(&items, REMINDER_CATEGORY_INSTRUMENT_DUE);
+        assert_eq!(instruments.len(), 3, "仅持有/托收/开出未兑付三态提醒");
+        assert_eq!(instruments[0].ref_id, issued);
+        assert_eq!(instruments[0].days_left, -3, "已逾期为负数");
+        assert_eq!(instruments[0].title, "银行承兑汇票 ZP2026001");
+        assert!(
+            (instruments[0].amount.unwrap() - 80000.0).abs() < 0.005,
+            "金额取票面"
+        );
+        assert_eq!(instruments[1].ref_id, collecting);
+        assert_eq!(instruments[1].days_left, 0, "到期当天提醒");
+        assert_eq!(instruments[2].ref_id, holding);
+        assert_eq!(instruments[2].days_left, 5, "恰好提前 N 天内应报");
+    }
+
+    /// 滞留应付：报销单已审批未付款 + payment 类资金单已审批未结算，
+    /// 按审批时间算滞留天数 ≥ N；无审批留痕回落 updated_at；已付款/已结算不报。
+    #[test]
+    fn test_dashboard_reminders_payable_stuck() {
+        let conn = setup_financial_db();
+        t4_neutralize_seed_claims(&conn);
+        let stuck_claim = t4_seed_claim(
+            &conn,
+            "BX202609001",
+            "approved",
+            "unpaid",
+            Some("2026-09-08T10:00:00+00:00"),
+            "2026-09-08",
+        );
+        t4_seed_claim(
+            &conn,
+            "BX202609002",
+            "approved",
+            "unpaid",
+            Some("2026-09-13T10:00:00+00:00"),
+            "2026-09-13",
+        );
+        t4_seed_claim(
+            &conn,
+            "BX202609003",
+            "approved",
+            "paid",
+            Some("2026-09-01T10:00:00+00:00"),
+            "2026-09-01",
+        );
+        t4_seed_claim(
+            &conn,
+            "BX202609004",
+            "submitted",
+            "unpaid",
+            None,
+            "2026-09-01",
+        );
+        // 无审批留痕的存量单：回落 updated_at（滞留 17 天）
+        let legacy_claim = t4_seed_claim(
+            &conn,
+            "BX202609005",
+            "approved",
+            "unpaid",
+            None,
+            "2026-09-01",
+        );
+        let payment_doc = t4_seed_doc(
+            &conn,
+            "FK2026090001",
+            "payment",
+            "approved",
+            900.0,
+            None,
+            None,
+            Some("2026-09-10T03:00:00+00:00"),
+            "2026-09-10",
+        );
+        let batched_doc = t4_seed_doc(
+            &conn,
+            "FK2026090002",
+            "payment",
+            "batched",
+            900.0,
+            None,
+            None,
+            Some("2026-09-09T03:00:00+00:00"),
+            "2026-09-09",
+        );
+        t4_seed_doc(
+            &conn,
+            "FK2026090003",
+            "payment",
+            "settled",
+            900.0,
+            None,
+            None,
+            Some("2026-09-01T03:00:00+00:00"),
+            "2026-09-01",
+        );
+        t4_seed_doc(
+            &conn,
+            "FK2026090004",
+            "payment",
+            "draft",
+            900.0,
+            None,
+            None,
+            None,
+            "2026-08-25",
+        );
+        // approved_at 缺失的存量付款单：回落 updated_at（滞留 24 天）
+        let legacy_payment = t4_seed_doc(
+            &conn,
+            "FK2026090005",
+            "payment",
+            "approved",
+            900.0,
+            None,
+            None,
+            None,
+            "2026-08-25",
+        );
+
+        let items = get_dashboard_reminders(&conn, "2026-09-18").unwrap();
+        let mut stuck = t4_by_category(&items, REMINDER_CATEGORY_PAYABLE_STUCK);
+        stuck.sort_by(|a, b| b.days_left.cmp(&a.days_left));
+        assert_eq!(
+            stuck.len(),
+            5,
+            "应报 5 条：滞留报销 2 + 滞留付款 3（含 batched）"
+        );
+        assert_eq!(stuck[0].ref_id, legacy_payment);
+        assert_eq!(stuck[0].days_left, 24, "updated_at 回落口径");
+        assert_eq!(stuck[1].ref_id, legacy_claim);
+        assert_eq!(stuck[1].days_left, 17);
+        assert_eq!(stuck[2].ref_id, stuck_claim);
+        assert_eq!(stuck[2].days_left, 10, "按审批留痕时间算滞留天数");
+        assert_eq!(
+            stuck[2].due_date, "2026-09-08",
+            "滞留应付关键日期为审批开始日"
+        );
+        assert!(
+            (stuck[2].amount.unwrap() - 600.0).abs() < 0.005,
+            "金额取单据金额"
+        );
+        assert_eq!(
+            stuck[3].ref_id, batched_doc,
+            "已审批进批次未结算仍在滞留口径内"
+        );
+        assert_eq!(stuck[3].days_left, 9);
+        assert_eq!(stuck[4].ref_id, payment_doc);
+        assert_eq!(stuck[4].days_left, 8, "恰好滞留 N=7 天以上才报，8 天应报");
+    }
+
+    /// 提前天数 N：缺省 7、非法值回落 7、set 持久化生效并即时改变提醒边界、越界被拒。
+    #[test]
+    fn test_reminder_advance_days_setting_and_boundary() {
+        let conn = setup_financial_db();
+        assert_eq!(
+            get_reminder_advance_days(&conn).unwrap(),
+            DEFAULT_REMINDER_ADVANCE_DAYS,
+            "缺省应为 7"
+        );
+        // 非法存量值回落缺省，不报错
+        set_setting(&conn, SETTING_REMINDER_ADVANCE_DAYS, "abc").unwrap();
+        assert_eq!(get_reminder_advance_days(&conn).unwrap(), 7);
+
+        let due_in_8 = t4_seed_doc(
+            &conn,
+            "JK2026090009",
+            "advance",
+            "settled",
+            100.0,
+            Some("2026-09-26"),
+            None,
+            None,
+            "2026-09-05",
+        );
+        // N=7：+8 天不报
+        let items = get_dashboard_reminders(&conn, "2026-09-18").unwrap();
+        assert!(t4_by_category(&items, REMINDER_CATEGORY_ADVANCE_DUE)
+            .iter()
+            .all(|i| i.ref_id != due_in_8));
+
+        // set 15：持久化并即时生效（+8 天落入窗口）
+        set_reminder_advance_days(&conn, 15).unwrap();
+        assert_eq!(
+            get_setting(&conn, SETTING_REMINDER_ADVANCE_DAYS)
+                .unwrap()
+                .as_deref(),
+            Some("15")
+        );
+        assert_eq!(get_reminder_advance_days(&conn).unwrap(), 15);
+        let items = get_dashboard_reminders(&conn, "2026-09-18").unwrap();
+        assert!(t4_by_category(&items, REMINDER_CATEGORY_ADVANCE_DUE)
+            .iter()
+            .any(|i| i.ref_id == due_in_8));
+
+        // set 3：窗口收窄，+8 天又不报；滞留应付随 N 抬高阈值（3 天前审批才报）
+        set_reminder_advance_days(&conn, 3).unwrap();
+        let items = get_dashboard_reminders(&conn, "2026-09-18").unwrap();
+        assert!(t4_by_category(&items, REMINDER_CATEGORY_ADVANCE_DUE)
+            .iter()
+            .all(|i| i.ref_id != due_in_8));
+
+        // 越界拒绝且不落库
+        for bad in [-1i64, 366] {
+            assert!(
+                set_reminder_advance_days(&conn, bad).is_err(),
+                "{bad} 应越界被拒"
+            );
+        }
+        assert_eq!(
+            get_reminder_advance_days(&conn).unwrap(),
+            3,
+            "被拒值不得覆盖既有配置"
+        );
+
+        // 基准日格式错误显式报错
+        assert!(get_dashboard_reminders(&conn, "2026/09/18").is_err());
     }
 }
