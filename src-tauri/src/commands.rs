@@ -1404,6 +1404,38 @@ pub fn export_fund_journal(
     Ok(path)
 }
 
+// ==================== Task 7：资金日报（第八阶段 spec 7） ====================
+
+/// 资金日报（只读，不落操作日志）：账户汇总勾稽 + 当日明细 + 近 7 日趋势，
+/// 数据源 voucher_lines 资金分录，与资金日记账同源同口径
+#[tauri::command]
+pub fn get_fund_daily_report(
+    date: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<FundDailyReport, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    cashier::get_fund_daily_report(&conn, &date)
+}
+
+/// 导出资金日报 Excel（两 sheet：账户汇总 + 当日明细；敏感导出，记操作日志）
+#[tauri::command]
+pub fn export_fund_daily_report(
+    date: String,
+    path: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<String, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    excel::export_fund_daily_report(&conn, &date, &path)?;
+    db::log_operation(
+        &conn,
+        "export_fund_daily_report",
+        &format!("导出{date}资金日报到{path}"),
+        "system",
+        None,
+    )?;
+    Ok(path)
+}
+
 // ==================== Task 14：员工借款备用金与核销（spec 4.11） ====================
 
 /// 借款台账：按借款单聚合未核销余额、逾期天数与账龄（0-30/31-60/61-90/90+）

@@ -15,9 +15,10 @@ import {
   message,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { DownloadOutlined, ReloadOutlined } from '@ant-design/icons';
+import { CalendarOutlined, DownloadOutlined, ReloadOutlined } from '@ant-design/icons';
+import dayjs, { type Dayjs } from 'dayjs';
 import { save } from '@tauri-apps/plugin-dialog';
-import { exportFundJournal, getFundAccounts, getFundJournal } from '@/api';
+import { exportFundDailyReport, exportFundJournal, getFundAccounts, getFundJournal } from '@/api';
 import SensitiveText from '@/components/SensitiveText';
 import SensitiveStatistic from '@/components/SensitiveStatistic';
 import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
@@ -55,6 +56,8 @@ const FundJournals: React.FC = () => {
   const [journal, setJournal] = useState<FundJournal | null>(null);
   const [loading, setLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [reportDate, setReportDate] = useState<Dayjs>(dayjs());
+  const [exportingReport, setExportingReport] = useState(false);
 
   useEffect(() => {
     getFundAccounts({ is_active: true })
@@ -117,6 +120,25 @@ const FundJournals: React.FC = () => {
       message.error('导出失败: ' + (e instanceof Error ? e.message : String(e)));
     } finally {
       setExporting(false);
+    }
+  };
+
+  /** 资金日报导出（spec 7）：选日默认今天；敏感门禁与日记账导出一致 */
+  const handleExportDailyReport = async () => {
+    const dateStr = reportDate.format('YYYY-MM-DD');
+    const target = await save({
+      defaultPath: `资金日报_${dateStr.replace(/-/g, '')}.xlsx`,
+      filters: [{ name: '资金日报', extensions: ['xlsx'] }],
+    });
+    if (!target) return;
+    setExportingReport(true);
+    try {
+      await exportFundDailyReport(dateStr, String(target));
+      message.success('资金日报已导出');
+    } catch (e: unknown) {
+      message.error('导出资金日报失败: ' + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setExportingReport(false);
     }
   };
 
@@ -211,6 +233,25 @@ const FundJournals: React.FC = () => {
           <Button icon={<ReloadOutlined />} loading={loading} onClick={() => void fetchData()}>
             刷新
           </Button>
+          <Space.Compact>
+            <DatePicker
+              value={reportDate}
+              allowClear={false}
+              style={{ width: 130 }}
+              onChange={(d) => d && setReportDate(d)}
+            />
+            <Tooltip title={isSensitiveRevealed ? '导出当日资金日报（账户汇总 + 明细）' : '敏感导出需先在页面中解锁敏感数据'}>
+              <Button
+                type="primary"
+                icon={<CalendarOutlined />}
+                disabled={!isSensitiveRevealed}
+                loading={exportingReport}
+                onClick={() => void handleExportDailyReport()}
+              >
+                导出日报
+              </Button>
+            </Tooltip>
+          </Space.Compact>
           <Tooltip title={isSensitiveRevealed ? '' : '敏感导出需先在页面中解锁敏感数据'}>
             <Button
               type="primary"

@@ -116,6 +116,9 @@ const operationTypeLabels: Record<string, string> = {
   update_count_sheet: '修改现金盘点单',
   confirm_count_sheet: '确认现金盘点单',
   void_count_sheet: '作废现金盘点单',
+  // 第八阶段资金日报命令（与 src-tauri/src/commands.rs 实名一一对应；get 类不落日志，映射仅兜底）
+  get_fund_daily_report: '查询资金日报',
+  export_fund_daily_report: '导出资金日报',
   generate_bank_reconciliation_period: '生成余额调节表',
   confirm_bank_reconciliation_period: '确认余额调节表',
   export_bank_reconciliation_period: '导出余额调节表',

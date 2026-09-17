@@ -4972,6 +4972,141 @@ pub fn get_fund_journal(conn: &Connection, query: &FundJournalQuery) -> AppResul
     })
 }
 
+// ==================== 资金日报（第八阶段 Task 7，spec 7） ====================
+
+/// 日报趋势窗口长度（近 7 日含当日，spec 7）
+const FUND_DAILY_TREND_DAYS: i64 = 7;
+
+/// 单账户截至某日期（含当日）的期末余额：账户期初 + voucher_date <= day 的 active 资金分录净额。
+/// 与资金日记账同源同口径（voucher_lines 借−贷累计），仅把月份滚入改为按日滚入。
+fn fund_account_balance_at_date(conn: &Connection, account_id: i64, day: &str) -> AppResult<f64> {
+    let opening: f64 = conn.query_row(
+        "SELECT opening_balance FROM fund_accounts WHERE id = ?1",
+        params![account_id],
+        |r| r.get(0),
+    )?;
+    let net: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(vl.debit_amount - vl.credit_amount),0)
+         FROM voucher_lines vl
+         JOIN vouchers v ON v.id = vl.voucher_id
+         WHERE v.status = 'active' AND vl.fund_account_id = ?1 AND v.voucher_date <= ?2",
+        params![account_id, day],
+        |r| r.get(0),
+    )?;
+    Ok(opening + net)
+}
+
+/// 资金日报（spec 7）：启用账户的 期初（前一日终了）/当日收入/支出/期末 勾稽行、
+/// 当日收支明细（含凭证号与摘要，按账户分组）与近 7 日（含当日）各账户期末余额趋势。
+/// 数据源 voucher_lines 资金分录按日聚合，与资金日记账同源同口径；只读不落日志。
+pub fn get_fund_daily_report(conn: &Connection, date: &str) -> AppResult<FundDailyReport> {
+    let day = NaiveDate::parse_from_str(date.trim(), "%Y-%m-%d")
+        .map_err(|_| AppError::InvalidParam("日期格式应为 YYYY-MM-DD".into()))?;
+    let day_str = day.format("%Y-%m-%d").to_string();
+    let accounts = get_fund_accounts(
+        conn,
+        &FundAccountQuery {
+            is_active: Some(true),
+            ..Default::default()
+        },
+    )?;
+
+    // ---- 账户汇总：期初（前一日终了）+ 当日收支 = 期末 ----
+    let mut rows = Vec::with_capacity(accounts.len());
+    for account in &accounts {
+        let opening = fund_account_balance_at_date(
+            conn,
+            account.id,
+            &(day - chrono::Duration::days(1))
+                .format("%Y-%m-%d")
+                .to_string(),
+        )?;
+        let (income, expense): (f64, f64) = conn.query_row(
+            "SELECT COALESCE(SUM(vl.debit_amount),0), COALESCE(SUM(vl.credit_amount),0)
+             FROM voucher_lines vl
+             JOIN vouchers v ON v.id = vl.voucher_id
+             WHERE v.status = 'active' AND vl.fund_account_id = ?1 AND v.voucher_date = ?2",
+            params![account.id, day_str],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        rows.push(FundDailyAccountRow {
+            account_id: account.id,
+            account_name: account.name.clone(),
+            account_type: account.account_type.clone(),
+            opening,
+            income,
+            expense,
+            closing: opening + income - expense,
+        });
+    }
+
+    // ---- 当日明细：按账户分组（账户 id 升序），账户内按 日期+凭证号+凭证 id+分录顺序 稳定排序，
+    //      并从账户期初滚动出当日内余额（与日记账同规则） ----
+    let mut entries = Vec::new();
+    for row in &rows {
+        let sql = "SELECT vl.id, v.id, v.voucher_no, v.voucher_date, vl.summary,
+                          vl.debit_amount, vl.credit_amount
+                   FROM voucher_lines vl
+                   JOIN vouchers v ON v.id = vl.voucher_id
+                   WHERE v.status = 'active' AND vl.fund_account_id = ?1 AND v.voucher_date = ?2
+                   ORDER BY v.voucher_date, v.voucher_no, v.id, vl.line_order";
+        let mut stmt = conn.prepare(sql)?;
+        let mapped = stmt.query_map(params![row.account_id, day_str], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, f64>(5)?,
+                r.get::<_, f64>(6)?,
+            ))
+        })?;
+        let mut balance = row.opening;
+        for item in mapped {
+            let (_, voucher_id, voucher_no, voucher_date, summary, debit, credit) = item?;
+            balance += debit - credit;
+            entries.push(FundDailyEntryRow {
+                account_id: row.account_id,
+                account_name: row.account_name.clone(),
+                voucher_id,
+                voucher_no,
+                voucher_date,
+                summary,
+                income_amount: debit,
+                expense_amount: credit,
+                balance,
+            });
+        }
+    }
+
+    // ---- 近 7 日趋势（含当日）：各账户期末余额序列 ----
+    let mut trend = Vec::with_capacity(FUND_DAILY_TREND_DAYS as usize);
+    for offset in (0..FUND_DAILY_TREND_DAYS).rev() {
+        let point_day = (day - chrono::Duration::days(offset))
+            .format("%Y-%m-%d")
+            .to_string();
+        let mut balances = Vec::with_capacity(rows.len());
+        for account in &accounts {
+            balances.push(FundDailyTrendBalance {
+                account_id: account.id,
+                closing: fund_account_balance_at_date(conn, account.id, &point_day)?,
+            });
+        }
+        trend.push(FundDailyTrendPoint {
+            date: point_day,
+            balances,
+        });
+    }
+
+    Ok(FundDailyReport {
+        date: day_str,
+        accounts: rows,
+        entries,
+        trend,
+    })
+}
+
 // ==================== 银行余额调节表（Task 13，spec 4.10） ====================
 
 /// 对账单余额解析优先级：人工录入 > 当月流水余额列推算 > 上期确认结转 > 0（无任何来源）
@@ -9974,6 +10109,306 @@ mod tests {
             period_path.metadata().unwrap().len() > 0,
             "调节表导出文件非空"
         );
+    }
+
+    // ==================== 资金日报（第八阶段 Task 7，spec 7） ====================
+
+    /// 日报双账户环境：acc1 期初 1000、acc2 期初 2000（account_code 升序保证输出顺序）
+    fn daily_report_env() -> (Connection, i64, i64) {
+        let conn = setup_financial_db();
+        let acc1 = save_fund_account(&conn, &bank_input("BANK-D1", "日报户一", "62230001"))
+            .unwrap()
+            .id;
+        let mut input2 = bank_input("BANK-D2", "日报户二", "62230002");
+        input2.opening_balance = Some(2000.0);
+        let acc2 = save_fund_account(&conn, &input2).unwrap().id;
+        (conn, acc1, acc2)
+    }
+
+    /// 多账户勾稽（期初+收−支=期末）、跨月边界（月初期初取上月期末）、空日 opening=closing、
+    /// trend 7 点含当日、void 凭证排除与当日明细按账户分组滚动余额
+    #[test]
+    fn test_fund_daily_report_reconciliation_cross_month_and_trend() {
+        let (conn, acc1, acc2) = daily_report_env();
+        // 7 月末：acc1 收 400 → 7 月期末 1400
+        insert_fund_line(
+            &conn,
+            "JZ-07-001",
+            "2026-07-31",
+            "2026-07",
+            "fund_document",
+            1,
+            acc1,
+            400.0,
+            0.0,
+            "7月末收款",
+            "active",
+        );
+        // 8 月 1 日（月初）：acc1 两笔按凭证号排序，acc2 支出 250；另有一笔 void 应被排除
+        insert_fund_line(
+            &conn,
+            "JZ-08-002",
+            "2026-08-01",
+            "2026-08",
+            "bank_manual",
+            2,
+            acc1,
+            250.0,
+            0.0,
+            "收款慢",
+            "active",
+        );
+        insert_fund_line(
+            &conn,
+            "JZ-08-001",
+            "2026-08-01",
+            "2026-08",
+            "bank_manual",
+            3,
+            acc1,
+            600.0,
+            0.0,
+            "收款快",
+            "active",
+        );
+        insert_fund_line(
+            &conn,
+            "JZ-08-003",
+            "2026-08-01",
+            "2026-08",
+            "bank_manual",
+            4,
+            acc2,
+            0.0,
+            250.0,
+            "付款",
+            "active",
+        );
+        insert_fund_line(
+            &conn,
+            "JZ-08-004",
+            "2026-08-01",
+            "2026-08",
+            "bank_manual",
+            5,
+            acc1,
+            999.0,
+            0.0,
+            "作废凭证",
+            "void",
+        );
+
+        let report = get_fund_daily_report(&conn, "2026-08-01").unwrap();
+        assert_eq!(report.accounts.len(), 2);
+        let a1 = report
+            .accounts
+            .iter()
+            .find(|r| r.account_id == acc1)
+            .unwrap();
+        let a2 = report
+            .accounts
+            .iter()
+            .find(|r| r.account_id == acc2)
+            .unwrap();
+        // 跨月边界：8 月 1 日期初取 7 月期末
+        assert!(
+            (a1.opening - 1400.0).abs() < 0.005,
+            "月初期初应取上月期末：{a1:?}"
+        );
+        assert!(
+            (a1.income - 850.0).abs() < 0.005,
+            "void 凭证不计收入：{a1:?}"
+        );
+        assert!((a1.expense).abs() < 0.005);
+        assert!((a1.closing - 2250.0).abs() < 0.005);
+        assert!((a2.opening - 2000.0).abs() < 0.005);
+        assert!((a2.expense - 250.0).abs() < 0.005);
+        assert!((a2.closing - 1750.0).abs() < 0.005);
+        // 勾稽：期初 + 收入 − 支出 = 期末（多账户逐行断言）
+        for row in &report.accounts {
+            assert!(
+                (row.opening + row.income - row.expense - row.closing).abs() < 0.005,
+                "勾稽失败：{row:?}"
+            );
+        }
+        // 当日明细：按账户分组、账户内按凭证号稳定排序、滚动余额自期初累计；void 不出现
+        assert_eq!(report.entries.len(), 3, "void 凭证不入明细");
+        assert_eq!(report.entries[0].account_id, acc1);
+        assert_eq!(
+            report.entries[0].voucher_no, "JZ-08-001",
+            "账户内按凭证号稳定排序"
+        );
+        assert!((report.entries[0].balance - 2000.0).abs() < 0.005);
+        assert_eq!(report.entries[1].voucher_no, "JZ-08-002");
+        assert!((report.entries[1].balance - 2250.0).abs() < 0.005);
+        assert_eq!(report.entries[2].account_id, acc2);
+        assert_eq!(report.entries[2].voucher_no, "JZ-08-003");
+        assert!((report.entries[2].balance - 1750.0).abs() < 0.005);
+
+        // 8 月 2 日：acc1 支出 100 → 期初=前日期末 2250，期末 2150；acc2 空日 opening=closing
+        insert_fund_line(
+            &conn,
+            "JZ-08-005",
+            "2026-08-02",
+            "2026-08",
+            "bank_manual",
+            6,
+            acc1,
+            0.0,
+            100.0,
+            "付款100",
+            "active",
+        );
+        let day2 = get_fund_daily_report(&conn, "2026-08-02").unwrap();
+        let d1 = day2.accounts.iter().find(|r| r.account_id == acc1).unwrap();
+        let d2 = day2.accounts.iter().find(|r| r.account_id == acc2).unwrap();
+        assert!((d1.opening - 2250.0).abs() < 0.005, "期初应等于前日期末");
+        assert!((d1.closing - 2150.0).abs() < 0.005);
+        assert!((d2.opening - d2.closing).abs() < 0.005, "空日期初=期末");
+        assert_eq!(
+            day2.entries.iter().filter(|e| e.account_id == acc2).count(),
+            0
+        );
+
+        // trend：近 7 日（含当日）共 7 点，余额序列逐日正确
+        assert_eq!(day2.trend.len(), 7);
+        assert_eq!(day2.trend[0].date, "2026-07-27");
+        assert_eq!(day2.trend[6].date, "2026-08-02");
+        let point_at = |i: usize, id: i64| {
+            day2.trend[i]
+                .balances
+                .iter()
+                .find(|b| b.account_id == id)
+                .unwrap()
+                .closing
+        };
+        assert!(
+            (point_at(0, acc1) - 1000.0).abs() < 0.005,
+            "窗口首日尚无业务"
+        );
+        assert!(
+            (point_at(4, acc1) - 1400.0).abs() < 0.005,
+            "2026-07-31 点含当日收支"
+        );
+        assert!((point_at(5, acc1) - 2250.0).abs() < 0.005, "2026-08-01 点");
+        assert!((point_at(5, acc2) - 1750.0).abs() < 0.005);
+        assert!((point_at(6, acc1) - 2150.0).abs() < 0.005);
+        assert!((point_at(6, acc2) - 1750.0).abs() < 0.005);
+
+        // 日期格式非法拒绝
+        assert!(get_fund_daily_report(&conn, "2026/08/02").is_err());
+    }
+
+    /// 空日报：无任何业务时 opening=closing、entries 为空；停用账户不出现在日报
+    #[test]
+    fn test_fund_daily_report_empty_day_and_inactive_account_excluded() {
+        let (conn, acc1, acc2) = daily_report_env();
+        set_active_fund_account(&conn, acc2, false).unwrap();
+        let report = get_fund_daily_report(&conn, "2026-08-15").unwrap();
+        assert_eq!(report.accounts.len(), 1, "停用账户不入日报");
+        assert_eq!(report.accounts[0].account_id, acc1);
+        assert!((report.accounts[0].opening - 1000.0).abs() < 0.005);
+        assert!(
+            (report.accounts[0].opening - report.accounts[0].closing).abs() < 0.005,
+            "无业务日 opening=closing"
+        );
+        assert!(report.entries.is_empty());
+        assert_eq!(report.trend.len(), 7);
+        assert!(report.trend.iter().all(|p| p.balances.len() == 1));
+    }
+
+    /// 导出两 sheet（账户汇总 + 当日明细）：sheet 名、行数与合计断言（calamine 回读）
+    #[test]
+    fn test_fund_daily_report_excel_two_sheets() {
+        use calamine::{open_workbook_auto, Data, Reader};
+        let (conn, acc1, acc2) = daily_report_env();
+        insert_fund_line(
+            &conn,
+            "JZ-07-001",
+            "2026-07-31",
+            "2026-07",
+            "fund_document",
+            1,
+            acc1,
+            400.0,
+            0.0,
+            "7月末收款",
+            "active",
+        );
+        insert_fund_line(
+            &conn,
+            "JZ-08-001",
+            "2026-08-01",
+            "2026-08",
+            "bank_manual",
+            2,
+            acc1,
+            600.0,
+            0.0,
+            "收款",
+            "active",
+        );
+        insert_fund_line(
+            &conn,
+            "JZ-08-002",
+            "2026-08-01",
+            "2026-08",
+            "bank_manual",
+            3,
+            acc2,
+            0.0,
+            250.0,
+            "付款",
+            "active",
+        );
+
+        let path = std::env::temp_dir().join(format!("fund-daily-{}.xlsx", std::process::id()));
+        crate::excel::export_fund_daily_report(&conn, "2026-08-01", path.to_str().unwrap())
+            .unwrap();
+        let mut workbook = open_workbook_auto(path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            workbook.sheet_names(),
+            &["账户汇总".to_string(), "当日明细".to_string()]
+        );
+        let money = |sheet: &calamine::Range<calamine::Data>, r: u32, c: u32| -> f64 {
+            match sheet.get_value((r, c)) {
+                Some(Data::Float(v)) => *v,
+                Some(Data::Int(v)) => *v as f64,
+                other => panic!("应为数字单元格：({r},{c}) = {other:?}"),
+            }
+        };
+
+        // 账户汇总：标题 + 表头 + 2 账户行 + 合计 = 5 行；合计行勾稽（1400+2000 / 600 / 250 / 3750）
+        let summary = workbook.worksheet_range("账户汇总").unwrap();
+        assert_eq!(
+            summary.height(),
+            5,
+            "账户汇总应为 标题+表头+2账户+合计 共 5 行"
+        );
+        assert!((money(&summary, 4, 2) - 3400.0).abs() < 0.005, "合计期初");
+        assert!((money(&summary, 4, 3) - 600.0).abs() < 0.005, "合计收入");
+        assert!((money(&summary, 4, 4) - 250.0).abs() < 0.005, "合计支出");
+        assert!((money(&summary, 4, 5) - 3750.0).abs() < 0.005, "合计期末");
+        for row in [2u32, 3] {
+            let (o, i, e, c) = (
+                money(&summary, row, 2),
+                money(&summary, row, 3),
+                money(&summary, row, 4),
+                money(&summary, row, 5),
+            );
+            assert!((o + i - e - c).abs() < 0.005, "汇总行勾稽失败：row={row}");
+        }
+
+        // 当日明细：标题 + 表头 + 2 明细行 + 合计 = 5 行；收入/支出合计与汇总一致
+        let detail = workbook.worksheet_range("当日明细").unwrap();
+        assert_eq!(
+            detail.height(),
+            5,
+            "当日明细应为 标题+表头+2明细+合计 共 5 行"
+        );
+        assert!((money(&detail, 4, 3) - 600.0).abs() < 0.005, "明细收入合计");
+        assert!((money(&detail, 4, 4) - 250.0).abs() < 0.005, "明细支出合计");
+        let _ = std::fs::remove_file(path);
     }
 
     // ==================== Task 14：员工借款核销（spec 4.7/4.11） ====================

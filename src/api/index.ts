@@ -48,6 +48,7 @@ import type {
   LegacyBankMatchReport,
   FundJournal,
   FundJournalQuery,
+  FundDailyReport,
   BankReconciliationPeriod,
   Budget,
   BudgetInput,
@@ -1931,6 +1932,52 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
         rows: [],
       };
     }
+    // ==================== 资金日报（第八阶段 Task 7，spec 7） ====================
+    case 'get_fund_daily_report': {
+      const date = String(args?.date ?? '').slice(0, 10);
+      const accounts = mockFundAccounts.filter((a) => a.is_active);
+      const reportAccounts = accounts.map((a, i) => {
+        // 演示口径：首账户当日有一笔收 1200，其余账户无业务（opening=closing）
+        const income = i === 0 ? 1200 : 0;
+        return {
+          account_id: a.id,
+          account_name: a.name,
+          account_type: a.account_type,
+          opening: a.opening_balance,
+          income,
+          expense: 0,
+          closing: a.opening_balance + income,
+        };
+      });
+      const dayMovements = reportAccounts.filter((a) => a.income > 0 || a.expense > 0);
+      const entries = dayMovements.map((a, i) => ({
+        account_id: a.account_id,
+        account_name: a.account_name,
+        voucher_id: 9000 + i,
+        voucher_no: `JZ-${date.replace(/-/g, '')}-00${i + 1}`,
+        voucher_date: date,
+        summary: '演示收款',
+        income_amount: a.income,
+        expense_amount: a.expense,
+        balance: a.closing,
+      }));
+      const trend = Array.from({ length: 7 }, (_, k) => {
+        const d = new Date(date);
+        d.setDate(d.getDate() - (6 - k));
+        const pointDate = d.toISOString().slice(0, 10);
+        const isToday = pointDate === date;
+        return {
+          date: pointDate,
+          balances: reportAccounts.map((a) => ({
+            account_id: a.account_id,
+            closing: isToday ? a.closing : a.opening,
+          })),
+        };
+      });
+      return { date, accounts: reportAccounts, entries, trend };
+    }
+    case 'export_fund_daily_report':
+      return String(args?.path ?? '');
     case 'generate_bank_reconciliation_period':
       return {
         id: 0,
@@ -2488,6 +2535,18 @@ export async function getFundJournal(query: FundJournalQuery): Promise<FundJourn
 
 export async function exportFundJournal(query: FundJournalQuery, path: string): Promise<string> {
   return invoke<string>('export_fund_journal', { query, path });
+}
+
+// ==================== 资金日报（第八阶段 Task 7，spec 7） ====================
+
+/** 资金日报（只读）：账户汇总勾稽 + 当日明细 + 近 7 日趋势 */
+export async function getFundDailyReport(date: string): Promise<FundDailyReport> {
+  return invoke<FundDailyReport>('get_fund_daily_report', { date });
+}
+
+/** 导出资金日报 Excel（两 sheet：账户汇总 + 当日明细；敏感导出） */
+export async function exportFundDailyReport(date: string, path: string): Promise<string> {
+  return invoke<string>('export_fund_daily_report', { date, path });
 }
 
 export async function generateBankReconciliationPeriod(

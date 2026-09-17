@@ -5,6 +5,7 @@ use std::path::Path;
 use calamine::{open_workbook_auto, Data, Reader};
 use rust_xlsxwriter::{Format, Workbook};
 
+use crate::cashier::get_fund_daily_report;
 use crate::errors::{AppError, AppResult};
 use crate::models::*;
 
@@ -2137,6 +2138,131 @@ fn journal_reconcile_text(status: &str) -> &str {
         "unallocated" => "未核销",
         _ => status,
     }
+}
+
+/// 资金日报（第八阶段 Task 7，spec 7）：两 sheet（账户汇总 + 当日明细）。
+/// 数据经 `cashier::get_fund_daily_report` 现算（voucher_lines 资金分录，与资金日记账
+/// 同源同口径）；敏感导出门禁与日记账导出一致，由前端解锁后调用（get/export 命令层）。
+pub fn export_fund_daily_report(
+    conn: &rusqlite::Connection,
+    date: &str,
+    path: &str,
+) -> AppResult<()> {
+    let report = get_fund_daily_report(conn, date)?;
+
+    let mut workbook = Workbook::new();
+    let title = Format::new().set_bold().set_font_size(14);
+    let header = Format::new()
+        .set_bold()
+        .set_border(rust_xlsxwriter::FormatBorder::Thin);
+    let cell = Format::new().set_border(rust_xlsxwriter::FormatBorder::Thin);
+    let money = Format::new()
+        .set_border(rust_xlsxwriter::FormatBorder::Thin)
+        .set_num_format("#,##0.00");
+    let account_type_text = |t: &str| match t {
+        "bank" => "银行",
+        "cash" => "现金",
+        _ => "第三方支付",
+    };
+
+    // ---- Sheet 1：账户汇总（期初 + 收入 − 支出 = 期末，含合计行） ----
+    let summary = workbook.add_worksheet();
+    summary.set_name("账户汇总")?;
+    summary.merge_range(
+        0,
+        0,
+        0,
+        5,
+        &format!("资金日报（{}）账户汇总", report.date),
+        &title,
+    )?;
+    let summary_headers = [
+        "账户",
+        "类型",
+        "期初余额",
+        "当日收入",
+        "当日支出",
+        "期末余额",
+    ];
+    for (i, h) in summary_headers.iter().enumerate() {
+        summary.write_with_format(1, i as u16, *h, &header)?;
+    }
+    let mut r: u32 = 2;
+    let (mut total_opening, mut total_income, mut total_expense, mut total_closing) =
+        (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    for row in &report.accounts {
+        summary.write_with_format(r, 0, &row.account_name, &cell)?;
+        summary.write_with_format(r, 1, account_type_text(&row.account_type), &cell)?;
+        summary.write_number_with_format(r, 2, row.opening, &money)?;
+        summary.write_number_with_format(r, 3, row.income, &money)?;
+        summary.write_number_with_format(r, 4, row.expense, &money)?;
+        summary.write_number_with_format(r, 5, row.closing, &money)?;
+        total_opening += row.opening;
+        total_income += row.income;
+        total_expense += row.expense;
+        total_closing += row.closing;
+        r += 1;
+    }
+    summary.write_with_format(r, 0, "合计", &header)?;
+    summary.write_with_format(r, 1, "", &cell)?;
+    summary.write_number_with_format(r, 2, total_opening, &money)?;
+    summary.write_number_with_format(r, 3, total_income, &money)?;
+    summary.write_number_with_format(r, 4, total_expense, &money)?;
+    summary.write_number_with_format(r, 5, total_closing, &money)?;
+    let summary_widths = [18u16, 10, 14, 14, 14, 14];
+    for (col, w) in summary_widths.iter().enumerate() {
+        summary.set_column_width(col as u16, *w)?;
+    }
+
+    // ---- Sheet 2：当日明细（按账户分组，含凭证号与摘要，含合计行） ----
+    let detail = workbook.add_worksheet();
+    detail.set_name("当日明细")?;
+    detail.merge_range(
+        0,
+        0,
+        0,
+        5,
+        &format!("资金日报（{}）当日收支明细", report.date),
+        &title,
+    )?;
+    let detail_headers = ["账户", "凭证号", "摘要", "收入", "支出", "余额"];
+    for (i, h) in detail_headers.iter().enumerate() {
+        detail.write_with_format(1, i as u16, *h, &header)?;
+    }
+    let mut r: u32 = 2;
+    let (mut entry_income, mut entry_expense) = (0.0f64, 0.0f64);
+    for row in &report.entries {
+        detail.write_with_format(r, 0, &row.account_name, &cell)?;
+        detail.write_with_format(r, 1, &row.voucher_no, &cell)?;
+        detail.write_with_format(r, 2, row.summary.as_deref().unwrap_or(""), &cell)?;
+        if row.income_amount > 0.0 {
+            detail.write_number_with_format(r, 3, row.income_amount, &money)?;
+        } else {
+            detail.write_with_format(r, 3, "", &cell)?;
+        }
+        if row.expense_amount > 0.0 {
+            detail.write_number_with_format(r, 4, row.expense_amount, &money)?;
+        } else {
+            detail.write_with_format(r, 4, "", &cell)?;
+        }
+        detail.write_number_with_format(r, 5, row.balance, &money)?;
+        entry_income += row.income_amount;
+        entry_expense += row.expense_amount;
+        r += 1;
+    }
+    detail.write_with_format(r, 0, "合计", &header)?;
+    detail.write_with_format(r, 1, "", &cell)?;
+    detail.write_with_format(r, 2, "", &cell)?;
+    detail.write_number_with_format(r, 3, entry_income, &money)?;
+    detail.write_number_with_format(r, 4, entry_expense, &money)?;
+    detail.write_with_format(r, 5, "", &cell)?;
+    let detail_widths = [18u16, 14, 28, 14, 14, 14];
+    for (col, w) in detail_widths.iter().enumerate() {
+        detail.set_column_width(col as u16, *w)?;
+    }
+
+    workbook.save(path)?;
+    Ok(())
 }
 
 /// 借款备用金台账（Task 14，spec 4.11）：按借款单输出核销进度、未清余额、逾期与账龄。

@@ -690,6 +690,56 @@ export interface FundJournal {
   rows: FundJournalRow[];
 }
 
+// ==================== 资金日报（第八阶段 Task 7，spec 7） ====================
+// 字段与后端 src-tauri/src/models.rs FundDailyReport 系列结构 1:1 对齐；
+// 数据源 voucher_lines 资金分录，与资金日记账同源同口径（期初=前日期末，勾稽恒成立）。
+
+export interface FundDailyAccountRow {
+  account_id: number;
+  account_name: string;
+  /** bank / cash / third_party */
+  account_type: string;
+  /** 前一日终了余额（跨月时取上月期末） */
+  opening: number;
+  income: number;
+  expense: number;
+  /** opening + income − expense，后端保证勾稽 */
+  closing: number;
+}
+
+export interface FundDailyEntryRow {
+  account_id: number;
+  account_name: string;
+  voucher_id: number;
+  voucher_no: string;
+  voucher_date: string;
+  summary?: string;
+  /** 借方发生 = 收入 */
+  income_amount: number;
+  /** 贷方发生 = 支出 */
+  expense_amount: number;
+  /** 该账户当日内滚动余额（期初起累计） */
+  balance: number;
+}
+
+export interface FundDailyTrendBalance {
+  account_id: number;
+  closing: number;
+}
+
+export interface FundDailyTrendPoint {
+  date: string;
+  balances: FundDailyTrendBalance[];
+}
+
+export interface FundDailyReport {
+  date: string;
+  accounts: FundDailyAccountRow[];
+  entries: FundDailyEntryRow[];
+  /** 近 7 日（含当日）各账户期末余额序列 */
+  trend: FundDailyTrendPoint[];
+}
+
 // ==================== 银行余额调节表（Task 13，spec 4.10） ====================
 
 export interface BankReconciliationOutstandingTx {

@@ -308,6 +308,9 @@ pub fn run() {
         commands::update_count_sheet,
         commands::confirm_count_sheet,
         commands::void_count_sheet,
+        // ===== Fund Daily Report（第八阶段 资金日报） =====
+        commands::get_fund_daily_report,
+        commands::export_fund_daily_report,
         // ===== Security（Task 6） =====
         security_commands::is_security_initialized,
         security_commands::setup_security,

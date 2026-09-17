@@ -2091,3 +2091,59 @@ pub struct CashCountCreateInput {
     pub remark: Option<String>,
     pub denominations: Option<Vec<CashCountDenominationInput>>,
 }
+
+// ==================== 第八阶段 Task 7：资金日报（spec 7） ====================
+
+/// 日报账户行：期初（前一日终了/账户期初）+ 当日收入 + 当日支出 + 期末
+///（期初 + 收入 − 支出 = 期末恒勾稽；数据源 voucher_lines 资金分录，与资金日记账同源）
+#[derive(Debug, Clone, Serialize)]
+pub struct FundDailyAccountRow {
+    pub account_id: i64,
+    pub account_name: String,
+    /// bank / cash / third_party
+    pub account_type: String,
+    pub opening: f64,
+    pub income: f64,
+    pub expense: f64,
+    pub closing: f64,
+}
+
+/// 当日收支明细行（一条带资金辅助核算的 active 凭证分录；按账户分组输出）
+#[derive(Debug, Clone, Serialize)]
+pub struct FundDailyEntryRow {
+    pub account_id: i64,
+    pub account_name: String,
+    pub voucher_id: i64,
+    pub voucher_no: String,
+    pub voucher_date: String,
+    pub summary: Option<String>,
+    /// 借方发生 = 收入
+    pub income_amount: f64,
+    /// 贷方发生 = 支出
+    pub expense_amount: f64,
+    /// 该账户当日内滚动余额（期初起按 日期+凭证号+分录顺序 累计 借−贷）
+    pub balance: f64,
+}
+
+/// 近 7 日趋势：单账户某日终了余额
+#[derive(Debug, Clone, Serialize)]
+pub struct FundDailyTrendBalance {
+    pub account_id: i64,
+    pub closing: f64,
+}
+
+/// 近 7 日趋势点：某日全部账户的期末余额序列
+#[derive(Debug, Clone, Serialize)]
+pub struct FundDailyTrendPoint {
+    pub date: String,
+    pub balances: Vec<FundDailyTrendBalance>,
+}
+
+/// 资金日报（spec 7）：账户汇总勾稽 + 当日明细 + 近 7 日趋势（含当日）
+#[derive(Debug, Clone, Serialize)]
+pub struct FundDailyReport {
+    pub date: String,
+    pub accounts: Vec<FundDailyAccountRow>,
+    pub entries: Vec<FundDailyEntryRow>,
+    pub trend: Vec<FundDailyTrendPoint>,
+}
