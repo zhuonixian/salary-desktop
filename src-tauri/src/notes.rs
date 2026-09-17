@@ -40,9 +40,9 @@ const ENTITY_TYPE_INSTRUMENT: &str = "negotiable_instrument";
 const GL_NOTE_RECEIVABLE: &str = "1121";
 /// 科目 1122 应收账款（收到类登记缺省对方科目）
 const GL_RECEIVABLE_DEFAULT: &str = "1122";
-/// 科目 2201 应付票据（开出承兑借方；开出支票/背书缺省对方科目，spec 4.1 逐字编码）
+/// 科目 2201 应付票据（开出承兑登记贷方；开出兑付借方销账，spec 4.1 勘误后编码）
 const GL_NOTE_PAYABLE: &str = "2201";
-/// 科目 2202 应付账款（开出承兑登记贷方；开出兑付借方，spec 4.1 逐字编码）
+/// 科目 2202 应付账款（开出承兑登记/开出支票/背书的缺省对方科目，spec 4.1 勘误后编码）
 const GL_PAYABLE_DEFAULT: &str = "2202";
 /// 科目 6603 财务费用（贴现息，票面 − 实收）
 const GL_FINANCE_EXPENSE: &str = "6603";
@@ -61,7 +61,7 @@ pub struct InstrumentEndorseInput {
     pub amount: f64,
     /// 事由（付货款/转让等）
     pub purpose: Option<String>,
-    /// 对方科目编码（缺省 2201 应付账款，可覆盖）
+    /// 对方科目编码（缺省 2202 应付账款，可覆盖）
     pub counter_account_code: Option<String>,
 }
 
@@ -405,9 +405,9 @@ where
 
 /// 登记票据（spec 4.1 四组合，登记即生成凭证，支票登记即终态）：
 /// - 收到承兑 → holding：借 1121 应收票据 / 贷 counter（缺省 1122 应收账款）
-/// - 开出承兑 → issued_outstanding：借 counter（缺省 2201 应付账款）/ 贷 2202 应付票据
+/// - 开出承兑 → issued_outstanding：借 counter（缺省 2202 应付账款）/ 贷 2201 应付票据
 /// - 收到支票 → collected：借入账账户挂接科目（带 fund_account_id）/ 贷 counter（缺省 1122）
-/// - 开出支票 → paid：借 counter（缺省 2201）/ 贷出账账户挂接科目（带 fund_account_id）
+/// - 开出支票 → paid：借 counter（缺省 2202）/ 贷出账账户挂接科目（带 fund_account_id）
 /// 凭证日期 = 出票日、归属月 = 登记月（须未月结）；凭证与票据行同事务落库。
 pub fn register_instrument(
     conn: &mut Connection,
@@ -495,19 +495,19 @@ pub fn register_instrument(
                     ),
                 ],
             ),
-            // 开出承兑：借对方（缺省 2201）/ 贷 2202
+            // 开出承兑：借对方（缺省 2202 应付账款）/ 贷 2201 应付票据
             (INSTRUMENT_DIRECTION_ISSUED, false) => (
                 INSTRUMENT_STATUS_ISSUED_OUTSTANDING,
                 vec![
                     gl_line(
-                        effective_counter(&input.counter_account_code, GL_NOTE_PAYABLE),
+                        effective_counter(&input.counter_account_code, GL_PAYABLE_DEFAULT),
                         input.face_amount,
                         0.0,
                         None,
                         &summary,
                     ),
                     gl_line(
-                        GL_PAYABLE_DEFAULT.into(),
+                        GL_NOTE_PAYABLE.into(),
                         0.0,
                         input.face_amount,
                         None,
@@ -535,7 +535,7 @@ pub fn register_instrument(
                     ],
                 )
             }
-            // 开出支票：登记即付款，借对方（缺省 2201）/ 贷出账账户（资金行带 fund_account_id）
+            // 开出支票：登记即付款，借对方（缺省 2202 应付账款）/ 贷出账账户（资金行带 fund_account_id）
             (INSTRUMENT_DIRECTION_ISSUED, true) => {
                 let account = input.fund_account_id.ok_or_else(|| {
                     AppError::General("开出支票登记即付款，必须选择出账资金账户".into())
@@ -545,7 +545,7 @@ pub fn register_instrument(
                     INSTRUMENT_STATUS_PAID,
                     vec![
                         gl_line(
-                            effective_counter(&input.counter_account_code, GL_NOTE_PAYABLE),
+                            effective_counter(&input.counter_account_code, GL_PAYABLE_DEFAULT),
                             input.face_amount,
                             0.0,
                             None,
@@ -607,7 +607,7 @@ pub fn register_instrument(
 
 // ==================== 收到承兑流转：背书 / 贴现 / 托收 / 到账 ====================
 
-/// 背书转出（holding → endorsed_out）：借 counter（缺省 2201 应付账款）/ 贷 1121 票面。
+/// 背书转出（holding → endorsed_out）：借 counter（缺省 2202 应付账款）/ 贷 1121 票面。
 /// 本期约定全额背书：背书金额校验等于票面（容差 0.005）；背书序号同一票据内递增。
 pub fn endorse_instrument(
     conn: &mut Connection,
@@ -639,7 +639,7 @@ pub fn endorse_instrument(
             let summary = format!("票据背书 {}", inst.instrument_no);
             let lines = vec![
                 gl_line(
-                    effective_counter(&input.counter_account_code, GL_NOTE_PAYABLE),
+                    effective_counter(&input.counter_account_code, GL_PAYABLE_DEFAULT),
                     inst.face_amount,
                     0.0,
                     None,
@@ -705,7 +705,8 @@ pub fn endorse_instrument(
 }
 
 /// 贴现（holding → discounted）：借资金账户实收（带 fund_account_id）
-/// + 借 6603 财务费用（票面 − 实收，差额 0 免腿）/ 贷 1121 票面；实收不得大于票面。
+/// + 借 6603 财务费用（票面 − 实收，差额 0 免腿）/ 贷 1121 票面；
+/// 实收不得大于票面（严格大于即拒，不容差——防负差额免 6603 腿入库借贷不平凭证）。
 pub fn discount_instrument(
     conn: &mut Connection,
     input: &InstrumentDiscountInput,
@@ -726,7 +727,9 @@ pub fn discount_instrument(
             if input.proceeds <= AMOUNT_TOLERANCE {
                 return Err(AppError::InvalidParam("贴现实收金额必须大于 0".into()));
             }
-            if input.proceeds > inst.face_amount + AMOUNT_TOLERANCE {
+            // 实收 > 票面即拒（严格大于，不带容差）：容差放行会因负差额免 6603 腿
+            // 而入库借贷不平（差额 ≤ 容差）的凭证
+            if input.proceeds > inst.face_amount {
                 return Err(AppError::InvalidParam(format!(
                     "贴现实收 {:.2} 不得大于票面 {:.2}",
                     input.proceeds, inst.face_amount
@@ -859,7 +862,7 @@ pub fn confirm_collection(
 
 // ==================== 开出承兑兑付 ====================
 
-/// 开出承兑兑付（issued_outstanding → paid）：借 2202 应付票据 / 贷出账账户（带 fund_account_id）。
+/// 开出承兑兑付（issued_outstanding → paid）：借 2201 应付票据（销账）/ 贷出账账户（带 fund_account_id）。
 pub fn settle_issued_instrument(
     conn: &mut Connection,
     input: &InstrumentSettleInput,
@@ -886,7 +889,7 @@ pub fn settle_issued_instrument(
             let summary = format!("票据兑付 {}", inst.instrument_no);
             let lines = vec![
                 gl_line(
-                    GL_PAYABLE_DEFAULT.into(),
+                    GL_NOTE_PAYABLE.into(),
                     inst.face_amount,
                     0.0,
                     None,
@@ -1373,13 +1376,13 @@ mod tests {
         let inst = register_instrument(&mut env.conn, &input, OPERATOR).unwrap();
         assert_eq!(inst.status, "issued_outstanding");
         let voucher_id = register_voucher_id(&env.conn, inst.id);
-        // counter_account_code 覆盖缺省：借 1221 / 贷 2202
+        // counter_account_code 覆盖缺省：借 1221 / 贷 2201 应付票据
         assert_two_lines(
             &env.conn,
             voucher_id,
             [
                 ("1221", 100_000.0, 0.0, None),
-                ("2202", 0.0, 100_000.0, None),
+                ("2201", 0.0, 100_000.0, None),
             ],
         );
     }
@@ -1413,12 +1416,12 @@ mod tests {
         let inst = register_instrument(&mut env.conn, &input, OPERATOR).unwrap();
         assert_eq!(inst.status, "paid", "开出支票登记即付款终态");
         let voucher_id = register_voucher_id(&env.conn, inst.id);
-        // 借 2201 / 贷 1002（带 fund_account_id）
+        // 借 2202 应付账款（缺省对方）/ 贷 1002（带 fund_account_id）
         assert_two_lines(
             &env.conn,
             voucher_id,
             [
-                ("2201", 100_000.0, 0.0, None),
+                ("2202", 100_000.0, 0.0, None),
                 ("1002", 0.0, 100_000.0, Some(env.bank_account_id)),
             ],
         );
@@ -1521,12 +1524,12 @@ mod tests {
         assert_eq!(result.endorsement.endorse_order, 1);
         assert!((result.endorsement.amount - 100_000.0).abs() < AMOUNT_TOLERANCE);
         assert_eq!(result.endorsement.created_by.as_deref(), Some(OPERATOR));
-        // 借 2201 / 贷 1121，凭证与背书链关联
+        // 借 2202 应付账款（缺省对方）/ 贷 1121，凭证与背书链关联
         assert_two_lines(
             &env.conn,
             result.endorsement.voucher_id,
             [
-                ("2201", 100_000.0, 0.0, None),
+                ("2202", 100_000.0, 0.0, None),
                 ("1121", 0.0, 100_000.0, None),
             ],
         );
@@ -1645,6 +1648,15 @@ mod tests {
         let err = discount_instrument(&mut env.conn, &discount_input(inst.id, 100_001.0), OPERATOR)
             .unwrap_err();
         assert!(err.to_string().contains("不得大于票面"), "{err}");
+        // 容差内超收同样拒绝：实收 > 票面即拒（严格大于，不带容差），
+        // 否则负差额免 6603 腿会入库借贷不平（差额 ≤ 0.005）的凭证
+        let err = discount_instrument(
+            &mut env.conn,
+            &discount_input(inst.id, 100_000.004),
+            OPERATOR,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("不得大于票面"), "{err}");
         // 实收 <= 0
         let err = discount_instrument(&mut env.conn, &discount_input(inst.id, 0.0), OPERATOR)
             .unwrap_err();
@@ -1710,12 +1722,12 @@ mod tests {
             settle_issued_instrument(&mut env.conn, &settle_input(inst.id), OPERATOR).unwrap();
         assert_eq!(paid.status, "paid");
         let voucher_id = flow_voucher_id(&env.conn, inst.id, "settle");
-        // 借 2202 / 贷 1002（带账户）
+        // 借 2201 应付票据（销账）/ 贷 1002（带账户）
         assert_two_lines(
             &env.conn,
             voucher_id,
             [
-                ("2202", 100_000.0, 0.0, None),
+                ("2201", 100_000.0, 0.0, None),
                 ("1002", 0.0, 100_000.0, Some(env.bank_account_id)),
             ],
         );
