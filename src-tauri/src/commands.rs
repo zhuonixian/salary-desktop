@@ -2405,6 +2405,26 @@ pub fn export_annual_tax_summary(
     Ok(path)
 }
 
+// ===== 个税扣缴申报表导出（第八阶段 Task 9，spec 8） =====
+
+#[tauri::command]
+pub fn export_tax_withholding_declaration(
+    month: String,
+    path: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<String, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    excel::export_tax_withholding_declaration(&conn, &month, &path)?;
+    db::log_operation(
+        &conn,
+        "export_tax_withholding_declaration",
+        &format!("导出{month}个税扣缴申报表到{path}"),
+        "system",
+        None,
+    )?;
+    Ok(path)
+}
+
 // ===== 社保公积金台账（第六阶段 Task 6） =====
 
 #[tauri::command]

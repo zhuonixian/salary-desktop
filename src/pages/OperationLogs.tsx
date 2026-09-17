@@ -59,6 +59,7 @@ const operationTypeLabels: Record<string, string> = {
   export_financial_report: '导出财务报表',
   export_trial_balance: '导出科目余额表',
   export_annual_tax_summary: '导出个税年度汇总',
+  export_tax_withholding_declaration: '导出个税扣缴申报表',
   period_close_vouchers: '年末结转凭证',
   save_social_profile: '保存社保台账',
   delete_social_profile: '删除社保台账',

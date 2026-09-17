@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Row, Col, Card, DatePicker, Button, message } from 'antd';
 import {
-  FileExcelOutlined, BankOutlined, FileTextOutlined, CalendarOutlined,
+  FileExcelOutlined, BankOutlined, FileTextOutlined, CalendarOutlined, FileDoneOutlined,
 } from '@ant-design/icons';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import {
@@ -9,6 +9,7 @@ import {
   exportBankPaymentFile,
   exportSalarySlips,
   exportAttendanceSummaryFile,
+  exportTaxWithholdingDeclaration,
 } from '@/api';
 import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
 
@@ -57,6 +58,17 @@ const exportItems: ExportItem[] = [
     icon: <CalendarOutlined />,
     exportFn: exportAttendanceSummaryFile,
     fileName: '考勤汇总表',
+    target: 'file',
+  },
+  {
+    key: 'tax_withholding_declaration',
+    title: '个税扣缴申报表',
+    description: '按电子税务局申报录入页列序导出当月个税扣缴数据，仅已锁定月份可导出。',
+    icon: <FileDoneOutlined />,
+    exportFn: async (month: string, savePath: string) => {
+      await exportTaxWithholdingDeclaration(month, savePath);
+    },
+    fileName: '个税扣缴申报表',
     target: 'file',
   },
 ];

@@ -248,6 +248,8 @@ pub fn run() {
         // ===== 个税年度汇总（第六阶段 Task 10） =====
         commands::get_annual_tax_summary,
         commands::export_annual_tax_summary,
+        // ===== 个税扣缴申报表导出（第八阶段 Task 9，spec 8） =====
+        commands::export_tax_withholding_declaration,
         // ===== 社保公积金台账（第六阶段 Task 6） =====
         commands::get_social_profiles,
         commands::save_social_profile,

@@ -4,7 +4,7 @@ import {
 } from 'antd';
 import {
   CalculatorOutlined, LockOutlined, CheckCircleOutlined, ReloadOutlined, UnlockOutlined,
-  PieChartOutlined, DownloadOutlined, PrinterOutlined,
+  PieChartOutlined, DownloadOutlined, PrinterOutlined, FileDoneOutlined,
 } from '@ant-design/icons';
 import { save } from '@tauri-apps/plugin-dialog';
 import dayjs from 'dayjs';
@@ -13,7 +13,7 @@ import {
   getSalaryResults, calculateSalary, recalculateSingle,
   updateSalaryResult, lockSalary, unlockSalaryResults, reviewSalary,
   getEmployees, getAttendanceRecords, getSalaryRule, getTaxRules,
-  getAnnualTaxSummary, exportAnnualTaxSummary,
+  getAnnualTaxSummary, exportAnnualTaxSummary, exportTaxWithholdingDeclaration,
 } from '@/api';
 import type { AnnualTaxSummaryRow, SalaryResult, SalaryResultUpdate, SalaryStatus } from '@/types';
 import { SensitiveText } from '@/components/SensitiveText';
@@ -44,6 +44,7 @@ const SalaryCalculate: React.FC = () => {
   const [annualRows, setAnnualRows] = useState<AnnualTaxSummaryRow[]>([]);
   const [annualLoading, setAnnualLoading] = useState(false);
   const [annualExporting, setAnnualExporting] = useState(false);
+  const [withholdingExporting, setWithholdingExporting] = useState(false);
   const [payslipOpen, setPayslipOpen] = useState(false);
 
   const { isSensitiveRevealed } = useSecurity();
@@ -80,6 +81,25 @@ const SalaryCalculate: React.FC = () => {
       message.error('导出个税年度汇总失败: ' + (e instanceof Error ? e.message : String(e)));
     } finally {
       setAnnualExporting(false);
+    }
+  };
+
+  // 扣缴申报表（第八阶段 Task 9，spec 8）：仅锁定月份可导出，门禁由后端兜底
+  const handleWithholdingExport = async () => {
+    const path = await save({
+      title: '导出个税扣缴申报表',
+      defaultPath: `个税扣缴申报表_${monthStr}.xlsx`,
+      filters: [{ name: 'Excel', extensions: ['xlsx'] }],
+    });
+    if (!path) return;
+    setWithholdingExporting(true);
+    try {
+      await exportTaxWithholdingDeclaration(monthStr, String(path));
+      message.success('个税扣缴申报表已导出');
+    } catch (e: unknown) {
+      message.error('导出个税扣缴申报表失败: ' + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setWithholdingExporting(false);
     }
   };
 
@@ -431,6 +451,14 @@ const SalaryCalculate: React.FC = () => {
             onClick={() => setAnnualModalOpen(true)}
           >
             个税年度汇总
+          </Button>
+          <Button
+            icon={<FileDoneOutlined />}
+            onClick={handleWithholdingExport}
+            loading={withholdingExporting}
+            disabled={!isLocked}
+          >
+            扣缴申报表
           </Button>
           {isReviewed && !isLocked && (
             <Popconfirm title="锁定后将无法修改，确认锁定?" onConfirm={handleLock} okText="确认锁定" cancelText="取消">

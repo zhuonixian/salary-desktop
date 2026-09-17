@@ -2129,6 +2129,8 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
       return [];
     case 'export_annual_tax_summary':
       return '';
+    case 'export_tax_withholding_declaration':
+      return String(args?.path ?? '');
     case 'create_bank_manual_voucher':
       throw new Error('预览模式不支持生成凭证，请在桌面应用中操作');
     case 'unlock_salary_results':
@@ -3194,6 +3196,13 @@ export async function getAnnualTaxSummary(year: number): Promise<AnnualTaxSummar
 
 export async function exportAnnualTaxSummary(year: number, path: string): Promise<string> {
   return invoke<string>('export_annual_tax_summary', { year, path });
+}
+
+// ==================== 个税扣缴申报表导出（第八阶段 Task 9，spec 8） ====================
+
+/** 导出个税扣缴申报表 Excel（仅锁定月份；三险拆列，比例未配置退合并+尾注） */
+export async function exportTaxWithholdingDeclaration(month: string, path: string): Promise<string> {
+  return invoke<string>('export_tax_withholding_declaration', { month, path });
 }
 
 export async function getSocialProfiles(year: number): Promise<SocialInsuranceProfile[]> {

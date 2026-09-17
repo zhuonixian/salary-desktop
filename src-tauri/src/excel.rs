@@ -3,6 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use calamine::{open_workbook_auto, Data, Reader};
+use rusqlite::params;
 use rust_xlsxwriter::{Format, Workbook};
 
 use crate::cashier::get_fund_daily_report;
@@ -1978,6 +1979,312 @@ pub fn export_annual_tax_summary_excel(
     Ok(())
 }
 
+/// 个税扣缴申报表（spec 8）：仅锁定月份可导出；每员工一行，列序对齐电子税务局申报录入页。
+/// 三险拆列：有社保台账按台账三险个人分摊比例拆 `social_security_personal`，无台账按全局
+/// 规则三险个人比例拆；所用比例之和 ≠ 100%（容差 0.005）时该行退合并展示（养老列=总额、
+/// 医疗/失业列空）并整表尾注。
+pub fn export_tax_withholding_declaration(
+    conn: &rusqlite::Connection,
+    month: &str,
+    path: &str,
+) -> AppResult<()> {
+    const SPLIT_TOLERANCE: f64 = 0.005;
+
+    // ---- 门禁：仅 status='已锁定'（locked=1）月份可导出；无数据拒绝 ----
+    let total: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM salary_monthly_results WHERE salary_month = ?1",
+        params![month],
+        |r| r.get(0),
+    )?;
+    if total == 0 {
+        return Err(AppError::InvalidParam(format!(
+            "{month} 无工资数据，无法导出个税扣缴申报表"
+        )));
+    }
+    let unlocked: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM salary_monthly_results WHERE salary_month = ?1 AND locked = 0",
+        params![month],
+        |r| r.get(0),
+    )?;
+    if unlocked > 0 {
+        return Err(AppError::InvalidParam(format!(
+            "{month} 存在 {unlocked} 条未锁定的工资数据，请先复核并锁定后再导出个税扣缴申报表"
+        )));
+    }
+
+    // ---- 全局配置：起征点（当月规则）与全局三险个人比例（工资规则页，键缺省视为未配置） ----
+    let threshold = crate::db::get_salary_rules(conn)?
+        .into_iter()
+        .find(|r| r.enabled == 1 && r.rule_key == "tax_threshold")
+        .map(|r| r.rule_value)
+        .unwrap_or(5000.0);
+    let global_rates: Option<(f64, f64, f64)> = {
+        let rules = crate::db::get_salary_rules(conn)?;
+        let get = |key: &str| {
+            rules
+                .iter()
+                .find(|r| r.enabled == 1 && r.rule_key == key)
+                .map(|r| r.rule_value)
+        };
+        match (
+            get("pension_personal_rate"),
+            get("medical_personal_rate"),
+            get("unemployment_personal_rate"),
+        ) {
+            (Some(p), Some(m), Some(u)) => Some((p, m, u)),
+            _ => None,
+        }
+    };
+    let tax_rules = crate::db::get_cumulative_tax_rules(conn)?;
+
+    let valid_rates = |rates: (f64, f64, f64)| -> bool {
+        let (p, m, u) = rates;
+        p >= 0.0 && m >= 0.0 && u >= 0.0 && (p + m + u - 1.0).abs() <= SPLIT_TOLERANCE
+    };
+
+    #[derive(Debug)]
+    struct WithholdingRow {
+        employee_no: String,
+        name: String,
+        id_card: String,
+        special_deduction: f64,
+        gross: f64,
+        ss_personal: f64,
+        hf_personal: f64,
+        tax_amount: f64,
+    }
+
+    // ---- 数据行：工资结果联员工表取身份证号/专项附加 ----
+    let mut stmt = conn.prepare(
+        "SELECT r.employee_no, COALESCE(e.name, r.name), COALESCE(e.id_card, ''),
+                COALESCE(e.special_deduction, 0),
+                r.gross_salary, r.social_security_personal, r.housing_fund_personal, r.tax_amount
+         FROM salary_monthly_results r
+         LEFT JOIN employees e ON e.employee_no = r.employee_no
+         WHERE r.salary_month = ?1
+         ORDER BY r.employee_no",
+    )?;
+    let rows = stmt
+        .query_map(params![month], |row| {
+            Ok(WithholdingRow {
+                employee_no: row.get(0)?,
+                name: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                id_card: row.get(2)?,
+                special_deduction: row.get(3)?,
+                gross: row.get(4)?,
+                ss_personal: row.get(5)?,
+                hf_personal: row.get(6)?,
+                tax_amount: row.get(7)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(AppError::from)?;
+
+    let year_str = month.get(0..4).unwrap_or("");
+    let year: i64 = year_str.parse().unwrap_or(0);
+    let year_prefix = format!("{year_str}-%");
+
+    struct WithholdingSplit {
+        pension: f64,
+        medical: Option<f64>,
+        unemployment: Option<f64>,
+    }
+
+    let mut workbook = Workbook::new();
+    let sheet = workbook.add_worksheet();
+    sheet.set_name("扣缴申报表")?;
+    let title = Format::new().set_bold().set_font_size(14);
+    let header = Format::new()
+        .set_bold()
+        .set_border(rust_xlsxwriter::FormatBorder::Thin);
+    let cell = Format::new().set_border(rust_xlsxwriter::FormatBorder::Thin);
+    let money = Format::new()
+        .set_border(rust_xlsxwriter::FormatBorder::Thin)
+        .set_num_format("#,##0.00");
+    let percent = Format::new()
+        .set_border(rust_xlsxwriter::FormatBorder::Thin)
+        .set_num_format("0.00%");
+    let note = Format::new().set_font_color("#8C8C8C").set_font_size(10);
+
+    sheet.merge_range(0, 0, 0, 12, &format!("个税扣缴申报表（{month}）"), &title)?;
+    let headers = [
+        "姓名",
+        "身份证号",
+        "收入额",
+        "基本养老保险",
+        "基本医疗保险",
+        "失业保险",
+        "住房公积金（个人）",
+        "减除费用",
+        "专项附加扣除",
+        "累计应纳税所得额",
+        "当期预扣率",
+        "速算扣除数",
+        "累计已预扣税额",
+    ];
+    for (i, h) in headers.iter().enumerate() {
+        sheet.write_with_format(1, i as u16, *h, &header)?;
+    }
+
+    let mut r: u32 = 2;
+    let (mut sum_gross, mut sum_pension, mut sum_medical, mut sum_unemployment) =
+        (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    let (mut sum_hf, mut sum_prev_tax) = (0.0f64, 0.0f64);
+    let mut fallback_count = 0usize;
+    for row in &rows {
+        // 累计预扣口径与 salary::calculate_cumulative_tax 完全同源：
+        // 累计应纳税所得额 = 累计收入 − 累计三险公积金 − 起征点×月数 − 专项附加×月数
+        let (prev_gross, prev_ss_hf, prev_tax, prev_count): (f64, f64, f64, i64) = conn
+            .query_row(
+                "SELECT COALESCE(SUM(gross_salary),0), COALESCE(SUM(social_security_personal + housing_fund_personal),0),
+                        COALESCE(SUM(tax_amount),0), COUNT(*)
+                 FROM salary_monthly_results
+                 WHERE employee_no = ?1 AND salary_month LIKE ?2 AND salary_month < ?3 AND status != 'void'",
+                params![row.employee_no, year_prefix, month],
+                |x| Ok((x.get(0)?, x.get(1)?, x.get(2)?, x.get(3)?)),
+            )
+            .unwrap_or((0.0, 0.0, 0.0, 0));
+        let months = (prev_count + 1) as f64;
+        let cumulative_taxable = (prev_gross + row.gross)
+            - (prev_ss_hf + row.ss_personal + row.hf_personal)
+            - threshold * months
+            - row.special_deduction * months;
+        let mut rate = 0.0;
+        let mut quick_deduction = 0.0;
+        if cumulative_taxable > 0.0 {
+            for rule in &tax_rules {
+                let max = rule.max_amount.unwrap_or(f64::MAX);
+                if cumulative_taxable > rule.min_amount && cumulative_taxable <= max {
+                    rate = rule.tax_rate;
+                    quick_deduction = rule.quick_deduction;
+                    break;
+                }
+            }
+        }
+
+        // 三险拆列：有台账行只认台账比例，无台账行只认全局比例（不交叉回退）
+        let ledger_rates: Option<(f64, f64, f64)> = conn
+            .query_row(
+                "SELECT pension_personal_rate, medical_personal_rate, unemployment_personal_rate
+                 FROM social_insurance_profiles WHERE employee_no = ?1 AND profile_year = ?2",
+                params![row.employee_no, year],
+                |x| Ok((x.get(0)?, x.get(1)?, x.get(2)?)),
+            )
+            .ok();
+        let rates = match ledger_rates {
+            Some(lr) => {
+                if valid_rates(lr) {
+                    Some(lr)
+                } else {
+                    if row.ss_personal > 0.0 {
+                        fallback_count += 1;
+                    }
+                    None
+                }
+            }
+            None => match global_rates {
+                Some(gr) if valid_rates(gr) => Some(gr),
+                _ => {
+                    if row.ss_personal > 0.0 {
+                        fallback_count += 1;
+                    }
+                    None
+                }
+            },
+        };
+        let split = match rates {
+            Some((p, m, _u)) => {
+                // 逐项四舍五入、失业险吃尾差，保证三列之和精确等于社保个人总额
+                let pension = (row.ss_personal * p * 100.0).round() / 100.0;
+                let medical = (row.ss_personal * m * 100.0).round() / 100.0;
+                let unemployment = ((row.ss_personal - pension - medical) * 100.0).round() / 100.0;
+                WithholdingSplit {
+                    pension,
+                    medical: Some(medical),
+                    unemployment: Some(unemployment),
+                }
+            }
+            None => WithholdingSplit {
+                pension: row.ss_personal,
+                medical: None,
+                unemployment: None,
+            },
+        };
+
+        sheet.write_with_format(r, 0, &row.name, &cell)?;
+        sheet.write_with_format(r, 1, &row.id_card, &cell)?;
+        sheet.write_number_with_format(r, 2, row.gross, &money)?;
+        sheet.write_number_with_format(r, 3, split.pension, &money)?;
+        match split.medical {
+            Some(v) => {
+                sheet.write_number_with_format(r, 4, v, &money)?;
+            }
+            None => {
+                sheet.write_with_format(r, 4, "", &cell)?;
+            }
+        }
+        match split.unemployment {
+            Some(v) => {
+                sheet.write_number_with_format(r, 5, v, &money)?;
+            }
+            None => {
+                sheet.write_with_format(r, 5, "", &cell)?;
+            }
+        }
+        sheet.write_number_with_format(r, 6, row.hf_personal, &money)?;
+        sheet.write_number_with_format(r, 7, threshold, &money)?;
+        sheet.write_number_with_format(r, 8, row.special_deduction, &money)?;
+        sheet.write_number_with_format(r, 9, cumulative_taxable, &money)?;
+        sheet.write_number_with_format(r, 10, rate, &percent)?;
+        sheet.write_number_with_format(r, 11, quick_deduction, &money)?;
+        sheet.write_number_with_format(r, 12, prev_tax, &money)?;
+
+        sum_gross += row.gross;
+        sum_pension += split.pension;
+        sum_medical += split.medical.unwrap_or(0.0);
+        sum_unemployment += split.unemployment.unwrap_or(0.0);
+        sum_hf += row.hf_personal;
+        sum_prev_tax += prev_tax;
+        r += 1;
+    }
+
+    // ---- 表尾合计行：收入额 / 三险 / 公积金 / 累计已预扣 ----
+    sheet.write_with_format(r, 0, "合计", &header)?;
+    sheet.write_with_format(r, 1, "", &cell)?;
+    sheet.write_number_with_format(r, 2, sum_gross, &money)?;
+    sheet.write_number_with_format(r, 3, sum_pension, &money)?;
+    sheet.write_number_with_format(r, 4, sum_medical, &money)?;
+    sheet.write_number_with_format(r, 5, sum_unemployment, &money)?;
+    sheet.write_number_with_format(r, 6, sum_hf, &money)?;
+    for col in [7u16, 8, 9, 10, 11] {
+        sheet.write_with_format(r, col, "", &cell)?;
+    }
+    sheet.write_number_with_format(r, 12, sum_prev_tax, &money)?;
+
+    // ---- 整表尾注：退合并说明 ----
+    if fallback_count > 0 {
+        sheet.merge_range(
+            r + 1,
+            0,
+            r + 1,
+            12,
+            &format!(
+                "注：{fallback_count} 名员工的三险个人比例未配置或比例之和不等于100%（容差0.005），\
+                 其社保个人部分已合并列示于“基本养老保险”列。"
+            ),
+            &note,
+        )?;
+    }
+
+    let widths = [10u16, 22, 12, 14, 14, 12, 16, 10, 12, 16, 10, 12, 14];
+    for (col, w) in widths.iter().enumerate() {
+        sheet.set_column_width(col as u16, *w)?;
+    }
+
+    workbook.save(path)?;
+    Ok(())
+}
+
 /// 科目余额表（试算平衡）：借/贷四栏余额 + 合计行。
 pub fn export_trial_balance_excel(report: &TrialBalanceReport, path: &str) -> AppResult<()> {
     let mut workbook = rust_xlsxwriter::Workbook::new();
@@ -2828,6 +3135,334 @@ mod tests {
         assert_eq!(records[0].belong_month, "2026-08");
         assert_eq!(records[0].summary.as_deref(), Some("工资,代发"));
         assert_eq!(records[0].expense_amount, 7800.0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    // ==================== 个税扣缴申报表导出（Task 9，spec 8） ====================
+
+    fn withholding_env() -> rusqlite::Connection {
+        use crate::db::{create_tables, insert_default_data, seed_gl_accounts};
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        create_tables(&conn).unwrap();
+        seed_gl_accounts(&conn).unwrap();
+        insert_default_data(&conn).unwrap();
+        conn
+    }
+
+    fn withholding_employee(
+        conn: &rusqlite::Connection,
+        no: &str,
+        name: &str,
+        id_card: &str,
+        special: f64,
+    ) {
+        conn.execute(
+            "INSERT INTO employees (employee_no, name, id_card, special_deduction, status, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 'active', '2026-01-01', '2026-01-01')",
+            params![no, name, id_card, special],
+        )
+        .unwrap();
+    }
+
+    fn withholding_result(
+        conn: &rusqlite::Connection,
+        month: &str,
+        no: &str,
+        name: &str,
+        gross: f64,
+        ss: f64,
+        hf: f64,
+        tax: f64,
+        locked: bool,
+    ) {
+        conn.execute(
+            "INSERT INTO salary_monthly_results
+                (salary_month, employee_no, name, gross_salary, social_security_personal,
+                 housing_fund_personal, tax_amount, status, locked, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, '2026-01-01', '2026-01-01')",
+            params![
+                month,
+                no,
+                name,
+                gross,
+                ss,
+                hf,
+                tax,
+                if locked { "locked" } else { "draft" },
+                locked as i64,
+            ],
+        )
+        .unwrap();
+    }
+
+    fn withholding_profile(conn: &rusqlite::Connection, no: &str, rates: (f64, f64, f64)) {
+        conn.execute(
+            "INSERT INTO social_insurance_profiles
+                (employee_no, profile_year, ss_base, hf_base,
+                 pension_personal_rate, medical_personal_rate, unemployment_personal_rate,
+                 created_at, updated_at)
+             VALUES (?1, 2026, 5000, 5000, ?2, ?3, ?4, '2026-01-01', '2026-01-01')",
+            params![no, rates.0, rates.1, rates.2],
+        )
+        .unwrap();
+    }
+
+    fn withholding_global_rates(conn: &rusqlite::Connection, rates: (f64, f64, f64)) {
+        for (key, value) in [
+            ("pension_personal_rate", rates.0),
+            ("medical_personal_rate", rates.1),
+            ("unemployment_personal_rate", rates.2),
+        ] {
+            conn.execute(
+                "INSERT INTO salary_rules (rule_key, rule_name, rule_value, rule_type, enabled)
+                 VALUES (?1, '三险个人比例（导出拆列）', ?2, 'insurance', 1)",
+                params![key, value],
+            )
+            .unwrap();
+        }
+    }
+
+    fn withholding_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "tax-withholding-{}-{name}.xlsx",
+            std::process::id()
+        ))
+    }
+
+    /// 门禁：月份无工资数据拒绝导出
+    #[test]
+    fn test_tax_withholding_gate_empty_month_rejected() {
+        let conn = withholding_env();
+        let path = withholding_path("empty");
+        let err = export_tax_withholding_declaration(&conn, "2026-08", path.to_str().unwrap())
+            .unwrap_err();
+        assert!(err.to_string().contains("无工资数据"), "实际错误：{err}");
+    }
+
+    /// 门禁：存在未锁定（草稿）工资数据的月份拒绝导出
+    #[test]
+    fn test_tax_withholding_gate_draft_month_rejected() {
+        let conn = withholding_env();
+        withholding_employee(&conn, "E001", "张三", "110101199001011234", 1500.0);
+        withholding_result(
+            &conn, "2026-08", "E001", "张三", 10000.0, 1050.0, 1200.0, 80.0, false,
+        );
+        let path = withholding_path("draft");
+        let err = export_tax_withholding_declaration(&conn, "2026-08", path.to_str().unwrap())
+            .unwrap_err();
+        assert!(err.to_string().contains("未锁定"), "实际错误：{err}");
+    }
+
+    /// 台账拆列：三险按台账分摊比例拆 social_security_personal（失业险吃尾差）；
+    /// 税额各列与累计预扣口径勾稽；身份证号取 employees；合计行勾稽；无尾注。
+    #[test]
+    fn test_tax_withholding_ledger_split() {
+        use calamine::{open_workbook_auto, Data, Reader};
+        let conn = withholding_env();
+        withholding_employee(&conn, "E001", "张三", "110101199001011234", 1500.0);
+        // 台账三险个人分摊比例：0.762 + 0.190 + 0.048 = 1.000
+        withholding_profile(&conn, "E001", (0.762, 0.190, 0.048));
+        // 上月已预扣 600（同年度历史月自动作为累计已预扣基数）
+        withholding_result(
+            &conn, "2026-07", "E001", "张三", 9000.0, 900.0, 1000.0, 600.0, true,
+        );
+        withholding_result(
+            &conn, "2026-08", "E001", "张三", 10000.0, 1050.0, 1200.0, 80.0, true,
+        );
+
+        let path = withholding_path("ledger");
+        export_tax_withholding_declaration(&conn, "2026-08", path.to_str().unwrap()).unwrap();
+
+        let mut workbook = open_workbook_auto(path.to_str().unwrap()).unwrap();
+        let sheet = workbook.worksheet_range("扣缴申报表").unwrap();
+        let text = |r: u32, c: u32| -> String {
+            match sheet.get_value((r, c)) {
+                Some(Data::String(s)) => s.to_string(),
+                other => panic!("应为文本单元格：({r},{c}) = {other:?}"),
+            }
+        };
+        let num = |r: u32, c: u32| -> f64 {
+            match sheet.get_value((r, c)) {
+                Some(Data::Float(v)) => *v,
+                Some(Data::Int(v)) => *v as f64,
+                other => panic!("应为数字单元格：({r},{c}) = {other:?}"),
+            }
+        };
+
+        // 标题 + 表头 + 1 数据行 + 合计 = 4 行（无退合并尾注）
+        assert_eq!(sheet.height(), 4, "无退合并时不应有尾注行");
+        assert_eq!(text(2, 0), "张三");
+        assert_eq!(
+            text(2, 1),
+            "110101199001011234",
+            "身份证号应取 employees.id_card"
+        );
+        assert!((num(2, 2) - 10000.0).abs() < 0.005, "收入额=应发合计");
+        assert!((num(2, 3) - 800.1).abs() < 0.005, "养老=1050×0.762");
+        assert!((num(2, 4) - 199.5).abs() < 0.005, "医疗=1050×0.190");
+        assert!(
+            (num(2, 5) - 50.4).abs() < 0.005,
+            "失业=总额-养老-医疗（尾差）"
+        );
+        assert!((num(2, 6) - 1200.0).abs() < 0.005, "公积金个人");
+        assert!(
+            (num(2, 7) - 5000.0).abs() < 0.005,
+            "减除费用=当月规则起征点"
+        );
+        assert!(
+            (num(2, 8) - 1500.0).abs() < 0.005,
+            "专项附加=employees.special_deduction"
+        );
+        // 累计应纳税所得额 = 19000 − 4150 − 5000×2 − 1500×2 = 1850 → 3% 档
+        assert!((num(2, 9) - 1850.0).abs() < 0.005, "累计应纳税所得额");
+        assert!((num(2, 10) - 0.03).abs() < 0.000001, "当期预扣率");
+        assert!((num(2, 11) - 0.0).abs() < 0.005, "速算扣除数");
+        assert!((num(2, 12) - 600.0).abs() < 0.005, "累计已预扣=上月税额");
+
+        // 合计行：收入额 / 三险 / 公积金 / 累计已预扣
+        assert_eq!(text(3, 0), "合计");
+        assert!((num(3, 2) - 10000.0).abs() < 0.005);
+        assert!(
+            (num(3, 3) + num(3, 4) + num(3, 5) - 1050.0).abs() < 0.005,
+            "三险合计=社保个人总额"
+        );
+        assert!((num(3, 6) - 1200.0).abs() < 0.005);
+        assert!((num(3, 12) - 600.0).abs() < 0.005);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 全局比例拆列：无台账员工按 salary_rules 三险个人比例拆
+    #[test]
+    fn test_tax_withholding_global_rates_split() {
+        use calamine::{open_workbook_auto, Data, Reader};
+        let conn = withholding_env();
+        withholding_employee(&conn, "E002", "李四", "", 1000.0);
+        withholding_global_rates(&conn, (0.8, 0.15, 0.05));
+        withholding_result(
+            &conn, "2026-08", "E002", "李四", 8000.0, 200.0, 900.0, 30.0, true,
+        );
+
+        let path = withholding_path("global");
+        export_tax_withholding_declaration(&conn, "2026-08", path.to_str().unwrap()).unwrap();
+
+        let mut workbook = open_workbook_auto(path.to_str().unwrap()).unwrap();
+        let sheet = workbook.worksheet_range("扣缴申报表").unwrap();
+        let num = |r: u32, c: u32| -> f64 {
+            match sheet.get_value((r, c)) {
+                Some(Data::Float(v)) => *v,
+                Some(Data::Int(v)) => *v as f64,
+                other => panic!("应为数字单元格：({r},{c}) = {other:?}"),
+            }
+        };
+        assert_eq!(sheet.height(), 4);
+        assert!((num(2, 3) - 160.0).abs() < 0.005, "养老=200×0.8");
+        assert!((num(2, 4) - 30.0).abs() < 0.005, "医疗=200×0.15");
+        assert!((num(2, 5) - 10.0).abs() < 0.005, "失业=200×0.05（尾差）");
+        // 累计应纳税所得额 = 8000 − 1100 − 5000 − 1000 = 900 → 3% 档
+        assert!((num(2, 9) - 900.0).abs() < 0.005);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 比例之和 ≠ 100%（容差 0.005）→ 退合并展示（养老列=总额、医疗/失业列空）+ 整表尾注
+    #[test]
+    fn test_tax_withholding_ratio_fallback_merged_with_note() {
+        use calamine::{open_workbook_auto, Data, Reader};
+        let conn = withholding_env();
+        // E003 无 employees 行：姓名回落工资结果、身份证号空（LEFT JOIN + COALESCE）
+        withholding_profile(&conn, "E003", (0.5, 0.2, 0.1)); // 和 = 0.8 ≠ 100%
+        withholding_result(
+            &conn, "2026-08", "E003", "王五", 10000.0, 1050.0, 1200.0, 80.0, true,
+        );
+
+        let path = withholding_path("fallback");
+        export_tax_withholding_declaration(&conn, "2026-08", path.to_str().unwrap()).unwrap();
+
+        let mut workbook = open_workbook_auto(path.to_str().unwrap()).unwrap();
+        let sheet = workbook.worksheet_range("扣缴申报表").unwrap();
+        let text = |r: u32, c: u32| -> String {
+            match sheet.get_value((r, c)) {
+                Some(Data::String(s)) => s.to_string(),
+                Some(Data::Empty) | None => String::new(),
+                other => panic!("应为文本单元格：({r},{c}) = {other:?}"),
+            }
+        };
+        let num = |r: u32, c: u32| -> f64 {
+            match sheet.get_value((r, c)) {
+                Some(Data::Float(v)) => *v,
+                Some(Data::Int(v)) => *v as f64,
+                other => panic!("应为数字单元格：({r},{c}) = {other:?}"),
+            }
+        };
+        let blank = |r: u32, c: u32| match sheet.get_value((r, c)) {
+            None | Some(Data::Empty) => {}
+            Some(Data::String(s)) if s.is_empty() => {}
+            other => panic!("应为空单元格：({r},{c}) = {other:?}"),
+        };
+
+        // 标题 + 表头 + 1 数据行 + 合计 + 尾注 = 5 行
+        assert_eq!(sheet.height(), 5, "退合并时应有整表尾注行");
+        assert_eq!(text(2, 0), "王五", "无员工档案时姓名回落工资结果");
+        assert_eq!(text(2, 1), "", "无员工档案时身份证号为空");
+        assert!(
+            (num(2, 3) - 1050.0).abs() < 0.005,
+            "退合并：养老列=社保个人总额"
+        );
+        blank(2, 4);
+        blank(2, 5);
+        let note = text(4, 0);
+        assert!(note.contains("合并"), "尾注应说明退合并：{note}");
+        assert!(note.contains("1"), "尾注应含退合并人数：{note}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 多员工回读：行数=锁定员工数，合计行等于各行之和
+    #[test]
+    fn test_tax_withholding_rows_count_and_totals() {
+        use calamine::{open_workbook_auto, Data, Reader};
+        let conn = withholding_env();
+        withholding_global_rates(&conn, (0.8, 0.15, 0.05));
+        withholding_employee(&conn, "E001", "张三", "110101199001011234", 1500.0);
+        withholding_employee(&conn, "E002", "李四", "110101199002022345", 1000.0);
+        // 上月已预扣（计入累计已预扣列，当月税额不计）
+        withholding_result(
+            &conn, "2026-07", "E001", "张三", 9000.0, 900.0, 1000.0, 40.0, true,
+        );
+        withholding_result(
+            &conn, "2026-07", "E002", "李四", 7500.0, 800.0, 850.0, 15.0, true,
+        );
+        withholding_result(
+            &conn, "2026-08", "E001", "张三", 10000.0, 1050.0, 1200.0, 80.0, true,
+        );
+        withholding_result(
+            &conn, "2026-08", "E002", "李四", 8000.0, 200.0, 900.0, 30.0, true,
+        );
+        // 其他月草稿数据不参与 2026-08 导出
+        withholding_result(&conn, "2026-09", "E001", "张三", 1.0, 0.0, 0.0, 0.0, false);
+
+        let path = withholding_path("totals");
+        export_tax_withholding_declaration(&conn, "2026-08", path.to_str().unwrap()).unwrap();
+
+        let mut workbook = open_workbook_auto(path.to_str().unwrap()).unwrap();
+        let sheet = workbook.worksheet_range("扣缴申报表").unwrap();
+        let num = |r: u32, c: u32| -> f64 {
+            match sheet.get_value((r, c)) {
+                Some(Data::Float(v)) => *v,
+                Some(Data::Int(v)) => *v as f64,
+                other => panic!("应为数字单元格：({r},{c}) = {other:?}"),
+            }
+        };
+        // 标题 + 表头 + 2 数据行 + 合计 = 5 行
+        assert_eq!(sheet.height(), 5, "行数应=锁定员工数（其他月草稿不计）");
+        assert!((num(4, 2) - 18000.0).abs() < 0.005, "收入额合计");
+        assert!(
+            (num(4, 3) + num(4, 4) + num(4, 5) - 1250.0).abs() < 0.005,
+            "三险合计"
+        );
+        assert!((num(4, 6) - 2100.0).abs() < 0.005, "公积金合计");
+        assert!(
+            (num(4, 12) - 55.0).abs() < 0.005,
+            "累计已预扣合计=上月已预扣之和"
+        );
         let _ = std::fs::remove_file(path);
     }
 }

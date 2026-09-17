@@ -1597,6 +1597,35 @@ pub fn migrate_stage8_schema(conn: &Connection) -> AppResult<()> {
             ],
         )?;
 
+        // 个税扣缴申报表三险拆列（spec 8）：台账表补三险个人分摊比例（占社保个人总额的份额，
+        // 三者之和应为 100%，容差 0.005）；缺省 0 = 未配置，导出时退合并展示。幂等加列；
+        // 极旧库（stage6 前最小库无此表）跳过，实际启动流程 create_tables 必先建齐基础表。
+        let has_profile_table: i64 = c.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='social_insurance_profiles'",
+            [],
+            |r| r.get(0),
+        )?;
+        if has_profile_table > 0 {
+            ensure_column(
+                c,
+                "social_insurance_profiles",
+                "pension_personal_rate",
+                "REAL NOT NULL DEFAULT 0",
+            )?;
+            ensure_column(
+                c,
+                "social_insurance_profiles",
+                "medical_personal_rate",
+                "REAL NOT NULL DEFAULT 0",
+            )?;
+            ensure_column(
+                c,
+                "social_insurance_profiles",
+                "unemployment_personal_rate",
+                "REAL NOT NULL DEFAULT 0",
+            )?;
+        }
+
         // 外键一致性校验：存量脏数据（悬空引用）视为升级阻断项，整体回滚
         let fk_errors = count_fk_check_violations(c)?;
         if fk_errors > 0 {
