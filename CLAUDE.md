@@ -25,7 +25,7 @@ npm run lint                             # ESLint
 
 ## 架构摘要
 
-后端模块：`commands.rs`（Tauri 命令入口）→ `db.rs`（schema/CRUD）+ `invoice.rs`（发票业务）+ `ocr.rs`（考勤 OCR）+ `salary.rs`（工资引擎）+ `accounting.rs`（凭证与报表）+ `cashier.rs`（资金出纳：账户/资金单/批次/核销/日记账/调节表/借款）+ `security*.rs`（安全）+ `data_safety.rs`（备份恢复）+ `excel.rs`（导入导出）。前端为 `App.tsx` + 25 个 page。SQLite 单文件 `salary.db` 存于 `app_data_dir`。发票原图归档 `app_data_dir/invoices/{belong_month}/{timestamp}_{filename}`。
+后端模块：`commands.rs`（Tauri 命令入口）→ `db.rs`（schema/CRUD）+ `invoice.rs`（发票业务）+ `ocr.rs`（考勤 OCR）+ `salary.rs`（工资引擎）+ `accounting.rs`（凭证与报表）+ `cashier.rs`（资金出纳：账户/资金单/批次/核销/日记账/调节表/借款）+ `notes.rs`（票据台账：状态机/背书链/贴现/托收/冲正）+ `cash_count.rs`（现金盘点：面额明细/差异凭证）+ `security*.rs`（安全）+ `data_safety.rs`（备份恢复）+ `excel.rs`（导入导出）。前端为 `App.tsx` + 28 个 page。SQLite 单文件 `salary.db` 存于 `app_data_dir`。发票原图归档 `app_data_dir/invoices/{belong_month}/{timestamp}_{filename}`。
 
 ## 关键设计
 
@@ -54,6 +54,7 @@ npm run lint                             # ESLint
 - [第五阶段财务专业功能](.claude/memory/stage5-accounting.md) — 科目表、自动凭证、三大报表、Excel 导出；spec 见 `docs/superpowers/specs/2026-08-15-stage5-accounting-reports-design.md`、plan 见 `docs/superpowers/plans/2026-08-15-stage5-accounting-reports.md`
 - [第六阶段财务功能拓展](.claude/memory/stage6-finance-extensions.md) — 科目余额表、年末结转、社保台账、累计预扣、工资条、同期列；spec 见 `docs/superpowers/specs/2026-08-22-stage6-finance-extensions-design.md`、plan 见 `docs/superpowers/plans/2026-08-22-stage6-finance-extensions.md`
 - [第七阶段出纳运营闭环](.claude/memory/stage7-cashier-operations.md) — 资金账户、通用收付款、审批留痕、多对多银行对账、资金日记账、借款核销；spec 见 `docs/superpowers/specs/2026-08-30-stage7-cashier-operations-design.md`、plan 见 `docs/superpowers/plans/2026-08-30-stage7-cashier-operations.md`
+- [第八阶段票据与申报](.claude/memory/stage8-notes-tax-reports.md) — 票据台账、账期提醒、现金盘点、资金日报、个税扣缴申报表、进项台账；spec 见 `docs/superpowers/specs/2026-09-18-stage8-notes-tax-reports-design.md`、plan 见 `docs/superpowers/plans/2026-09-18-stage8-notes-tax-reports.md`
 
 ## 第三阶段开发
 
@@ -74,6 +75,10 @@ npm run lint                             # ESLint
 ## 第七阶段开发
 
 第七阶段以出纳运营闭环为目标，按 Gate 0 → 7A 基础底座 → 7B 通用收付款与付款 → 7C 资金日记账与多对多银行对账 → 7D 借款/报销治理/月结收尾推进，Task 0-17 已全部交付（0-16 走 SDD review，收尾 Task 17 含导航核对、cash 严格开关隐藏、月结检查 account_type 兜底与文档四件套）。开发前先读 `.claude/memory/stage7-cashier-operations.md`、`docs/superpowers/plans/2026-08-30-stage7-progress.md` 和 spec；旧库迁移、资金金额守恒、状态机、月结保护为阻断项，Windows exe 手工验收仍待做。涉及多模块开发时用 subagent 按互不重叠文件范围协作，由主 agent 统一集成、测试、commit、push。
+
+## 第八阶段开发
+
+第八阶段以票据台账与申报台账为目标，按 8A 票据台账与账期提醒 → 8B 现金盘点与资金日报 → 8C 个税扣缴申报表/进项台账/Minor 12 项/收尾推进，Task 1-12 已全部交付（收尾含导航核对、OperationLogs 映射核对、全量回归与文档四件套）。开发前先读 `.claude/memory/stage8-notes-tax-reports.md`、`docs/superpowers/plans/2026-09-18-stage8-progress.md` 和 spec（4.1 已勘误：2201=应付票据、2202=应付账款）；票据状态机与凭证分录、冲正恢复前置状态、盘点差异凭证、月结双查（登记月+操作月）为阻断项，Windows exe 手工验收（票据全流程+冲正、盘点差异凭证、提醒卡、三导出）挂账待做。涉及多模块开发时用 subagent 按互不重叠文件范围协作，由主 agent 统一集成、测试、commit、push。
 
 ## 编码约定
 

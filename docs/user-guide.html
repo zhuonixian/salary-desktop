@@ -868,7 +868,7 @@
     <div class="section-number">7</div>
     <div>
       <div class="section-title">月结与资金出纳</div>
-      <div class="section-desc">资金账户 + 收付款单 + 付款批次 + 银行对账 + 借款备用金 + 正式月结</div>
+      <div class="section-desc">资金账户 + 收付款单 + 付款批次 + 银行对账 + 借款备用金 + 票据台账 + 现金盘点 + 正式月结</div>
     </div>
   </div>
 
@@ -973,6 +973,76 @@
     <div class="callout callout-warn">
       <strong>⚠️ 月结后不可修改</strong>
       正式月结后，该月的工资 / 考勤 / 发票 / 报销 / 付款都不可修改。如需调整必须先「反月结」（需填写原因，记入操作日志）。
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">🧾</span>票据台账 <span class="badge badge-new">v0.8 新增</span></div>
+    <p><strong>路径</strong>：菜单「资金出纳 → 票据台账」</p>
+    <div class="steps">
+      <div class="step"><strong>登记票据</strong>：分「收到票据」「开出票据」两页签，填票据类型（银行承兑 / 商业承兑 / 支票）、票据号码、票面金额、出票日与到期日、对方科目与往来单位；同类型同号码唯一（作废除外），每张票据登记即生成凭证</div>
+      <div class="step"><strong>持有流转</strong>：收到的承兑汇票可背书转出（全额背书，记被背书人与事由）、贴现（填实收金额，贴现息自动计财务费用）、发起托收后再「到账确认」；开出的承兑汇票到期「兑付」；每步自动生成对应凭证（背书 / 贴现 / 托收到账 / 兑付）</div>
+      <div class="step"><strong>支票即结</strong>：支票不挂持有状态——收到的支票登记即到账，开出的支票登记即付款</div>
+      <div class="step"><strong>作废与冲正</strong>：未发生资金流转的票据可直接作废（填原因）；已背书 / 贴现 / 到账 / 兑付的票据纠错走「红字冲正」生成反向凭证（原凭证保留，净影响归零），已月结月份须先反月结</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">🪙</span>现金盘点 <span class="badge badge-new">v0.8 新增</span></div>
+    <p><strong>路径</strong>：菜单「资金出纳 → 现金盘点」</p>
+    <div class="steps">
+      <div class="step"><strong>新建盘点单</strong>：选现金类账户与盘点日期（盘点月须未月结），账面余额按确认时点自动快照，与日记账同源</div>
+      <div class="step"><strong>录入实存</strong>：快速模式直接填清点总额；或逐档录 100 / 50 / 20 / 10 / 5 / 1 / 0.5 / 0.1 面额张数自动合计（面额合计必须等于实存总额才能确认）</div>
+      <div class="step"><strong>确认差异</strong>：差异（实存 − 账面）自动计算；差异 ≠ 0 必填原因，确认时自动生成待处理财产损溢凭证（盘亏借 1901 贷 1001，盘盈反向）；差异为 0 仅留盘点记录不生成凭证</div>
+      <div class="step"><strong>冲正纠错</strong>：草稿单可改可作废；已确认盘点单不直接改，走「红字冲正」作废并冲回差异凭证</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">📅</span>资金日报 <span class="badge badge-new">v0.8 新增</span></div>
+    <p><strong>路径</strong>：菜单「资金出纳 → 资金日记账 → 导出日报」</p>
+    <div class="steps">
+      <div class="step"><strong>选日期</strong>：日记账页选好日期（默认今天）</div>
+      <div class="step"><strong>一键导出</strong>：点「导出日报」生成 <code>资金日报_YYYYMMDD.xlsx</code>，含各账户「期初余额 / 当日收入 / 当日支出 / 期末余额」汇总与当日收支明细两张 sheet，期初 + 收入 − 支出 = 期末自动勾稽</div>
+      <div class="step"><strong>敏感门禁</strong>：与日记账导出一致，导出前需先解锁敏感数据</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">🔔</span>账期提醒 <span class="badge badge-new">v0.8 新增</span></div>
+    <p><strong>路径</strong>：菜单「工作台 → 首页仪表盘 → 账期提醒」卡</p>
+    <div class="steps">
+      <div class="step"><strong>三类提醒</strong>：借款到期（展示未清余额）、票据到期（持有 / 托收中 / 已开出未兑付）、滞留应付（已审批未付款的报销单与付款单）</div>
+      <div class="step"><strong>提前天数</strong>：卡头下拉切换 3 / 7 / 15 / 30 天，到期当天与逾期高亮</div>
+      <div class="step"><strong>点击处理</strong>：点提醒条目直接跳转借款台账 / 票据台账 / 报销管理对应页面</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">🧮</span>个税扣缴申报表 <span class="badge badge-new">v0.8 新增</span></div>
+    <p><strong>路径</strong>：菜单「薪酬核算 → 工资计算 → 扣缴申报表」按钮（导出中心同步提供）</p>
+    <div class="steps">
+      <div class="step"><strong>锁定前提</strong>：当月工资须已锁定，未锁定月份导出会被拒绝</div>
+      <div class="step"><strong>导出</strong>：点「扣缴申报表」生成当月 Excel，每员工一行：收入额、基本养老 / 基本 / 失业三险个人拆列、住房公积金、减除费用、专项附加扣除、累计应纳税所得额与预扣税额等，列序对齐电子税务局申报录入页，表尾带合计行</div>
+      <div class="step"><strong>三险拆列口径</strong>：优先按社保台账各险种个人份额拆列；未录份额时按「工资规则 → 社保公积金」全局三键拆；份额合计 ≠ 100% 时退回合并展示并留备注</div>
+    </div>
+    <div class="callout callout-info">
+      <strong>ℹ️ 仅导出格式</strong>
+      本工具只生成申报表 Excel，不做在线申报、不集成税务系统。
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">📊</span>进项台账 <span class="badge badge-new">v0.8 新增</span></div>
+    <p><strong>路径</strong>：菜单「票据报销 → 进项台账」</p>
+    <div class="steps">
+      <div class="step"><strong>区间查询</strong>：选起止月份，展示已登记发票的代码 / 号码 / 开票日期 / 销方名称与税号 / 不含税金额 / 税额 / 价税合计，按月小计；已作废发票自动排除</div>
+      <div class="step"><strong>关联报销</strong>：自动反查发票关联的报销单号与费用类型、所属月份</div>
+      <div class="step"><strong>导出</strong>：一键导出 <code>进项台账_YYYYMM-YYYYMM.xlsx</code> 存档</div>
+    </div>
+    <div class="callout callout-info">
+      <strong>ℹ️ 发票登记 ≠ 进项认证</strong>
+      台账仅汇总已登记发票，进项认证状态以税务系统为准。
     </div>
   </div>
 </section>
@@ -1444,16 +1514,19 @@
         <tr><td>考勤管理</td><td>月度考勤数据</td></tr>
         <tr><td>打卡表管理</td><td>OCR 识别打卡表</td></tr>
         <tr><td>OCR 识别中心</td><td>OCR 设置 / 百度 token 配置</td></tr>
-        <tr><td rowspan="2"><strong>薪酬核算</strong></td><td>工资计算</td><td>一键计算 / 单人重算 / 锁定 / 工资条 / 个税年度汇总</td></tr>
+        <tr><td rowspan="2"><strong>薪酬核算</strong></td><td>工资计算</td><td>一键计算 / 单人重算 / 锁定 / 工资条 / 个税年度汇总 / 扣缴申报表</td></tr>
         <tr><td>社保台账</td><td>按员工×年度基数费率 / 年度调基 / 上下限</td></tr>
-        <tr><td rowspan="2"><strong>票据报销</strong></td><td>发票管理</td><td>OCR 上传 / 去重 / 详情</td></tr>
+        <tr><td rowspan="3"><strong>票据报销</strong></td><td>发票管理</td><td>OCR 上传 / 去重 / 详情</td></tr>
         <tr><td>报销管理</td><td>报销单审批 / 经办复核 / 反审批</td></tr>
-        <tr><td rowspan="6"><strong>资金出纳</strong></td><td>资金账户</td><td>账户 CRUD / 默认账户 / 历史归集 / 严格对账开关</td></tr>
+        <tr><td>进项台账 <span class="badge badge-new">v0.8</span></td><td>区间进项发票汇总 / 月度小计 / 报销关联 / Excel 导出</td></tr>
+        <tr><td rowspan="8"><strong>资金出纳</strong></td><td>资金账户</td><td>账户 CRUD / 默认账户 / 历史归集 / 严格对账开关</td></tr>
         <tr><td>收付款单</td><td>收款 / 付款 / 转账 / 借款单据审批流 + 时间线 + 冲正</td></tr>
         <tr><td>付款批次</td><td>工资 / 报销 / 通用批次，资金账户必选</td></tr>
         <tr><td>银行对账</td><td>流水导入 / 多对多核销工作台 / 余额调节表</td></tr>
-        <tr><td>资金日记账</td><td>按账户收支明细 + 滚动余额 + Excel 导出</td></tr>
+        <tr><td>资金日记账</td><td>按账户收支明细 + 滚动余额 + Excel 导出 + 资金日报</td></tr>
         <tr><td>借款备用金</td><td>借款台账 / 账龄 / 三方式核销 / 导出</td></tr>
+        <tr><td>票据台账 <span class="badge badge-new">v0.8</span></td><td>承兑 / 支票登记 / 背书 / 贴现 / 托收 / 兑付 / 冲正</td></tr>
+        <tr><td>现金盘点 <span class="badge badge-new">v0.8</span></td><td>面额清点 / 差异凭证 / 冲正作废</td></tr>
         <tr><td rowspan="3"><strong>财务管理</strong></td><td>科目表</td><td>62 预置科目 / 期初余额 / 映射</td></tr>
         <tr><td>记账凭证</td><td>自动生成 / 作废联动 / 分录明细</td></tr>
         <tr><td>财务报表</td><td>三大报表 + 科目余额表 / 同期对比 / Excel</td></tr>
@@ -1471,7 +1544,8 @@
     <table>
       <thead><tr><th>版本</th><th>主要能力</th></tr></thead>
       <tbody>
-        <tr><td><strong>v0.7（待发版）</strong></td><td>出纳运营闭环（资金账户 / 收付款单审批留痕 / 通用付款批次 / 多对多银行对账 / 资金日记账 / 余额调节表 / 借款核销 / 报销治理 / 月结资金联动）</td></tr>
+        <tr><td><strong>v0.8.0（待发版）</strong></td><td>票据台账与申报台账（票据状态机 + 背书 / 贴现 / 托收 / 冲正 / 账期提醒 / 现金盘点差异凭证 / 资金日报 / 个税扣缴申报表 / 进项台账）</td></tr>
+        <tr><td><strong>v0.7.0（已发版 2026-09-05）</strong></td><td>出纳运营闭环（资金账户 / 收付款单审批留痕 / 通用付款批次 / 多对多银行对账 / 资金日记账 / 余额调节表 / 借款核销 / 报销治理 / 月结资金联动）</td></tr>
         <tr><td><strong>v0.6.0</strong></td><td>财务功能拓展（科目余额表 / 年末结转 / 社保台账 / 累计预扣 / 工资条 / 同期列）</td></tr>
         <tr><td><strong>v0.5.2</strong></td><td>受控解锁工资与月结防漏锁（2026-08-21）</td></tr>
         <tr><td><strong>v0.4.x</strong></td><td>安全配置（启动密码 / 锁屏 / 加密 / 脱敏）</td></tr>

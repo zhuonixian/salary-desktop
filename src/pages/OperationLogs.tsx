@@ -60,6 +60,8 @@ const operationTypeLabels: Record<string, string> = {
   export_trial_balance: '导出科目余额表',
   export_annual_tax_summary: '导出个税年度汇总',
   export_tax_withholding_declaration: '导出个税扣缴申报表',
+  set_reminder_advance_days: '设置账期提醒提前天数',
+  upsert_salary_rule_key: '保存全局社保份额规则',
   period_close_vouchers: '年末结转凭证',
   save_social_profile: '保存社保台账',
   delete_social_profile: '删除社保台账',

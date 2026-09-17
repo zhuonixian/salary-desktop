@@ -8,7 +8,7 @@
 - 阶段计划：`docs/superpowers/plans/2026-09-18-stage8-notes-tax-reports.md`
 - 设计说明：`docs/superpowers/specs/2026-09-18-stage8-notes-tax-reports-design.md`（4.1 已勘误：2201=应付票据、2202=应付账款）
 - 长期摘要：`.claude/memory/stage8-notes-tax-reports.md`
-- 自动测试基线：8A 收尾 290 passed；前端 `npx tsc -b` / lint / build 全过
+- 自动测试基线：8C 收尾 324 passed；前端 `npx tsc -b` / lint / build 全过
 - 工作区注意：用户未跟踪文件 `docs/user-guide-v2.html` 不得覆盖、删除或纳入提交
 
 ## 目标交付
@@ -21,7 +21,7 @@
 |---|---|---|
 | 8A | 完成 | 票据台账 + 账期提醒（Task 1-4）+ 批次收尾（Task 5） |
 | 8B | 完成 | 现金盘点、资金日报（Task 6-8） |
-| 8C | 未开始 | 个税申报导出、进项台账、Minor、全量回归（Task 9-12） |
+| 8C | 完成 | 个税申报导出、进项台账、Minor、全量回归（Task 9-12） |
 
 ## 协作规则
 
@@ -49,3 +49,17 @@
 - Task 7（54b74c0）：get_fund_daily_report 勾稽（期初+收−支=期末、跨月边界）+ 两 sheet Excel 导出（calamine 回读断言）+ FundJournals「导出日报」按钮，307 测试。
 - Task 8：批次收尾全量回归（307/tsc-b/lint/build 全过）。
 - 下轮入口：Task 9 个税扣缴申报表导出。
+
+### 2026-09-18 — 8C 申报导出、Minor 与收尾（Task 9-12）完成 —— 第八阶段收官
+
+- Task 9（1e9ab8d + abd5b25）：`export_tax_withholding_declaration`——仅锁定月份门禁（后端兜底）、三险拆列（台账份额优先 → 全局规则键兜底 → 比例≠100% 整列退回合并展示留备注）、列头对齐电子税务局措辞；入口「工资计算 → 扣缴申报表」+ 导出中心；累计预扣口径抽共享函数消除逻辑复制。
+- Task 9 收口 / Minor 13（38b0783）：社保三险个人份额端到端——social_insurance_profiles 三列 + salary_rules 三键（pension/medical/unemployment_personal_rate）+ `upsert_salary_rule_key` 命令（白名单 + 0~1 校验 + 留痕）+ SocialInsurance/SalaryRules 前端入口；项 8 mock 兜底 default 不再恒 true。324 测试（318+6）。
+- Task 10（6faa59b）：进项台账——`get_input_tax_ledger` 区间查询（void 排除、月度小计、报销单反查）+ `export_input_tax_ledger` Excel + InputTaxLedger.tsx 页（菜单「票据报销 → 进项台账」），页内明示「发票登记 ≠ 进项认证」。
+- Task 11（11268a4 + e1af425）：stage7 Minor 12 项全部消化——后端（冲正跨月口径注释/测试、存量核销 1221 回落、对账同分平局断言显式化、attachment_disk_stats 单遍聚合、月结口径注释、报销报错中文化）+ 前端（核销草稿透传 settlement_mode/due_date、bank_manual 下拉收窄与幂等结构化、伪未达两步恢复引导、借款统计口径提示、预算费用类型下拉化）。
+- Task 12（本次 commit）：收尾——导航核对（资金出纳 8 项/票据报销 3 项与 App.tsx 一致，零修改）；OperationLogs 映射核对（补 `set_reminder_advance_days`/`upsert_salary_rule_key` 两枚 stage8 新留痕命令）；全量回归（324 测试/fmt/tsc -b/lint/build 全过 + graphify update）；文档四件套（CLAUDE.md 架构摘要+Memory References+第八阶段段落、stage8 memory 骨架完善为已交付+已知边界+Windows 验收清单、本文件、user-guide.html 第八章卡片+菜单速查+版本历史）。
+- Windows exe 手工验收清单已固化到 `.claude/memory/stage8-notes-tax-reports.md`（票据全流程+冲正、盘点差异凭证、提醒卡、三导出、三险配置、既有 v0.7 项）。
+- 发版建议：v0.8.0（待确认后走 `.claude/memory/release-workflow.md` 流程）。
+
+## 阶段完成
+
+第八阶段（票据台账、账期提醒与申报导出）Task 1-12 全部交付：3 批次（8A 票据+提醒 / 8B 盘点+日报 / 8C 申报+进项+Minor+收尾），后端 324 测试全过，前端 tsc -b / lint / build 全过。遗留：Windows exe 手工验收挂账（清单见 stage8 memory）；发版 v0.8.0 待用户确认。
