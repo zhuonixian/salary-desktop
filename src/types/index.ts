@@ -1832,3 +1832,88 @@ export const INSTRUMENT_ACTION_LABEL: Record<string, string> = {
   void: '作废',
   reverse: '红字冲正',
 };
+
+// ==================== 现金盘点单（第八阶段 Task 6，spec 6） ====================
+// 字段与后端 src-tauri/src/models.rs CashCountSheet / CashCountDenomination /
+// CashCountCreateInput 及 src-tauri/src/cash_count.rs 入出参结构 1:1 对齐（serde snake_case）。
+// difference = 实存 − 账面由后端自动算；确认时点后端重快照账面余额。
+
+export interface CashCountSheet {
+  id: number;
+  count_date: string;
+  /** 冗余月份，月结保护用 */
+  belong_month: string;
+  /** 限 account_type='cash' 的资金账户 */
+  fund_account_id: number;
+  /** 账面余额快照（确认时点） */
+  book_balance: number;
+  counted_amount: number;
+  /** 实存 − 账面，自动算 */
+  difference: number;
+  /** 差异原因（差异≠0 时必填） */
+  difference_reason: string | null;
+  status: string;
+  /** 差异≠0 且 confirmed 时生成的盘盈亏凭证 */
+  voucher_id: number | null;
+  remark: string | null;
+  created_by: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface CashCountDenomination {
+  id: number;
+  sheet_id: number;
+  /** 面额（100/50/20/10/5/1/0.5/0.1） */
+  denomination: number;
+  quantity: number;
+  /** = denomination × quantity */
+  subtotal: number;
+}
+
+export interface CashCountDenominationInput {
+  denomination: number;
+  quantity: number;
+}
+
+export interface CashCountCreateInput {
+  count_date: string;
+  fund_account_id: number;
+  /** 实存金额（快速模式直接填总额；面额模式由合计得出） */
+  counted_amount: number;
+  difference_reason?: string | null;
+  remark?: string | null;
+  /** 可选面额明细；提供时合计必须等于 counted_amount */
+  denominations?: CashCountDenominationInput[] | null;
+}
+
+export interface CashCountUpdateInput {
+  count_date: string;
+  fund_account_id: number;
+  counted_amount: number;
+  difference_reason?: string | null;
+  remark?: string | null;
+  /** 面额明细整表替换（不传视同清空） */
+  denominations?: CashCountDenominationInput[] | null;
+}
+
+export interface CashCountQuery {
+  status?: string;
+  /** 盘点月（YYYY-MM，按 count_date 所在月过滤） */
+  belong_month?: string;
+  fund_account_id?: number;
+}
+
+export interface CashCountSheetDetail {
+  sheet: CashCountSheet;
+  denominations: CashCountDenomination[];
+}
+
+export const CASH_COUNT_STATUS_LABEL: Record<string, string> = {
+  draft: '草稿',
+  confirmed: '已确认',
+  void: '已作废',
+};
+
+/** 面额模式固定八档（spec 6） */
+export const CASH_COUNT_DENOMINATIONS: number[] = [100, 50, 20, 10, 5, 1, 0.5, 0.1];

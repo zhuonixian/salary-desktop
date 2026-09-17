@@ -8,6 +8,7 @@ use rusqlite::Connection;
 use tauri::Manager;
 
 use crate::accounting;
+use crate::cash_count;
 use crate::cashier;
 use crate::data_safety;
 use crate::db;
@@ -3299,6 +3300,147 @@ pub fn reverse_instrument_flow(
         Some(&format!("instrument_id={}", inst.id)),
     )?;
     Ok(inst)
+}
+
+// ==================== Cash Count Commands（第八阶段 现金盘点单） ====================
+//
+// 盘点单领域函数自带事务（账面快照、差异计算、差异凭证与状态更新同事务）。命令层经
+// require_current_operator 解析操作人姓名传入领域层，成功后写操作日志；get 类命令不记日志。
+// 门禁在领域层：账户限 account_type='cash'、面额合计=实存、差异≠0 原因必填、
+// confirmed 不可改、ensure_month_open(belong_month)。
+
+#[tauri::command]
+pub fn get_count_sheets(
+    query: cash_count::CashCountQuery,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<CashCountSheet>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(cash_count::get_count_sheets(&conn, &query)?)
+}
+
+/// 详情含面额明细（面额降序），供盘点单页 Drawer 展示
+#[tauri::command]
+pub fn get_count_sheet_detail(
+    id: i64,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<cash_count::CashCountSheetDetail, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(cash_count::get_count_sheet_detail(&conn, id)?)
+}
+
+#[tauri::command]
+pub fn create_count_sheet(
+    data: CashCountCreateInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<CashCountSheet, AppError> {
+    let mut conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let operator = cashier::require_current_operator(&conn, &current)?.1;
+    let sheet = cash_count::create_count_sheet(&mut conn, &data, &operator)?;
+    db::log_operation(
+        &conn,
+        "create_count_sheet",
+        &format!(
+            "新建现金盘点单 {} 账户#{} 实存 {:.2} / 账面 {:.2} / 差异 {:.2}（{}）",
+            sheet.count_date,
+            sheet.fund_account_id,
+            sheet.counted_amount,
+            sheet.book_balance,
+            sheet.difference,
+            cash_count::status_label(&sheet.status),
+        ),
+        &operator,
+        Some(&format!("sheet_id={}", sheet.id)),
+    )?;
+    Ok(sheet)
+}
+
+#[tauri::command]
+pub fn update_count_sheet(
+    id: i64,
+    data: cash_count::CashCountUpdateInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<CashCountSheet, AppError> {
+    let mut conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let operator = cashier::require_current_operator(&conn, &current)?.1;
+    let sheet = cash_count::update_count_sheet(&mut conn, id, &data, &operator)?;
+    db::log_operation(
+        &conn,
+        "update_count_sheet",
+        &format!(
+            "修改现金盘点单 #{} 实存 {:.2}（差异 {:.2}，{}）",
+            sheet.id,
+            sheet.counted_amount,
+            sheet.difference,
+            cash_count::status_label(&sheet.status),
+        ),
+        &operator,
+        Some(&format!("sheet_id={}", sheet.id)),
+    )?;
+    Ok(sheet)
+}
+
+#[tauri::command]
+pub fn confirm_count_sheet(
+    id: i64,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<CashCountSheet, AppError> {
+    let mut conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let operator = cashier::require_current_operator(&conn, &current)?.1;
+    let sheet = cash_count::confirm_count_sheet(&mut conn, id, &operator)?;
+    db::log_operation(
+        &conn,
+        "confirm_count_sheet",
+        &format!(
+            "确认现金盘点单 #{} 实存 {:.2} / 账面 {:.2} / 差异 {:.2}{}",
+            sheet.id,
+            sheet.counted_amount,
+            sheet.book_balance,
+            sheet.difference,
+            sheet
+                .voucher_id
+                .map(|v| format!("，生成盘盈亏凭证 {v}"))
+                .unwrap_or_else(|| "（差异 0 免凭证）".to_string()),
+        ),
+        &operator,
+        Some(&format!(
+            "sheet_id={} voucher_id={:?}",
+            sheet.id, sheet.voucher_id
+        )),
+    )?;
+    Ok(sheet)
+}
+
+#[tauri::command]
+pub fn void_count_sheet(
+    id: i64,
+    reason: Option<String>,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<CashCountSheet, AppError> {
+    let mut conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let operator = cashier::require_current_operator(&conn, &current)?.1;
+    let sheet = cash_count::void_count_sheet(&mut conn, id, reason.as_deref(), &operator)?;
+    db::log_operation(
+        &conn,
+        "void_count_sheet",
+        &format!(
+            "作废现金盘点单 #{}（{}）{}",
+            sheet.id,
+            cash_count::status_label("void"),
+            reason
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|r| format!("，原因：{r}"))
+                .unwrap_or_default(),
+        ),
+        &operator,
+        Some(&format!("sheet_id={}", sheet.id)),
+    )?;
+    Ok(sheet)
 }
 
 #[cfg(test)]

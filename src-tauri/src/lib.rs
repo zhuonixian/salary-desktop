@@ -301,6 +301,13 @@ pub fn run() {
         commands::settle_issued_instrument,
         commands::void_instrument,
         commands::reverse_instrument_flow,
+        // ===== Cash Count（第八阶段 现金盘点单） =====
+        commands::get_count_sheets,
+        commands::get_count_sheet_detail,
+        commands::create_count_sheet,
+        commands::update_count_sheet,
+        commands::confirm_count_sheet,
+        commands::void_count_sheet,
         // ===== Security（Task 6） =====
         security_commands::is_security_initialized,
         security_commands::setup_security,

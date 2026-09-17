@@ -109,6 +109,13 @@ const operationTypeLabels: Record<string, string> = {
   settle_issued_instrument: '兑付开出票据',
   void_instrument: '作废票据',
   reverse_instrument_flow: '红字冲正票据',
+  // 第八阶段现金盘点命令（与 src-tauri/src/commands.rs 实名一一对应；get 类不落日志，映射仅兜底）
+  get_count_sheets: '查询现金盘点单',
+  get_count_sheet_detail: '查询现金盘点详情',
+  create_count_sheet: '新建现金盘点单',
+  update_count_sheet: '修改现金盘点单',
+  confirm_count_sheet: '确认现金盘点单',
+  void_count_sheet: '作废现金盘点单',
   generate_bank_reconciliation_period: '生成余额调节表',
   confirm_bank_reconciliation_period: '确认余额调节表',
   export_bank_reconciliation_period: '导出余额调节表',

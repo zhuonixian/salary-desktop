@@ -3085,6 +3085,21 @@ pub(crate) fn fund_account_gl_code(conn: &Connection, account_id: i64) -> AppRes
     .ok_or_else(|| AppError::NotFound(format!("资金账户不存在：id={account_id}")))
 }
 
+/// 资金账户当前余额：期初 + 全部 active 资金分录净额（voucher_lines 派生，
+/// 与资金日记账不筛月份的期末余额同源同口径），供现金盘点账面余额快照复用（spec 6）
+pub(crate) fn fund_account_balance(conn: &Connection, account_id: i64) -> AppResult<f64> {
+    let account = get_fund_account(conn, account_id)?;
+    let net: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(vl.debit_amount - vl.credit_amount),0)
+         FROM voucher_lines vl
+         JOIN vouchers v ON v.id = vl.voucher_id
+         WHERE v.status = 'active' AND vl.fund_account_id = ?1",
+        params![account.id],
+        |r| r.get(0),
+    )?;
+    Ok(account.opening_balance + net)
+}
+
 /// 单据对方科目（去空格；空串视同未填）
 fn doc_counter_account(doc: &FundDocument) -> Option<&str> {
     doc.counter_account_code

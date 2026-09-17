@@ -121,6 +121,13 @@ import type {
   InstrumentReverseInput,
   InstrumentEndorseResult,
   InstrumentDetail,
+  CashCountSheet,
+  CashCountDenomination,
+  CashCountDenominationInput,
+  CashCountCreateInput,
+  CashCountUpdateInput,
+  CashCountQuery,
+  CashCountSheetDetail,
 } from '@/types';
 import { INSTRUMENT_STATUS_LABEL } from '@/types';
 
@@ -743,6 +750,129 @@ const mockTransitionInstrument = (
   inst.updated_at = new Date().toISOString();
   mockPushInstrumentEvent(inst.id, action, fromStatuses[0] ?? null, toStatus, trimmed || null);
   return inst;
+};
+
+// ==================== 现金盘点单（第八阶段 Task 6） ====================
+// 内存态轻量模拟，校验口径与后端 cash_count.rs 一致（账户限 cash、面额合计=实存、
+// 差异≠0 原因必填、confirmed 不可改、作废差异凭证走红字冲正）；凭证不模拟（voucher_id 占位）。
+
+interface MockCashCountSheet extends CashCountSheet {
+  denominations: CashCountDenominationInput[];
+  reversed: boolean;
+}
+
+let mockCashCountSeq = 0;
+const mockCashCountSheets: MockCashCountSheet[] = [];
+
+const baseMockCashCountSheet = (
+  over: Partial<MockCashCountSheet> &
+    Pick<MockCashCountSheet, 'id' | 'count_date' | 'fund_account_id' | 'book_balance' | 'counted_amount' | 'status'>,
+): MockCashCountSheet => ({
+  belong_month: over.count_date.slice(0, 7),
+  difference: Number(((over.counted_amount ?? 0) - (over.book_balance ?? 0)).toFixed(2)),
+  difference_reason: null,
+  voucher_id: null,
+  remark: null,
+  created_by: '张会计',
+  created_at: new Date().toISOString(),
+  updated_at: new Date().toISOString(),
+  denominations: [],
+  reversed: false,
+  ...over,
+});
+
+// 演示数据：现金账户 id=2（mock 备用金现金库，期初 3000）；mock 不落凭证，voucher_id 置空
+mockCashCountSheets.push(
+  baseMockCashCountSheet({
+    id: ++mockCashCountSeq,
+    count_date: mockMonthDate(0, 5),
+    fund_account_id: 2,
+    book_balance: 3000,
+    counted_amount: 3000,
+    status: 'confirmed',
+    remark: '月末例行盘点',
+  }),
+  baseMockCashCountSheet({
+    id: ++mockCashCountSeq,
+    count_date: mockMonthDate(0, 12),
+    fund_account_id: 2,
+    book_balance: 3000,
+    counted_amount: 2950,
+    difference: -50,
+    difference_reason: '找零垫付未入账',
+    status: 'draft',
+    denominations: [
+      { denomination: 100, quantity: 20 },
+      { denomination: 50, quantity: 10 },
+      { denomination: 20, quantity: 10 },
+      { denomination: 10, quantity: 12 },
+      { denomination: 5, quantity: 6 },
+      { denomination: 1, quantity: 20 },
+      { denomination: 0.5, quantity: 4 },
+      { denomination: 0.1, quantity: 10 },
+    ],
+  }),
+  baseMockCashCountSheet({
+    id: ++mockCashCountSeq,
+    count_date: mockMonthDate(-1, 28),
+    fund_account_id: 2,
+    book_balance: 2800,
+    counted_amount: 2800,
+    status: 'void',
+    remark: '盘面录错作废',
+  }),
+);
+
+const mockFindCashCountSheet = (id: number): MockCashCountSheet => {
+  const sheet = mockCashCountSheets.find((s) => s.id === id);
+  if (!sheet) throw new Error(`盘点单不存在：id=${id}`);
+  return sheet;
+};
+
+// 剥离 mock 辅助字段（denominations/reversed），返回与后端 CashCountSheet 同构的公开结构
+const mockSheetToPublic = (sheet: MockCashCountSheet): CashCountSheet => ({
+  id: sheet.id,
+  count_date: sheet.count_date,
+  belong_month: sheet.belong_month,
+  fund_account_id: sheet.fund_account_id,
+  book_balance: sheet.book_balance,
+  counted_amount: sheet.counted_amount,
+  difference: sheet.difference,
+  difference_reason: sheet.difference_reason,
+  status: sheet.status,
+  voucher_id: sheet.voucher_id,
+  remark: sheet.remark,
+  created_by: sheet.created_by,
+  created_at: sheet.created_at,
+  updated_at: sheet.updated_at,
+});
+
+const mockValidateDenominations = (
+  counted: number,
+  denominations: CashCountDenominationInput[] | null | undefined,
+): void => {
+  if (!denominations || denominations.length === 0) return;
+  const seen = new Set<number>();
+  let total = 0;
+  for (const d of denominations) {
+    if (!(Number(d.denomination) > 0)) throw new Error(`面额必须大于 0：${d.denomination}`);
+    if (Number(d.quantity) < 0) throw new Error(`面额 ${d.denomination} 张数不能为负`);
+    const key = Math.round(Number(d.denomination) * 1_000_000);
+    if (seen.has(key)) throw new Error(`面额 ${d.denomination} 重复录入，请合并为一条`);
+    seen.add(key);
+    total += Number(d.denomination) * Number(d.quantity);
+  }
+  if (Math.abs(total - counted) > 0.005) {
+    throw new Error(`面额明细合计 ${total.toFixed(2)} 与实存金额 ${counted.toFixed(2)} 不一致，请核对后保存`);
+  }
+};
+
+const mockAssertCashAccount = (accountId: number): void => {
+  const account = mockFundAccounts.find((a) => a.id === accountId);
+  if (!account) throw new Error(`资金账户不存在：id=${accountId}`);
+  if (account.account_type !== 'cash') {
+    throw new Error(`现金盘点仅支持现金类账户，账户「${account.name}」类型为 ${account.account_type}`);
+  }
 };
 
 // 轻量状态机模拟：与后端 cashier.rs 同规则（演示完整 草稿→提交→审批→结算 流程）
@@ -1453,6 +1583,126 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
         );
       }
       return mockTransitionInstrument(inst.id, [inst.status], toStatus, 'reverse', data.reason.trim(), true);
+    }
+    // ==================== 现金盘点单（第八阶段 Task 6，spec 6） ====================
+    case 'get_count_sheets': {
+      const query = (args?.query ?? {}) as CashCountQuery;
+      return mockCashCountSheets
+        .filter((s) => {
+          if (query.status && s.status !== query.status) return false;
+          if (query.belong_month && s.count_date.slice(0, 7) !== query.belong_month) return false;
+          if (query.fund_account_id && s.fund_account_id !== query.fund_account_id) return false;
+          return true;
+        })
+        .sort((a, b) => b.id - a.id)
+        .map(mockSheetToPublic);
+    }
+    case 'get_count_sheet_detail': {
+      const sheet = mockFindCashCountSheet(Number(args?.id ?? 0));
+      const denominations: CashCountDenomination[] = [...sheet.denominations]
+        .sort((a, b) => b.denomination - a.denomination)
+        .map((d, i) => ({
+          id: sheet.id * 100 + i,
+          sheet_id: sheet.id,
+          denomination: d.denomination,
+          quantity: d.quantity,
+          subtotal: Number((d.denomination * d.quantity).toFixed(2)),
+        }));
+      return { sheet: mockSheetToPublic(sheet), denominations };
+    }
+    case 'create_count_sheet': {
+      const data = args?.data as CashCountCreateInput | undefined;
+      if (!data) throw new Error('盘点单入参缺失');
+      if (!data.count_date) throw new Error('盘点日期必填');
+      mockAssertCashAccount(Number(data.fund_account_id));
+      if (Number(data.counted_amount) < 0) throw new Error('实存金额不能为负（无现金请填 0）');
+      mockValidateDenominations(Number(data.counted_amount), data.denominations);
+      const account = mockFundAccounts.find((a) => a.id === Number(data.fund_account_id));
+      const book = account?.opening_balance ?? 0;
+      const difference = Number((Number(data.counted_amount) - book).toFixed(2));
+      const reason = data.difference_reason?.trim();
+      if (Math.abs(difference) > 0.005 && !reason) {
+        throw new Error(`新建盘点单差异 ${difference.toFixed(2)} 不为 0，必须填写差异原因`);
+      }
+      const sheet = baseMockCashCountSheet({
+        id: ++mockCashCountSeq,
+        count_date: data.count_date,
+        fund_account_id: Number(data.fund_account_id),
+        book_balance: book,
+        counted_amount: Number(data.counted_amount),
+        status: 'draft',
+      });
+      sheet.difference = difference;
+      sheet.difference_reason = reason || null;
+      sheet.remark = data.remark?.trim() || null;
+      sheet.denominations = (data.denominations ?? []).map((d) => ({ ...d }));
+      mockCashCountSheets.unshift(sheet);
+      return mockSheetToPublic(sheet);
+    }
+    case 'update_count_sheet': {
+      const data = args?.data as CashCountUpdateInput | undefined;
+      const sheet = mockFindCashCountSheet(Number(args?.id ?? 0));
+      if (sheet.status !== 'draft') {
+        throw new Error(`盘点单当前状态「${sheet.status}」，不允许修改（仅草稿可修改）`);
+      }
+      mockAssertCashAccount(Number(data?.fund_account_id ?? sheet.fund_account_id));
+      const counted = Number(data?.counted_amount ?? sheet.counted_amount);
+      if (counted < 0) throw new Error('实存金额不能为负（无现金请填 0）');
+      mockValidateDenominations(counted, data?.denominations);
+      const account = mockFundAccounts.find((a) => a.id === Number(data?.fund_account_id ?? sheet.fund_account_id));
+      const book = account?.opening_balance ?? 0;
+      const difference = Number((counted - book).toFixed(2));
+      const reason = data?.difference_reason?.trim();
+      if (Math.abs(difference) > 0.005 && !reason) {
+        throw new Error(`修改盘点单差异 ${difference.toFixed(2)} 不为 0，必须填写差异原因`);
+      }
+      sheet.count_date = data?.count_date ?? sheet.count_date;
+      sheet.belong_month = sheet.count_date.slice(0, 7);
+      sheet.fund_account_id = Number(data?.fund_account_id ?? sheet.fund_account_id);
+      sheet.book_balance = book;
+      sheet.counted_amount = counted;
+      sheet.difference = difference;
+      sheet.difference_reason = reason || null;
+      sheet.remark = data?.remark?.trim() || null;
+      sheet.denominations = (data?.denominations ?? []).map((d) => ({ ...d }));
+      sheet.updated_at = new Date().toISOString();
+      return mockSheetToPublic(sheet);
+    }
+    case 'confirm_count_sheet': {
+      const sheet = mockFindCashCountSheet(Number(args?.id ?? 0));
+      if (sheet.status !== 'draft') {
+        throw new Error(`盘点单当前状态「${sheet.status}」，不允许确认（仅草稿可确认）`);
+      }
+      if (sheet.denominations.length > 0) {
+        const total = sheet.denominations.reduce(
+          (s, d) => s + d.denomination * d.quantity,
+          0,
+        );
+        if (Math.abs(total - sheet.counted_amount) > 0.005) {
+          throw new Error(`面额明细合计 ${total.toFixed(2)} 与实存金额 ${sheet.counted_amount.toFixed(2)} 不一致，不能确认`);
+        }
+      }
+      if (Math.abs(sheet.difference) > 0.005 && !sheet.difference_reason?.trim()) {
+        throw new Error(`确认盘点单差异 ${sheet.difference.toFixed(2)} 不为 0，必须填写差异原因`);
+      }
+      sheet.status = 'confirmed';
+      // mock 不落凭证：差异≠0 用 9xxx 段占位，差异 0 保持 null
+      sheet.voucher_id = Math.abs(sheet.difference) > 0.005 ? 9100 + sheet.id : null;
+      sheet.updated_at = new Date().toISOString();
+      return mockSheetToPublic(sheet);
+    }
+    case 'void_count_sheet': {
+      const sheet = mockFindCashCountSheet(Number(args?.id ?? 0));
+      if (sheet.status === 'void') throw new Error('盘点单已作废，不能重复作废');
+      const reason = String(args?.reason ?? '').trim();
+      if (sheet.status === 'confirmed' && sheet.voucher_id) {
+        if (!reason) throw new Error('已确认盘点单存在差异凭证，作废走红字冲正必须填写原因');
+        sheet.reversed = true;
+        sheet.voucher_id = null;
+      }
+      sheet.status = 'void';
+      sheet.updated_at = new Date().toISOString();
+      return mockSheetToPublic(sheet);
     }
     // ==================== Task 14：员工借款备用金与核销（spec 4.11） ====================
     case 'get_advance_ledger': {
@@ -3150,4 +3400,35 @@ export async function voidInstrument(id: number, reason: string): Promise<Negoti
 
 export async function reverseInstrumentFlow(data: InstrumentReverseInput): Promise<NegotiableInstrument> {
   return invoke<NegotiableInstrument>('reverse_instrument_flow', { data });
+}
+
+// ==================== 现金盘点单（第八阶段 Task 6，spec 6） ====================
+// 账户限现金类、面额合计=实存、差异≠0 原因必填、confirmed 不可改、作废差异凭证走
+// 红字冲正等校验以后端为准；invoke 参数 key 用 camelCase（Tauri 2 自动映射 snake_case）。
+
+export async function getCountSheets(query: CashCountQuery = {}): Promise<CashCountSheet[]> {
+  return invoke<CashCountSheet[]>('get_count_sheets', { query });
+}
+
+export async function getCountSheetDetail(id: number): Promise<CashCountSheetDetail> {
+  return invoke<CashCountSheetDetail>('get_count_sheet_detail', { id });
+}
+
+export async function createCountSheet(data: CashCountCreateInput): Promise<CashCountSheet> {
+  return invoke<CashCountSheet>('create_count_sheet', { data });
+}
+
+export async function updateCountSheet(
+  id: number,
+  data: CashCountUpdateInput,
+): Promise<CashCountSheet> {
+  return invoke<CashCountSheet>('update_count_sheet', { id, data });
+}
+
+export async function confirmCountSheet(id: number): Promise<CashCountSheet> {
+  return invoke<CashCountSheet>('confirm_count_sheet', { id });
+}
+
+export async function voidCountSheet(id: number, reason?: string): Promise<CashCountSheet> {
+  return invoke<CashCountSheet>('void_count_sheet', { id, reason: reason ?? null });
 }
