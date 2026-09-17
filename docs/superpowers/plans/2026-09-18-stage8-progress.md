@@ -20,7 +20,7 @@
 | 批次 | 状态 | 说明 |
 |---|---|---|
 | 8A | 完成 | 票据台账 + 账期提醒（Task 1-4）+ 批次收尾（Task 5） |
-| 8B | 未开始 | 现金盘点、资金日报（Task 6-8） |
+| 8B | 完成 | 现金盘点、资金日报（Task 6-8） |
 | 8C | 未开始 | 个税申报导出、进项台账、Minor、全量回归（Task 9-12） |
 
 ## 协作规则
@@ -42,3 +42,10 @@
 - Minor 挂账（8C Task 11 消化）：冲正后 fund_account_id 残留；AMOUNT_TOLERANCE notes.rs 本地重定义待收敛 pub(crate)；belong_month 登记月口径跨月票据需切月；贴现日志 .max(0.0) 冗余；mock 登记不落审批事件；NotesInstruments 1400 行可拆；approved_at 空串不回落（建议 NULLIF）；前端 days=0 显示 7；滞留恰 N 天边界未直测。
 - 环境事实：bundled SQLite FK 默认开，新表测试需先种父行；后台 agent 可能长时间无输出挂起（Task 2 曾发生，超时唤不醒即 TaskStop+接手者续做）。
 - 下轮入口：Task 6 现金盘点单（cash_count.rs，表已建、cash_count source_type 已预置）。
+
+### 2026-09-18 — 8B 现金盘点与资金日报（Task 6-8）完成
+
+- Task 6（fc30c84）：cash_count.rs 领域层（create/update/confirm/void，快速+面额双模式、差异凭证 盘亏借1901/贷1001 盘盈反向、confirmed 红字冲正负 id 锚点文档化）+ CashCount.tsx + 6 命令，304 测试。
+- Task 7（54b74c0）：get_fund_daily_report 勾稽（期初+收−支=期末、跨月边界）+ 两 sheet Excel 导出（calamine 回读断言）+ FundJournals「导出日报」按钮，307 测试。
+- Task 8：批次收尾全量回归（307/tsc-b/lint/build 全过）。
+- 下轮入口：Task 9 个税扣缴申报表导出。
