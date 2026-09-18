@@ -639,6 +639,8 @@ struct PayslipRow {
     gross_salary: f64,
     social_security_personal: f64,
     housing_fund_personal: f64,
+    social_security_employer: f64,
+    housing_fund_employer: f64,
     attendance_deduction: f64,
     tax_amount: f64,
     other_deduction: f64,
@@ -653,6 +655,7 @@ fn fetch_payslip_row(conn: &Connection, month: &str, employee_id: i64) -> AppRes
                 sr.base_salary, sr.position_salary, sr.performance_salary,
                 sr.overtime_salary, sr.meal_allowance, sr.transport_allowance,
                 sr.gross_salary, sr.social_security_personal, sr.housing_fund_personal,
+                sr.social_security_employer, sr.housing_fund_employer,
                 sr.attendance_deduction, sr.tax_amount, sr.other_deduction, sr.net_salary
          FROM salary_monthly_results sr
          JOIN employees e ON e.employee_no = sr.employee_no
@@ -674,10 +677,12 @@ fn fetch_payslip_row(conn: &Connection, month: &str, employee_id: i64) -> AppRes
                 gross_salary: r.get(9)?,
                 social_security_personal: r.get(10)?,
                 housing_fund_personal: r.get(11)?,
-                attendance_deduction: r.get(12)?,
-                tax_amount: r.get(13)?,
-                other_deduction: r.get(14)?,
-                net_salary: r.get(15)?,
+                social_security_employer: r.get(12)?,
+                housing_fund_employer: r.get(13)?,
+                attendance_deduction: r.get(14)?,
+                tax_amount: r.get(15)?,
+                other_deduction: r.get(16)?,
+                net_salary: r.get(17)?,
             })
         },
     )
@@ -718,13 +723,14 @@ fn format_money(value: f64) -> String {
     format!("¥ {sign}{grouped}.{dec_part}")
 }
 
-/// 渲染工资条 HTML：全内联样式（邮件客户端不加载外部 CSS），表格行序与
-/// SalaryCalculate.tsx payslip 卡片一致——发放项 → 应发合计 → 五险一金个人
-/// 与各项扣款（负数展示）→ 实发工资（加粗收尾）。
+/// 渲染工资条 HTML：全内联样式（邮件客户端不加载外部 CSS），表格行序以
+/// SalaryCalculate.tsx payslip 卡片版式为基底并按 spec 5「五险一金个人+单位
+/// 两侧」补单位侧两行——发放项 → 应发合计 → 五险一金个人（负数）/单位
+/// （正数）两侧 → 各项扣款（负数）→ 实发工资（加粗收尾）。
 fn render_payslip_html(month: &str, row: &PayslipRow) -> String {
     let cell = "border:1px solid #d9d9d9;padding:4px 8px;";
     let amount_cell = "border:1px solid #d9d9d9;padding:4px 8px;text-align:right;";
-    let rows: [(&str, f64); 12] = [
+    let rows: [(&str, f64); 14] = [
         ("基本工资", row.base_salary),
         ("岗位工资", row.position_salary),
         ("绩效工资", row.performance_salary),
@@ -734,6 +740,8 @@ fn render_payslip_html(month: &str, row: &PayslipRow) -> String {
         ("应发合计", row.gross_salary),
         ("社保(个人)", -row.social_security_personal),
         ("公积金(个人)", -row.housing_fund_personal),
+        ("社保(单位)", row.social_security_employer),
+        ("公积金(单位)", row.housing_fund_employer),
         ("考勤扣款", -row.attendance_deduction),
         ("个税", -row.tax_amount),
         ("其他扣款", -row.other_deduction),
@@ -1721,6 +1729,8 @@ mod tests {
                 gross_salary REAL DEFAULT 0,
                 social_security_personal REAL DEFAULT 0,
                 housing_fund_personal REAL DEFAULT 0,
+                social_security_employer REAL DEFAULT 0,
+                housing_fund_employer REAL DEFAULT 0,
                 attendance_deduction REAL DEFAULT 0,
                 tax_amount REAL DEFAULT 0,
                 other_deduction REAL DEFAULT 0,
@@ -1756,10 +1766,11 @@ mod tests {
             "INSERT INTO salary_monthly_results
                 (salary_month, employee_no, name, base_salary, position_salary, performance_salary,
                  overtime_salary, meal_allowance, transport_allowance, gross_salary,
-                 social_security_personal, housing_fund_personal, attendance_deduction,
-                 tax_amount, other_deduction, net_salary, locked)
+                 social_security_personal, housing_fund_personal,
+                 social_security_employer, housing_fund_employer,
+                 attendance_deduction, tax_amount, other_deduction, net_salary, locked)
              VALUES ('2026-09', 'E001', '张三', 10000.0, 2000.0, 3000.0, 500.0, 300.0, 200.0, 16000.0,
-                     800.0, 1200.0, 100.0, 300.25, 50.5, 13549.25, 1)",
+                     800.0, 1200.0, 2000.0, 2400.0, 100.0, 300.25, 50.5, 13549.25, 1)",
             [],
         )
         .unwrap();
@@ -1812,10 +1823,13 @@ mod tests {
         assert!(html.contains("¥ 10,000.00"), "基本工资: {html}");
         assert!(html.contains("¥ 16,000.00"), "应发合计: {html}");
         assert!(html.contains("¥ -800.00"), "社保个人取负展示: {html}");
+        assert!(html.contains("¥ -1,200.00"), "公积金个人取负展示: {html}");
+        assert!(html.contains("¥ 2,000.00"), "社保单位为正数展示: {html}");
+        assert!(html.contains("¥ 2,400.00"), "公积金单位为正数展示: {html}");
         assert!(html.contains("¥ -300.25"), "个税小数千分位: {html}");
         assert!(html.contains("¥ 13,549.25"), "实发工资: {html}");
 
-        // 行序与 payslip 卡片一致
+        // 行序：payslip 卡片版式 + spec 5「五险一金个人+单位两侧」单位两行
         let order = [
             "基本工资",
             "岗位工资",
@@ -1826,6 +1840,8 @@ mod tests {
             "应发合计",
             "社保(个人)",
             "公积金(个人)",
+            "社保(单位)",
+            "公积金(单位)",
             "考勤扣款",
             "个税",
             "其他扣款",
@@ -2094,6 +2110,10 @@ mod tests {
         let html = resent[0].html_body.as_deref().expect("重发须重建正文");
         assert!(html.contains("李四"), "重建正文含员工姓名: {html}");
         assert!(html.contains("¥ 8,000.00"), "重建正文含金额: {html}");
+        assert!(
+            html.contains("社保(单位)"),
+            "重建正文含五险一金单位侧: {html}"
+        );
         drop(resent);
 
         // 留痕只追加：原失败记录不动，新增 1 条新留痕且署名当次操作人
