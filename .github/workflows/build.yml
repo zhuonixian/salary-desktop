@@ -59,6 +59,53 @@ jobs:
           # 与我们用 +YYYYMMDD 表达日期的策略冲突。
           args: --bundles nsis
 
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Rust Cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        run: npm install
+
+      - name: Inject build date into version
+        run: |
+          BUILD_DATE=$(date +%Y%m%d)
+          TAG_NO_V=${GITHUB_REF_NAME#v}
+          echo "Injecting build date ${BUILD_DATE} into version ${TAG_NO_V}"
+          # macOS BSD sed：-i 需要空后缀参数
+          sed -i '' "s|^version = \".*\"|version = \"${TAG_NO_V}+${BUILD_DATE}\"|" src-tauri/Cargo.toml
+          sed -i '' "s|\"version\": \".*\"|\"version\": \"${TAG_NO_V}+${BUILD_DATE}\"|" src-tauri/tauri.conf.json
+          echo "--- Cargo.toml ---"; grep '^version' src-tauri/Cargo.toml
+          echo "--- tauri.conf.json ---"; grep '"version"' src-tauri/tauri.conf.json
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: '工资核算助手 ${{ github.ref_name }}'
+          releaseBody: 'See the assets to download this version.'
+          releaseDraft: true
+          prerelease: false
+          # Apple Silicon（M1-M4）dmg；未签名——首次打开需右键 → 打开绕过 Gatekeeper
+          args: --target aarch64-apple-darwin --bundles dmg
+
   build-linux:
     if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
