@@ -2212,3 +2212,78 @@ pub struct FundDailyReport {
     pub entries: Vec<FundDailyEntryRow>,
     pub trend: Vec<FundDailyTrendPoint>,
 }
+
+// ==================== 第九阶段：通知模块（spec 3，Task 2 消费） ====================
+
+/// 通知状态：已发送（Task 2 消费）
+#[allow(dead_code)]
+pub const NOTIFICATION_STATUS_SENT: &str = "sent";
+/// 通知状态：发送失败（Task 2 消费）
+#[allow(dead_code)]
+pub const NOTIFICATION_STATUS_FAILED: &str = "failed";
+/// 通知状态：跳过（无邮箱/通道未配置等，不视为失败）（Task 2 消费）
+#[allow(dead_code)]
+pub const NOTIFICATION_STATUS_SKIPPED: &str = "skipped";
+
+/// 通知状态清单（校验用，与 DDL CHECK 一致；Task 2 消费）
+#[allow(dead_code)]
+pub const NOTIFICATION_STATUSES: &[&str] = &[
+    NOTIFICATION_STATUS_SENT,
+    NOTIFICATION_STATUS_FAILED,
+    NOTIFICATION_STATUS_SKIPPED,
+];
+
+/// 通知渠道：邮件（Task 2 消费）
+#[allow(dead_code)]
+pub const NOTIFICATION_CHANNEL_EMAIL: &str = "email";
+/// 通知渠道：短信（预留占位）（Task 2 消费）
+#[allow(dead_code)]
+pub const NOTIFICATION_CHANNEL_SMS: &str = "sms";
+
+/// 通知渠道清单（校验用，与 DDL CHECK 一致；Task 2 消费）
+#[allow(dead_code)]
+pub const NOTIFICATION_CHANNELS: &[&str] = &[NOTIFICATION_CHANNEL_EMAIL, NOTIFICATION_CHANNEL_SMS];
+
+/// 通知发送留痕（notification_logs 行，spec 3.2）：只追加不修改，
+/// 员工删除后历史记录仍完整保留（employee_id 无外键约束）
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationLog {
+    pub id: i64,
+    /// 通知渠道：email / sms
+    pub channel: String,
+    /// 关联员工 id（可空：测试邮件等非按员工发送场景）
+    pub employee_id: Option<i64>,
+    /// 收件地址（邮箱 / 手机号）
+    pub recipient: String,
+    /// 工资所属月份（YYYY-MM，可空：测试邮件等非账期通知）
+    pub belong_month: Option<String>,
+    /// 邮件主题 / 通知标题
+    pub subject: String,
+    /// sent / failed / skipped
+    pub status: String,
+    /// 失败或跳过原因（成功为空）
+    pub error_msg: Option<String>,
+    /// 操作人
+    pub operator: Option<String>,
+    pub created_at: String,
+}
+
+/// SMTP 配置（app_settings `smtp_config` 键：JSON 序列化后整键 AES-GCM 加密存储，
+/// spec 3.3；password 为邮箱授权码而非登录密码，界面回显脱敏）
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SmtpConfig {
+    /// SMTP 服务器地址（如 smtp.qq.com）
+    pub host: String,
+    /// 端口（QQ/163 常用 465，Outlook STARTTLS 常用 587）
+    pub port: u16,
+    /// 加密方式：starttls | ssl | none
+    pub encryption: String,
+    /// 发件账号
+    pub username: String,
+    /// 授权码（AES-GCM 整键加密入库，永不明文回显）
+    pub password: String,
+    /// 发件人显示名
+    pub from_name: String,
+}

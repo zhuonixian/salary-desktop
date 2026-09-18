@@ -462,6 +462,7 @@ pub fn create_tables(conn: &Connection) -> AppResult<()> {
     migrate_existing_schema(conn)?;
     migrate_stage7_schema(conn)?;
     migrate_stage8_schema(conn)?;
+    migrate_stage9_schema(conn)?;
 
     Ok(())
 }
@@ -7706,6 +7707,73 @@ fn generate_reimbursement_claim_no(month: &str) -> String {
     format!("BX{}{}", month_part, Utc::now().timestamp_millis())
 }
 
+// ==================== 第九阶段（通知模块）schema 迁移 ====================
+
+/// 第九阶段新表清单（迁移后自检用）
+const STAGE9_NEW_TABLES: &[&str] = &["notification_logs"];
+
+/// 建第九阶段通知发送留痕表（IF NOT EXISTS，幂等）。
+/// 表结构逐字取 spec 3.2：channel CHECK IN ('email','sms')、status CHECK IN
+/// ('sent','failed','skipped')；employee_id / belong_month / error_msg / operator 可空
+/// （测试邮件、无邮箱员工跳过等场景不强制挂账期或员工）；留痕表只追加不修改。
+fn create_stage9_tables(conn: &Connection) -> AppResult<()> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS notification_logs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          channel TEXT NOT NULL CHECK (channel IN ('email','sms')),
+          employee_id INTEGER,
+          recipient TEXT NOT NULL,
+          belong_month TEXT,
+          subject TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (status IN ('sent','failed','skipped')),
+          error_msg TEXT,
+          operator TEXT,
+          created_at TEXT NOT NULL
+        );
+        ",
+    )?;
+    Ok(())
+}
+
+/// 第九阶段 schema 迁移入口（幂等，可在新旧库上重复执行）：
+/// 1. `employees` 补可空 `email` 列（spec 3.1，工资条邮件收件地址；无邮箱员工发送时
+///    跳过并列出，历史数据保持 NULL）；
+/// 2. 建通知发送留痕表 `notification_logs`（spec 3.2，DDL 逐字）；
+/// 3. 迁移结束运行 `PRAGMA foreign_key_check`，发现悬空引用整体回滚。
+///
+/// 无存量数据迁移；全程在单事务中执行，任一步失败整体回滚（含建表/加列），
+/// 不留半成品。注意：notification_logs.employee_id 按 spec 不挂外键约束
+/// （留痕表只追加，员工删除后历史记录仍完整保留）。
+pub fn migrate_stage9_schema(conn: &Connection) -> AppResult<()> {
+    run_migration_in_transaction(conn, |c| {
+        // employees 为 v1 起的基础表，真实新旧库必存在（create_tables 链先建表再迁移）
+        ensure_column(c, "employees", "email", "TEXT")?;
+        create_stage9_tables(c)?;
+
+        // 新表自检：防止建表被静默吞掉
+        for table in STAGE9_NEW_TABLES {
+            let exists: i64 = c.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                params![table],
+                |r| r.get(0),
+            )?;
+            if exists == 0 {
+                return Err(AppError::General(format!(
+                    "第九阶段迁移异常：表 {table} 创建失败"
+                )));
+            }
+        }
+
+        // 外键一致性校验：存量脏数据（悬空引用）视为升级阻断项，整体回滚
+        let fk_errors = count_fk_check_violations(c)?;
+        if fk_errors > 0 {
+            return Err(fk_gate_error("第九阶段迁移", fk_errors, c));
+        }
+        Ok(())
+    })
+}
+
 #[cfg(test)]
 pub mod tests {
     use super::*;
@@ -13724,5 +13792,181 @@ mod stage7_tests {
 
         // 基准日格式错误显式报错
         assert!(get_dashboard_reminders(&conn, "2026/09/18").is_err());
+    }
+
+    // ==================== 第九阶段（通知模块）迁移测试 ====================
+
+    /// v0.8.0 旧库模拟：在 stage7 legacy 库上补一张老结构 employees 表（无 email 列）。
+    /// employees 自 v1 起即为基础表，真实旧库必存在；stage7/8 迁移不触碰该表，
+    /// 故 legacy 辅助库未包含，由本函数按 create_tables 的老结构补齐并种一条员工。
+    fn setup_stage9_legacy_db() -> Connection {
+        let conn = setup_stage7_legacy_db();
+        conn.execute_batch(
+            "
+            CREATE TABLE employees (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                employee_no TEXT UNIQUE NOT NULL,
+                name TEXT NOT NULL,
+                department TEXT,
+                position TEXT,
+                id_card TEXT,
+                phone TEXT,
+                bank_account TEXT,
+                bank_name TEXT,
+                hire_date TEXT,
+                status TEXT DEFAULT 'active',
+                base_salary REAL DEFAULT 0,
+                position_salary REAL DEFAULT 0,
+                performance_salary REAL DEFAULT 0,
+                social_security_base REAL DEFAULT 0,
+                housing_fund_base REAL DEFAULT 0,
+                special_deduction REAL DEFAULT 0,
+                remark TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            );
+            INSERT INTO employees
+                (id, employee_no, name, department, status, base_salary, created_at, updated_at)
+            VALUES (1, 'E001', '张三', '销售部', 'active', 10000, '2026-08-01', '2026-08-01');
+            ",
+        )
+        .unwrap();
+        conn
+    }
+
+    /// 直插一条通知留痕（db 层测试既有模式：SQL 直插验证约束层行为）
+    fn t9_seed_log(conn: &Connection, channel: &str, status: &str) {
+        conn.execute(
+            "INSERT INTO notification_logs
+                (channel, employee_id, recipient, belong_month, subject, status, operator, created_at)
+             VALUES (?1, 1, 'zhang@example.com', '2026-09', '2026年9月工资条', ?2, '管理员',
+                     '2026-09-19T10:00:00+00:00')",
+            params![channel, status],
+        )
+        .unwrap();
+    }
+
+    /// employees.email 列出现次数（幂等断言用：ensure_column 重复执行不得加重复列）
+    fn t9_email_column_count(conn: &Connection) -> usize {
+        let mut stmt = conn.prepare("PRAGMA table_info(employees)").unwrap();
+        let names: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .filter_map(|c| c.ok())
+            .collect();
+        names.iter().filter(|n| n.as_str() == "email").count()
+    }
+
+    /// 空库初始化：employees.email 补列、notification_logs 建表、CHECK 白名单与
+    /// NOT NULL 生效、email 可写可读；二次执行 stage9 迁移无变化（幂等）。
+    #[test]
+    fn test_stage9_fresh_db_initializes_notification_logs() {
+        let conn = setup_financial_db();
+        assert!(
+            stage7_column_exists(&conn, "employees", "email"),
+            "空库应补出 employees.email 列"
+        );
+        assert!(stage7_table_exists(&conn, "notification_logs"));
+
+        // 合法写入：email 渠道 sent（含全部可空列取值）
+        t9_seed_log(&conn, "email", "sent");
+        // 可空列：employee_id / belong_month / error_msg / operator 允许 NULL（测试邮件等场景）
+        conn.execute(
+            "INSERT INTO notification_logs (channel, recipient, subject, status, created_at)
+             VALUES ('email', 'admin@example.com', '测试邮件', 'sent',
+                     '2026-09-19T10:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+
+        // CHECK 白名单：非法 channel / status 拒绝
+        let bad = conn.execute(
+            "INSERT INTO notification_logs (channel, recipient, subject, status, created_at)
+             VALUES ('webhook', 'a@example.com', 'x', 'sent', '2026-09-19T10:00:00+00:00')",
+            [],
+        );
+        assert!(bad.is_err(), "非法 channel 应被 CHECK 拦截");
+        let bad = conn.execute(
+            "INSERT INTO notification_logs (channel, recipient, subject, status, created_at)
+             VALUES ('email', 'a@example.com', 'x', 'pending', '2026-09-19T10:00:00+00:00')",
+            [],
+        );
+        assert!(bad.is_err(), "非法 status 应被 CHECK 拦截");
+
+        // NOT NULL：subject 缺失拒绝（recipient/created_at 同为 NOT NULL）
+        let bad = conn.execute(
+            "INSERT INTO notification_logs (channel, recipient, status, created_at)
+             VALUES ('email', 'a@example.com', 'sent', '2026-09-19T10:00:00+00:00')",
+            [],
+        );
+        assert!(bad.is_err(), "subject NOT NULL 应被拦截");
+
+        // employees.email 可写可读
+        conn.execute(
+            "UPDATE employees SET email='zhang@example.com' WHERE employee_no='E001'",
+            [],
+        )
+        .unwrap();
+        let email: String = conn
+            .query_row(
+                "SELECT email FROM employees WHERE employee_no='E001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(email, "zhang@example.com");
+
+        assert_eq!(stage7_fk_violation_count(&conn), 0);
+
+        // 幂等：二次执行迁移不产生/丢失数据、不重复加列
+        migrate_stage9_schema(&conn).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM notification_logs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 2, "重跑迁移不得产生或丢失数据");
+        assert_eq!(t9_email_column_count(&conn), 1, "email 列不得重复添加");
+        assert_eq!(stage7_fk_violation_count(&conn), 0);
+    }
+
+    /// 旧库升级（v0.8.0：先 stage7 后 stage8 再 stage9）：email 列补齐、notification_logs
+    /// 建表、存量员工数据保留、升级后即可写入；二次执行 stage9 迁移无变化（幂等）。
+    #[test]
+    fn test_stage9_migration_upgrades_legacy_db_and_idempotent() {
+        let conn = setup_stage9_legacy_db();
+        migrate_stage7_schema(&conn).unwrap();
+        migrate_stage8_schema(&conn).unwrap();
+        migrate_stage9_schema(&conn).unwrap();
+
+        assert!(
+            stage7_column_exists(&conn, "employees", "email"),
+            "旧库升级应补出 employees.email 列"
+        );
+        assert!(stage7_table_exists(&conn, "notification_logs"));
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM employees", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "升级不得丢失存量员工");
+
+        // 升级后即可写入留痕与邮箱（employee_id 无外键约束，员工删除后留痕仍可保留）
+        t9_seed_log(&conn, "sms", "failed");
+        conn.execute(
+            "UPDATE employees SET email='zhang@example.com' WHERE employee_no='E001'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(stage7_fk_violation_count(&conn), 0);
+
+        // 幂等：二次执行迁移不产生/丢失数据
+        migrate_stage9_schema(&conn).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM notification_logs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "重跑迁移不得产生或丢失数据");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM employees", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(t9_email_column_count(&conn), 1, "email 列不得重复添加");
+        assert_eq!(stage7_fk_violation_count(&conn), 0);
     }
 }
