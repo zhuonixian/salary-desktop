@@ -131,6 +131,7 @@ const Employees: React.FC = () => {
       const payload = {
         ...values,
         employee_no: values.employee_no.trim(),
+        email: values.email?.trim() ?? '',
       };
       if (editingEmployee) {
         await updateEmployee(editingEmployee.id, payload);
@@ -169,6 +170,14 @@ const Employees: React.FC = () => {
       key: 'phone',
       width: 150,
       render: (v: string) => <SensitiveText type="phone" value={v} />,
+    },
+    {
+      title: '邮箱',
+      dataIndex: 'email',
+      key: 'email',
+      width: 190,
+      ellipsis: true,
+      render: (v: string) => v || <span style={{ color: '#bbb' }}>-</span>,
     },
     {
       title: '基本工资',
@@ -249,7 +258,7 @@ const Employees: React.FC = () => {
         dataSource={filteredData}
         loading={loading}
         pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
-        scroll={{ x: 1400 }}
+        scroll={{ x: 1600 }}
         size="middle"
       />
 
@@ -305,6 +314,23 @@ const Employees: React.FC = () => {
             </Form.Item>
             <Form.Item name="phone" label="手机号">
               <Input placeholder="请输入手机号" maxLength={11} />
+            </Form.Item>
+            <Form.Item
+              name="email"
+              label="邮箱"
+              extra="用于接收工资条邮件（可空）"
+              rules={[
+                {
+                  validator: async (_, value) => {
+                    const email = String(value ?? '').trim();
+                    if (email && !email.includes('@')) {
+                      throw new Error('邮箱格式无效，需包含 @');
+                    }
+                  },
+                },
+              ]}
+            >
+              <Input placeholder="用于接收工资条邮件，可空" maxLength={100} allowClear />
             </Form.Item>
             <Form.Item name="bank_account" label="银行卡号">
               <Input placeholder="请输入银行卡号" />

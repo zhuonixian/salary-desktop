@@ -580,6 +580,132 @@ const mockMaskedSmtpConfig = (config: SmtpConfig): SmtpConfigMasked => ({
   from_name: config.from_name,
 });
 
+// ==================== 员工与工资条邮件预览数据（第九阶段 Task 6） ====================
+// 内存态员工库（含 email 通道）+ 当月已锁定工资结果 + 发送记录，支撑向导三步走查：
+// - A004 故意不填邮箱 → 演示「缺邮箱灰显 + 缺邮箱 N 人」
+// - A005 无当月工资结果 → 演示「仅列当月有工资结果的员工」
+// - send 固定让最后一个收件人失败 → 演示「失败勾选重发」（resend 返回成功）
+const mockCurrentMonth = (): string => new Date().toISOString().slice(0, 7);
+
+interface MockEmployeeRow {
+  id: number;
+  employee_no: string;
+  name: string;
+  department: string;
+  position: string;
+  id_card: string;
+  phone: string;
+  email: string;
+  bank_account: string;
+  bank_name: string;
+  hire_date: string;
+  status: string;
+  base_salary: number;
+  position_salary: number;
+  performance_salary: number;
+  social_insurance_base: number;
+  housing_fund_base: number;
+  special_deduction: number;
+  remark: string;
+  created_at: string;
+  updated_at: string;
+}
+
+let mockEmployees: MockEmployeeRow[] | null = null;
+
+const ensureMockEmployees = (): MockEmployeeRow[] => {
+  if (!mockEmployees) {
+    mockEmployees = [
+      { id: 1, employee_no: 'A001', name: '张三', department: '生产部', position: '操作员', id_card: '', phone: '13800000001', email: 'zhangsan@example.com', bank_account: '', bank_name: '', hire_date: '2024-03-01', status: 'active', base_salary: 5000, position_salary: 1000, performance_salary: 800, social_insurance_base: 5000, housing_fund_base: 5000, special_deduction: 1000, remark: '', created_at: '', updated_at: '' },
+      { id: 2, employee_no: 'A002', name: '李四', department: '销售部', position: '销售员', id_card: '', phone: '13800000002', email: 'lisi@example.com', bank_account: '', bank_name: '', hire_date: '2024-06-15', status: 'active', base_salary: 4500, position_salary: 800, performance_salary: 1200, social_insurance_base: 4500, housing_fund_base: 4500, special_deduction: 0, remark: '', created_at: '', updated_at: '' },
+      { id: 3, employee_no: 'A003', name: '王五', department: '财务部', position: '会计', id_card: '', phone: '13800000003', email: 'wangwu@example.com', bank_account: '', bank_name: '', hire_date: '2023-11-01', status: 'active', base_salary: 6000, position_salary: 1500, performance_salary: 1000, social_insurance_base: 6000, housing_fund_base: 6000, special_deduction: 2000, remark: '', created_at: '', updated_at: '' },
+      { id: 4, employee_no: 'A004', name: '赵六', department: '生产部', position: '操作员', id_card: '', phone: '13800000004', email: '', bank_account: '', bank_name: '', hire_date: '2025-02-10', status: 'active', base_salary: 4200, position_salary: 600, performance_salary: 600, social_insurance_base: 4200, housing_fund_base: 4200, special_deduction: 0, remark: '暂无邮箱', created_at: '', updated_at: '' },
+      { id: 5, employee_no: 'A005', name: '孙七', department: '销售部', position: '销售员', id_card: '', phone: '13800000005', email: 'sunqi@example.com', bank_account: '', bank_name: '', hire_date: '2026-09-01', status: 'probation', base_salary: 4000, position_salary: 500, performance_salary: 500, social_insurance_base: 4000, housing_fund_base: 4000, special_deduction: 0, remark: '本月无工资结果', created_at: '', updated_at: '' },
+    ];
+  }
+  return mockEmployees;
+};
+
+// 当月已锁定工资结果（employee_no 与员工库对应；仅 A001-A004 有结果）
+const ensureMockSalaryResults = (): Array<Record<string, unknown>> => {
+  const month = mockCurrentMonth();
+  const rows: Array<Record<string, unknown>> = [];
+  ensureMockEmployees()
+    .filter((e) => e.employee_no !== 'A005')
+    .forEach((e, index) => {
+      const gross = e.base_salary + e.position_salary + e.performance_salary + 200;
+      const ss = Math.round(e.social_insurance_base * 0.105 * 100) / 100;
+      const hf = Math.round(e.housing_fund_base * 0.12 * 100) / 100;
+      const tax = Math.max(0, Math.round((gross - ss - hf - 5000 - e.special_deduction) * 0.03 * 100) / 100);
+      rows.push({
+        id: index + 1,
+        salary_month: month,
+        employee_no: e.employee_no,
+        name: e.name,
+        department: e.department,
+        base_salary: e.base_salary,
+        position_salary: e.position_salary,
+        performance_salary: e.performance_salary,
+        overtime_salary: 200,
+        meal_allowance: 0,
+        transport_allowance: 0,
+        other_allowance: 0,
+        gross_salary: gross,
+        social_security_personal: ss,
+        housing_fund_personal: hf,
+        social_security_employer: Math.round(e.social_insurance_base * 0.26 * 100) / 100,
+        housing_fund_employer: hf,
+        attendance_deduction: 0,
+        tax_amount: tax,
+        other_deduction: 0,
+        net_salary: Math.round((gross - ss - hf - tax) * 100) / 100,
+        status: '已锁定',
+        locked: true,
+        remark: '',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      });
+    });
+  return rows;
+};
+
+// 发送记录内存库（含 Task 3 预置两行 + 向导 send/resend 动态写入）
+let mockNotificationLogs: NotificationLog[] | null = null;
+let mockNotificationLogSeq = 100;
+
+const ensureMockNotificationLogs = (): NotificationLog[] => {
+  if (!mockNotificationLogs) {
+    const month = mockCurrentMonth();
+    mockNotificationLogs = [
+      {
+        id: 1,
+        channel: 'email',
+        employee_id: null,
+        recipient: 'salary@example.com',
+        belong_month: null,
+        subject: '工资条邮件发送测试',
+        status: 'sent',
+        error_msg: null,
+        operator: '管理员',
+        created_at: new Date().toISOString(),
+      },
+      {
+        id: 2,
+        channel: 'email',
+        employee_id: 1,
+        recipient: 'zhangsan@example.com',
+        belong_month: month,
+        subject: `${month} 工资条`,
+        status: 'failed',
+        error_msg: '授权码错误，请检查邮箱设置（QQ/163 需使用授权码而非登录密码）',
+        operator: '管理员',
+        created_at: new Date(Date.now() - 3600000).toISOString(),
+      },
+    ];
+  }
+  return mockNotificationLogs;
+};
+
 // ==================== 付款批次预览数据（第七阶段 Task 9） ====================
 // 内存态模拟 payment_batches / payment_items 与批次-资金单状态机联动（演示用，
 // 完整校验以后端为准）。general 批次与 mock 资金单联动：勾选单据 batched，付款后 settled。
@@ -1839,6 +1965,9 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
       return true;
     case 'unlock':
       return { unlocked: true, failed_attempts: 0, lock_until: null };
+    case 'reveal_sensitive_data':
+      // 预览模式：任意密码解锁敏感数据 5 分钟，供工资条向导发送门禁/金额明文演示
+      return { expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString() };
     case 'get_security_status':
       return {
         initialized: true,
@@ -2114,8 +2243,60 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
     case 'ocr_recognize':
     case 'ocr_recognize_punch_card':
       return { batch_id: 0, records: [], raw_text: '' };
-    case 'create_employee':
-      return { id: Date.now(), ...(args?.data as object), created_at: '', updated_at: '' };
+    // ==================== 员工管理（第九阶段 Task 6 补内存态演示库） ====================
+    case 'get_employees':
+      return ensureMockEmployees();
+    case 'get_employee': {
+      const row = ensureMockEmployees().find((e) => e.id === Number(args?.id ?? -1));
+      if (!row) throw new Error(`员工ID=${String(args?.id)}未找到`);
+      return row;
+    }
+    case 'create_employee': {
+      const rows = ensureMockEmployees();
+      const next: MockEmployeeRow = {
+        id: Date.now(),
+        employee_no: '',
+        name: '',
+        department: '',
+        position: '',
+        id_card: '',
+        phone: '',
+        email: '',
+        bank_account: '',
+        bank_name: '',
+        hire_date: '',
+        status: 'active',
+        base_salary: 0,
+        position_salary: 0,
+        performance_salary: 0,
+        social_insurance_base: 0,
+        housing_fund_base: 0,
+        special_deduction: 0,
+        remark: '',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        ...(args?.data as Partial<MockEmployeeRow>),
+      };
+      rows.push(next);
+      return next;
+    }
+    case 'update_employee': {
+      const rows = ensureMockEmployees();
+      const row = rows.find((e) => e.id === Number(args?.id ?? -1));
+      if (!row) throw new Error(`员工ID=${String(args?.id)}未找到`);
+      Object.assign(row, args?.data as Partial<MockEmployeeRow>, {
+        updated_at: new Date().toISOString(),
+      });
+      return true;
+    }
+    case 'delete_employee': {
+      const rows = ensureMockEmployees();
+      const id = Number(args?.id ?? -1);
+      const index = rows.findIndex((e) => e.id === id);
+      if (index < 0) return false;
+      rows.splice(index, 1);
+      return true;
+    }
     case 'save_invoice_expense_type':
       return { id: Date.now(), code: '', name: '', sort_order: 0, enabled: 1, ...(args?.data as object) };
     case 'save_invoice':
@@ -2244,53 +2425,117 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
         throw new Error('尚未配置 SMTP，请先在通知设置中保存邮箱配置');
       }
       return null;
-    case 'get_notification_logs': {
-      const month = new Date().toISOString().slice(0, 7);
-      return [
-        {
-          id: 1,
-          channel: 'email',
-          employee_id: null,
-          recipient: mockSmtpConfig?.username ?? 'salary@example.com',
-          belong_month: null,
-          subject: '工资条邮件发送测试',
-          status: 'sent',
-          error_msg: null,
-          operator: '管理员',
-          created_at: new Date().toISOString(),
-        },
-        {
-          id: 2,
-          channel: 'email',
-          employee_id: 1,
-          recipient: 'zhangsan@example.com',
-          belong_month: month,
-          subject: `${month} 工资条`,
-          status: 'failed',
-          error_msg: '授权码错误，请检查邮箱设置（QQ/163 需使用授权码而非登录密码）',
-          operator: '管理员',
-          created_at: new Date(Date.now() - 3600000).toISOString(),
-        },
-      ] satisfies Partial<NotificationLog>[];
+    case 'get_notification_logs':
+      return ensureMockNotificationLogs();
+    case 'get_salary_results':
+      // 仅当月返回已锁定示例结果（A001-A004），支撑工资条邮件向导三步走查；
+      // 其他月份返回空，与后端「无结果」行为一致
+      return String(args?.month ?? '') === mockCurrentMonth() ? ensureMockSalaryResults() : [];
+    // ==================== 工资条邮件（第九阶段 Task 5/6） ====================
+    case 'preview_payslip_email': {
+      const previewMonth = String(args?.month ?? '');
+      const emp = ensureMockEmployees().find((e) => e.id === Number(args?.employeeId ?? -1));
+      const name = emp?.name ?? '员工';
+      const no = emp?.employee_no ?? '-';
+      const money = (v: number) => `¥ ${v.toFixed(2)}`;
+      const gross = (emp?.base_salary ?? 0) + (emp?.position_salary ?? 0) + (emp?.performance_salary ?? 0);
+      const ss = Math.round((emp?.social_insurance_base ?? 0) * 0.105 * 100) / 100;
+      const hf = Math.round((emp?.housing_fund_base ?? 0) * 0.12 * 100) / 100;
+      const net = gross - ss - hf;
+      const rowStyle = 'border:1px solid #d9d9d9;padding:2px 8px;';
+      return `<div style="font-family:'Microsoft YaHei',sans-serif;max-width:640px;color:#333">
+  <h3 style="margin:0 0 4px">${previewMonth} 工资条</h3>
+  <p style="margin:0 0 12px;color:#888;font-size:12px">${name}（${no}）· 本邮件由系统发出，工资信息属个人隐私，请妥善保管</p>
+  <table style="width:100%;border-collapse:collapse;font-size:13px">
+    <tbody>
+      <tr><td style="${rowStyle}">基本工资</td><td style="${rowStyle};text-align:right">${money(emp?.base_salary ?? 0)}</td></tr>
+      <tr><td style="${rowStyle}">岗位工资</td><td style="${rowStyle};text-align:right">${money(emp?.position_salary ?? 0)}</td></tr>
+      <tr><td style="${rowStyle}">绩效工资</td><td style="${rowStyle};text-align:right">${money(emp?.performance_salary ?? 0)}</td></tr>
+      <tr><td style="${rowStyle};font-weight:600">应发合计</td><td style="${rowStyle};text-align:right;font-weight:600">${money(gross)}</td></tr>
+      <tr><td style="${rowStyle}">社会保险（个人）</td><td style="${rowStyle};text-align:right">-${money(ss)}</td></tr>
+      <tr><td style="${rowStyle}">住房公积金（个人）</td><td style="${rowStyle};text-align:right">-${money(hf)}</td></tr>
+      <tr><td style="${rowStyle}">社会保险（单位）</td><td style="${rowStyle};text-align:right">${money(Math.round((emp?.social_insurance_base ?? 0) * 0.26 * 100) / 100)}</td></tr>
+      <tr><td style="${rowStyle}">住房公积金（单位）</td><td style="${rowStyle};text-align:right">${money(hf)}</td></tr>
+      <tr><td style="border:1px solid #333;padding:4px 8px;font-weight:700">实发工资</td><td style="border:1px solid #333;padding:4px 8px;text-align:right;font-weight:700">${money(net)}</td></tr>
+    </tbody>
+  </table>
+  <p style="margin:12px 0 0;color:#aaa;font-size:12px">预览模式示意数据，完整金额以后端组装为准</p>
+</div>`;
     }
-    // ==================== 工资条邮件（第九阶段 Task 5） ====================
-    case 'preview_payslip_email':
-      return `<div style="font-family:sans-serif;max-width:640px"><h3>${String(
-        args?.month ?? '',
-      )} 工资条</h3><p>员工 #${String(args?.employeeId ?? '')} 工资明细预览（示意）</p></div>`;
     case 'send_payslip_emails': {
       if (!mockSmtpConfig) {
         throw new Error('尚未配置 SMTP，请先在通知设置中保存邮箱配置');
       }
       const ids = (args?.employeeIds as number[] | undefined) ?? [];
-      return { sent: ids.length, failed: 0, skipped: 0, failed_log_ids: [] } satisfies BatchSummary;
+      if (ids.length === 0) {
+        throw new Error('请先勾选要发送工资条的员工');
+      }
+      const month = mockCurrentMonth();
+      const store = ensureMockEmployees();
+      const logs = ensureMockNotificationLogs();
+      let sent = 0;
+      let failed = 0;
+      let skipped = 0;
+      const failedLogIds: number[] = [];
+      // 末位固定失败：让「失败勾选重发」在预览态可稳定演示
+      ids.forEach((id, index) => {
+        const emp = store.find((e) => e.id === id);
+        const email = (emp?.email ?? '').trim();
+        if (!emp || !email) {
+          skipped += 1;
+          return;
+        }
+        const isDemoFailure = index === ids.length - 1;
+        mockNotificationLogSeq += 1;
+        logs.push({
+          id: mockNotificationLogSeq,
+          channel: 'email',
+          employee_id: id,
+          recipient: email,
+          belong_month: month,
+          subject: `${month} 工资条`,
+          status: isDemoFailure ? 'failed' : 'sent',
+          error_msg: isDemoFailure ? 'SMTP 连接超时，请检查网络后重试' : null,
+          operator: '管理员',
+          created_at: new Date().toISOString(),
+        });
+        if (isDemoFailure) {
+          failed += 1;
+          failedLogIds.push(mockNotificationLogSeq);
+        } else {
+          sent += 1;
+        }
+      });
+      // 模拟逐封网络耗时（1.2s），让第三步「发送中」进度态可被观察到
+      return new Promise((resolve) =>
+        setTimeout(() => resolve({ sent, failed, skipped, failed_log_ids: failedLogIds } satisfies BatchSummary), 1200)
+      );
     }
     case 'resend_payslip_emails': {
       if (!mockSmtpConfig) {
         throw new Error('尚未配置 SMTP，请先在通知设置中保存邮箱配置');
       }
-      const ids = (args?.logIds as number[] | undefined) ?? [];
-      return { sent: ids.length, failed: 0, skipped: 0, failed_log_ids: [] } satisfies BatchSummary;
+      const logIds = (args?.logIds as number[] | undefined) ?? [];
+      if (logIds.length === 0) {
+        throw new Error('请先勾选要重发的失败记录');
+      }
+      const month = mockCurrentMonth();
+      const logs = ensureMockNotificationLogs();
+      let sent = 0;
+      logIds.forEach((logId) => {
+        const row = logs.find((l) => l.id === logId);
+        if (!row || row.status !== 'failed' || row.belong_month !== month) return;
+        mockNotificationLogSeq += 1;
+        logs.push({
+          ...row,
+          id: mockNotificationLogSeq,
+          status: 'sent',
+          error_msg: null,
+          created_at: new Date().toISOString(),
+        });
+        sent += 1;
+      });
+      return { sent, failed: 0, skipped: logIds.length - sent, failed_log_ids: [] } satisfies BatchSummary;
     }
     default: {
       // 预览模式兜底（Minor 8）：不再无差别 return true——只读命令按语义返回空集合，
@@ -2338,6 +2583,7 @@ const normalizeEmployee = (employee: BackendEmployee): Employee => ({
   position: employee.position ?? '',
   id_card: employee.id_card ?? '',
   phone: employee.phone ?? '',
+  email: employee.email ?? '',
   bank_account: employee.bank_account ?? '',
   bank_name: employee.bank_name ?? '',
   hire_date: employee.hire_date ?? '',

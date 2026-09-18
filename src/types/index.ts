@@ -10,6 +10,8 @@ export interface Employee {
   position: string;
   id_card: string;
   phone: string;
+  /** 工资条邮件收件地址（stage9 spec 3.1，可空） */
+  email: string;
   bank_account: string;
   bank_name: string;
   hire_date: string;
@@ -32,6 +34,8 @@ export interface EmployeeInput {
   position: string;
   id_card?: string;
   phone?: string;
+  /** 邮箱：空串表示清空；undefined 表示不修改 */
+  email?: string;
   bank_account?: string;
   bank_name?: string;
   hire_date?: string;

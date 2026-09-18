@@ -139,6 +139,9 @@ const operationTypeLabels: Record<string, string> = {
   verify_database: '数据库体检',
   // 第九阶段通知设置命令（与 src-tauri/src/commands.rs 实名一一对应；get 不落日志）
   smtp_config_update: '更新 SMTP 通知配置',
+  // 第九阶段工资条邮件（notification.rs 落 operation_logs：发起批量/重发；preview 只读不落日志）
+  payslip_email_batch_send: '发起工资条邮件批量发送',
+  payslip_email_resend: '重发工资条邮件',
 };
 
 const getOperationLabel = (value?: string) =>

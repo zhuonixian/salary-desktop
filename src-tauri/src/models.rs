@@ -11,6 +11,8 @@ pub struct Employee {
     pub position: Option<String>,
     pub id_card: Option<String>,
     pub phone: Option<String>,
+    /// 工资条邮件收件地址（stage9 spec 3.1，可空；空/缺失员工发送时跳过并列名单）
+    pub email: Option<String>,
     pub bank_account: Option<String>,
     pub bank_name: Option<String>,
     pub hire_date: Option<String>,
@@ -34,6 +36,8 @@ pub struct EmployeeInput {
     pub position: Option<String>,
     pub id_card: Option<String>,
     pub phone: Option<String>,
+    /// 邮箱（Some("") 视为清空；None 表示不修改，见 update_employee 合并语义）
+    pub email: Option<String>,
     pub bank_account: Option<String>,
     pub bank_name: Option<String>,
     pub hire_date: Option<String>,

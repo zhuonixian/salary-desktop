@@ -48,6 +48,10 @@ pub fn read_employee_excel(path: &str) -> AppResult<Vec<Employee>> {
     let col_pos = get_col("职位", &headers).or_else(|| get_col("position", &headers));
     let col_idcard = get_col("身份证号", &headers).or_else(|| get_col("id_card", &headers));
     let col_phone = get_col("手机号", &headers).or_else(|| get_col("phone", &headers));
+    // 邮箱列（stage9 spec 3.1）：模板列名「邮箱(email)」，兼容「邮箱」/「email」旧表头
+    let col_email = get_col("邮箱(email)", &headers)
+        .or_else(|| get_col("邮箱", &headers))
+        .or_else(|| get_col("email", &headers));
     let col_bank = get_col("银行账号", &headers).or_else(|| get_col("bank_account", &headers));
     let col_bankname = get_col("开户行", &headers).or_else(|| get_col("bank_name", &headers));
     let col_hire = get_col("入职日期", &headers).or_else(|| get_col("hire_date", &headers));
@@ -108,6 +112,12 @@ pub fn read_employee_excel(path: &str) -> AppResult<Vec<Employee>> {
             position: get_string(col_pos),
             id_card: get_string(col_idcard),
             phone: get_string(col_phone),
+            email: {
+                // 邮箱 trim 后空归 None（带空白邮箱会导致 SMTP 收件失败）
+                let raw = get_string(col_email);
+                raw.map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            },
             bank_account: get_string(col_bank),
             bank_name: get_string(col_bankname),
             hire_date: get_string(col_hire),
@@ -557,6 +567,7 @@ pub fn export_employee_template(path: &str, employees: &[Employee]) -> AppResult
         "职位",
         "身份证号",
         "手机号",
+        "邮箱(email)",
         "银行账号",
         "开户行",
         "入职日期",
@@ -578,19 +589,20 @@ pub fn export_employee_template(path: &str, employees: &[Employee]) -> AppResult
     worksheet.write_string_with_format(1, 3, "操作员", &cell_fmt)?;
     worksheet.write_string_with_format(1, 4, "", &cell_fmt)?;
     worksheet.write_string_with_format(1, 5, "1XXXXXXXXXX", &cell_fmt)?;
-    worksheet.write_string_with_format(1, 6, "", &cell_fmt)?;
+    worksheet.write_string_with_format(1, 6, "zhangsan@example.com", &cell_fmt)?;
     worksheet.write_string_with_format(1, 7, "", &cell_fmt)?;
-    worksheet.write_string_with_format(1, 8, "2026-01-01", &cell_fmt)?;
-    worksheet.write_number_with_format(1, 9, 5000.0, &money_fmt)?;
-    worksheet.write_number_with_format(1, 10, 1000.0, &money_fmt)?;
-    worksheet.write_number_with_format(1, 11, 800.0, &money_fmt)?;
-    worksheet.write_number_with_format(1, 12, 5000.0, &money_fmt)?;
+    worksheet.write_string_with_format(1, 8, "", &cell_fmt)?;
+    worksheet.write_string_with_format(1, 9, "2026-01-01", &cell_fmt)?;
+    worksheet.write_number_with_format(1, 10, 5000.0, &money_fmt)?;
+    worksheet.write_number_with_format(1, 11, 1000.0, &money_fmt)?;
+    worksheet.write_number_with_format(1, 12, 800.0, &money_fmt)?;
     worksheet.write_number_with_format(1, 13, 5000.0, &money_fmt)?;
-    worksheet.write_number_with_format(1, 14, 0.0, &money_fmt)?;
-    worksheet.write_string_with_format(1, 15, "示例行，可删除；工号不可重复", &cell_fmt)?;
+    worksheet.write_number_with_format(1, 14, 5000.0, &money_fmt)?;
+    worksheet.write_number_with_format(1, 15, 0.0, &money_fmt)?;
+    worksheet.write_string_with_format(1, 16, "示例行，可删除；工号不可重复", &cell_fmt)?;
 
     let widths = [
-        12, 10, 12, 12, 20, 14, 22, 18, 12, 12, 12, 12, 12, 12, 14, 20,
+        12, 10, 12, 12, 20, 14, 24, 22, 18, 12, 12, 12, 12, 12, 12, 14, 20,
     ];
     for (col, w) in widths.iter().enumerate() {
         worksheet.set_column_width(col as u16, *w)?;
@@ -3056,6 +3068,54 @@ fn payment_source_text(source_type: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// stage9 spec 3.1：导入模板含「邮箱(email)」列，导入解析可回读邮箱（含空串归 None）
+    #[test]
+    fn test_employee_template_and_import_support_email_column() {
+        let path = std::env::temp_dir().join(format!(
+            "salary-employee-email-template-{}.xlsx",
+            uuid::Uuid::new_v4()
+        ));
+        export_employee_template(&path.to_string_lossy(), &[]).unwrap();
+        assert!(path.exists());
+
+        // 用 calamine 直接改写模板示例行太绕：改为构造含邮箱列的导入文件再解析
+        let import_path = std::env::temp_dir().join(format!(
+            "salary-employee-email-import-{}.xlsx",
+            uuid::Uuid::new_v4()
+        ));
+        let mut workbook = rust_xlsxwriter::Workbook::new();
+        let sheet = workbook.add_worksheet();
+        let headers = [
+            "工号",
+            "姓名",
+            "手机号",
+            "邮箱(email)",
+            "基本工资",
+        ];
+        for (col, h) in headers.iter().enumerate() {
+            sheet.write_string(0, col as u16, *h).unwrap();
+        }
+        sheet.write_string(1, 0, "E100").unwrap();
+        sheet.write_string(1, 1, "张三").unwrap();
+        sheet.write_string(1, 2, "1XXXXXXXXXX").unwrap();
+        sheet.write_string(1, 3, " zhang@example.com ").unwrap();
+        sheet.write_number(1, 4, 5000.0).unwrap();
+        sheet.write_string(2, 0, "E101").unwrap();
+        sheet.write_string(2, 1, "李四").unwrap();
+        // E101 不填邮箱 → None
+        workbook.save(&import_path).unwrap();
+
+        let employees = read_employee_excel(&import_path.to_string_lossy()).unwrap();
+        assert_eq!(employees.len(), 2);
+        let zhang = employees.iter().find(|e| e.employee_no == "E100").unwrap();
+        assert_eq!(zhang.email.as_deref(), Some("zhang@example.com"));
+        let li = employees.iter().find(|e| e.employee_no == "E101").unwrap();
+        assert_eq!(li.email, None);
+
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(import_path);
+    }
 
     #[test]
     fn test_export_reimbursement_claim_list_creates_file() {

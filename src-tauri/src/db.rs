@@ -1969,7 +1969,7 @@ pub fn employee_no_exists(
 
 pub fn get_employees(conn: &Connection) -> AppResult<Vec<Employee>> {
     let mut stmt = conn.prepare(
-        "SELECT id, employee_no, name, department, position, id_card, phone, bank_account, bank_name, hire_date, status, base_salary, position_salary, performance_salary, social_security_base, housing_fund_base, special_deduction, remark, created_at, updated_at FROM employees ORDER BY id"
+        "SELECT id, employee_no, name, department, position, id_card, phone, email, bank_account, bank_name, hire_date, status, base_salary, position_salary, performance_salary, social_security_base, housing_fund_base, special_deduction, remark, created_at, updated_at FROM employees ORDER BY id"
     )?;
 
     let employees = stmt.query_map([], |row| {
@@ -1981,19 +1981,20 @@ pub fn get_employees(conn: &Connection) -> AppResult<Vec<Employee>> {
             position: row.get(4)?,
             id_card: row.get(5)?,
             phone: row.get(6)?,
-            bank_account: row.get(7)?,
-            bank_name: row.get(8)?,
-            hire_date: row.get(9)?,
-            status: row.get(10)?,
-            base_salary: row.get(11)?,
-            position_salary: row.get(12)?,
-            performance_salary: row.get(13)?,
-            social_security_base: row.get(14)?,
-            housing_fund_base: row.get(15)?,
-            special_deduction: row.get(16)?,
-            remark: row.get(17)?,
-            created_at: row.get(18)?,
-            updated_at: row.get(19)?,
+            email: row.get(7)?,
+            bank_account: row.get(8)?,
+            bank_name: row.get(9)?,
+            hire_date: row.get(10)?,
+            status: row.get(11)?,
+            base_salary: row.get(12)?,
+            position_salary: row.get(13)?,
+            performance_salary: row.get(14)?,
+            social_security_base: row.get(15)?,
+            housing_fund_base: row.get(16)?,
+            special_deduction: row.get(17)?,
+            remark: row.get(18)?,
+            created_at: row.get(19)?,
+            updated_at: row.get(20)?,
         })
     })?;
 
@@ -2004,7 +2005,7 @@ pub fn get_employees(conn: &Connection) -> AppResult<Vec<Employee>> {
 
 pub fn get_employee(conn: &Connection, id: i64) -> AppResult<Employee> {
     conn.query_row(
-        "SELECT id, employee_no, name, department, position, id_card, phone, bank_account, bank_name, hire_date, status, base_salary, position_salary, performance_salary, social_security_base, housing_fund_base, special_deduction, remark, created_at, updated_at FROM employees WHERE id = ?1",
+        "SELECT id, employee_no, name, department, position, id_card, phone, email, bank_account, bank_name, hire_date, status, base_salary, position_salary, performance_salary, social_security_base, housing_fund_base, special_deduction, remark, created_at, updated_at FROM employees WHERE id = ?1",
         params![id],
         |row| {
             Ok(Employee {
@@ -2015,19 +2016,20 @@ pub fn get_employee(conn: &Connection, id: i64) -> AppResult<Employee> {
                 position: row.get(4)?,
                 id_card: row.get(5)?,
                 phone: row.get(6)?,
-                bank_account: row.get(7)?,
-                bank_name: row.get(8)?,
-                hire_date: row.get(9)?,
-                status: row.get(10)?,
-                base_salary: row.get(11)?,
-                position_salary: row.get(12)?,
-                performance_salary: row.get(13)?,
-                social_security_base: row.get(14)?,
-                housing_fund_base: row.get(15)?,
-                special_deduction: row.get(16)?,
-                remark: row.get(17)?,
-                created_at: row.get(18)?,
-                updated_at: row.get(19)?,
+                email: row.get(7)?,
+                bank_account: row.get(8)?,
+                bank_name: row.get(9)?,
+                hire_date: row.get(10)?,
+                status: row.get(11)?,
+                base_salary: row.get(12)?,
+                position_salary: row.get(13)?,
+                performance_salary: row.get(14)?,
+                social_security_base: row.get(15)?,
+                housing_fund_base: row.get(16)?,
+                special_deduction: row.get(17)?,
+                remark: row.get(18)?,
+                created_at: row.get(19)?,
+                updated_at: row.get(20)?,
             })
         },
     ).map_err(|e| AppError::NotFound(format!("员工ID={id}未找到: {e}")))
@@ -2051,11 +2053,12 @@ pub fn create_employee(conn: &Connection, data: &EmployeeInput) -> AppResult<Emp
     let special_deduction = data.special_deduction.unwrap_or(0.0);
 
     conn.execute(
-        "INSERT INTO employees (employee_no, name, department, position, id_card, phone, bank_account, bank_name, hire_date, status, base_salary, position_salary, performance_salary, social_security_base, housing_fund_base, special_deduction, remark, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+        "INSERT INTO employees (employee_no, name, department, position, id_card, phone, email, bank_account, bank_name, hire_date, status, base_salary, position_salary, performance_salary, social_security_base, housing_fund_base, special_deduction, remark, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
         params![
             employee_no, data.name, data.department, data.position,
-            data.id_card, data.phone, data.bank_account, data.bank_name,
+            data.id_card, data.phone, normalize_email_input(data.email.clone()),
+            data.bank_account, data.bank_name,
             data.hire_date, status, base_salary, position_salary,
             performance_salary, social_security_base, housing_fund_base,
             special_deduction, data.remark, now, now
@@ -2089,12 +2092,18 @@ pub fn update_employee(conn: &Connection, id: i64, data: &EmployeeInput) -> AppR
         .unwrap_or(existing.social_security_base);
     let housing_fund_base = data.housing_fund_base.unwrap_or(existing.housing_fund_base);
     let special_deduction = data.special_deduction.unwrap_or(existing.special_deduction);
+    // email 合并语义：Some（含空串）→ 覆盖（空串归一为 NULL，即清空）；None → 沿用原值
+    let email = match data.email {
+        Some(_) => normalize_email_input(data.email.clone()),
+        None => existing.email.clone(),
+    };
 
     let updated = conn.execute(
-        "UPDATE employees SET employee_no=?1, name=?2, department=?3, position=?4, id_card=?5, phone=?6, bank_account=?7, bank_name=?8, hire_date=?9, status=?10, base_salary=?11, position_salary=?12, performance_salary=?13, social_security_base=?14, housing_fund_base=?15, special_deduction=?16, remark=?17, updated_at=?18 WHERE id=?19",
+        "UPDATE employees SET employee_no=?1, name=?2, department=?3, position=?4, id_card=?5, phone=?6, email=?7, bank_account=?8, bank_name=?9, hire_date=?10, status=?11, base_salary=?12, position_salary=?13, performance_salary=?14, social_security_base=?15, housing_fund_base=?16, special_deduction=?17, remark=?18, updated_at=?19 WHERE id=?20",
         params![
             employee_no, data.name, data.department, data.position,
-            data.id_card, data.phone, data.bank_account, data.bank_name,
+            data.id_card, data.phone, email,
+            data.bank_account, data.bank_name,
             data.hire_date, status, base_salary, position_salary,
             performance_salary, social_security_base, housing_fund_base,
             special_deduction, data.remark, now, id
@@ -2109,10 +2118,19 @@ pub fn delete_employee(conn: &Connection, id: i64) -> AppResult<bool> {
     Ok(deleted > 0)
 }
 
+/// 邮箱入库归一：trim 后空串归 NULL（可清空、发送侧不再二次判空串）
+fn normalize_email_input(email: Option<String>) -> Option<String> {
+    email
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
 pub fn search_employees(conn: &Connection, keyword: &str) -> AppResult<Vec<Employee>> {
     let pattern = format!("%{keyword}%");
     let mut stmt = conn.prepare(
-        "SELECT id, employee_no, name, department, position, id_card, phone, bank_account, bank_name, hire_date, status, base_salary, position_salary, performance_salary, social_security_base, housing_fund_base, special_deduction, remark, created_at, updated_at FROM employees WHERE name LIKE ?1 OR employee_no LIKE ?1 OR department LIKE ?1 OR phone LIKE ?1 ORDER BY id"
+        "SELECT id, employee_no, name, department, position, id_card, phone, email, bank_account, bank_name, hire_date, status, base_salary, position_salary, performance_salary, social_security_base, housing_fund_base, special_deduction, remark, created_at, updated_at FROM employees WHERE name LIKE ?1 OR employee_no LIKE ?1 OR department LIKE ?1 OR phone LIKE ?1 ORDER BY id"
     )?;
 
     let employees = stmt.query_map(params![pattern], |row| {
@@ -2124,19 +2142,20 @@ pub fn search_employees(conn: &Connection, keyword: &str) -> AppResult<Vec<Emplo
             position: row.get(4)?,
             id_card: row.get(5)?,
             phone: row.get(6)?,
-            bank_account: row.get(7)?,
-            bank_name: row.get(8)?,
-            hire_date: row.get(9)?,
-            status: row.get(10)?,
-            base_salary: row.get(11)?,
-            position_salary: row.get(12)?,
-            performance_salary: row.get(13)?,
-            social_security_base: row.get(14)?,
-            housing_fund_base: row.get(15)?,
-            special_deduction: row.get(16)?,
-            remark: row.get(17)?,
-            created_at: row.get(18)?,
-            updated_at: row.get(19)?,
+            email: row.get(7)?,
+            bank_account: row.get(8)?,
+            bank_name: row.get(9)?,
+            hire_date: row.get(10)?,
+            status: row.get(11)?,
+            base_salary: row.get(12)?,
+            position_salary: row.get(13)?,
+            performance_salary: row.get(14)?,
+            social_security_base: row.get(15)?,
+            housing_fund_base: row.get(16)?,
+            special_deduction: row.get(17)?,
+            remark: row.get(18)?,
+            created_at: row.get(19)?,
+            updated_at: row.get(20)?,
         })
     })?;
 
@@ -11139,6 +11158,7 @@ pub mod tests {
                 position: None,
                 id_card: None,
                 phone: None,
+                email: None,
                 bank_account: None,
                 bank_name: None,
                 hire_date: None,
@@ -11159,6 +11179,54 @@ pub mod tests {
             "expected duplicate employee no to return InvalidParam, got {:?}",
             err
         );
+    }
+
+    /// stage9 spec 3.1：员工 email 录入通道——创建写入（trim+空归 NULL）、
+    /// 更新覆盖/清空（None 不动、Some("") 清空）、查询回读一致。
+    #[test]
+    fn test_employee_email_round_trip() {
+        let conn = setup_financial_db();
+        let base = |email: Option<String>| EmployeeInput {
+            employee_no: "E9EM".into(),
+            name: "张三".into(),
+            department: None,
+            position: None,
+            id_card: None,
+            phone: None,
+            email,
+            bank_account: None,
+            bank_name: None,
+            hire_date: None,
+            status: Some("active".into()),
+            base_salary: Some(0.0),
+            position_salary: Some(0.0),
+            performance_salary: Some(0.0),
+            social_security_base: Some(0.0),
+            housing_fund_base: Some(0.0),
+            special_deduction: Some(0.0),
+            remark: None,
+        };
+
+        // 创建：带空格邮箱 → trim 入库
+        let created = create_employee(&conn, &base(Some("  zhang@example.com ".into()))).unwrap();
+        assert_eq!(created.email.as_deref(), Some("zhang@example.com"));
+
+        // 更新 None → 沿用原邮箱
+        update_employee(&conn, created.id, &base(None)).unwrap();
+        assert_eq!(
+            get_employee(&conn, created.id).unwrap().email.as_deref(),
+            Some("zhang@example.com")
+        );
+
+        // 更新 Some("") → 清空为 NULL
+        update_employee(&conn, created.id, &base(Some(String::new()))).unwrap();
+        assert_eq!(get_employee(&conn, created.id).unwrap().email, None);
+
+        // 再次写入并经 get_employees 回读
+        update_employee(&conn, created.id, &base(Some("new@example.com".into()))).unwrap();
+        let listed = get_employees(&conn).unwrap();
+        let found = listed.iter().find(|e| e.id == created.id).unwrap();
+        assert_eq!(found.email.as_deref(), Some("new@example.com"));
     }
 
     #[test]

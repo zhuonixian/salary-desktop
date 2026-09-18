@@ -57,7 +57,7 @@ pub fn recalculate_single(
     conn: &Connection,
 ) -> AppResult<SalaryResult> {
     let emp = conn.query_row(
-        "SELECT id, employee_no, name, department, position, id_card, phone, bank_account, bank_name, hire_date, status, base_salary, position_salary, performance_salary, social_security_base, housing_fund_base, special_deduction, remark, created_at, updated_at FROM employees WHERE employee_no = ?1",
+        "SELECT id, employee_no, name, department, position, id_card, phone, email, bank_account, bank_name, hire_date, status, base_salary, position_salary, performance_salary, social_security_base, housing_fund_base, special_deduction, remark, created_at, updated_at FROM employees WHERE employee_no = ?1",
         rusqlite::params![employee_no],
         |row| {
             Ok(Employee {
@@ -68,19 +68,20 @@ pub fn recalculate_single(
                 position: row.get(4)?,
                 id_card: row.get(5)?,
                 phone: row.get(6)?,
-                bank_account: row.get(7)?,
-                bank_name: row.get(8)?,
-                hire_date: row.get(9)?,
-                status: row.get(10)?,
-                base_salary: row.get(11)?,
-                position_salary: row.get(12)?,
-                performance_salary: row.get(13)?,
-                social_security_base: row.get(14)?,
-                housing_fund_base: row.get(15)?,
-                special_deduction: row.get(16)?,
-                remark: row.get(17)?,
-                created_at: row.get(18)?,
-                updated_at: row.get(19)?,
+                email: row.get(7)?,
+                bank_account: row.get(8)?,
+                bank_name: row.get(9)?,
+                hire_date: row.get(10)?,
+                status: row.get(11)?,
+                base_salary: row.get(12)?,
+                position_salary: row.get(13)?,
+                performance_salary: row.get(14)?,
+                social_security_base: row.get(15)?,
+                housing_fund_base: row.get(16)?,
+                special_deduction: row.get(17)?,
+                remark: row.get(18)?,
+                created_at: row.get(19)?,
+                updated_at: row.get(20)?,
             })
         },
     ).map_err(|e| AppError::NotFound(format!("员工{employee_no}未找到: {e}")))?;

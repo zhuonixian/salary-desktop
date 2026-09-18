@@ -144,6 +144,7 @@ pub fn import_employees_excel(
             position: emp.position.clone(),
             id_card: emp.id_card.clone(),
             phone: emp.phone.clone(),
+            email: emp.email.clone(),
             bank_account: emp.bank_account.clone(),
             bank_name: emp.bank_name.clone(),
             hire_date: emp.hire_date.clone(),
