@@ -137,6 +137,8 @@ const operationTypeLabels: Record<string, string> = {
   restore_database: '恢复数据库',
   compact_database: '压缩整理数据库',
   verify_database: '数据库体检',
+  // 第九阶段通知设置命令（与 src-tauri/src/commands.rs 实名一一对应；get 不落日志）
+  smtp_config_update: '更新 SMTP 通知配置',
 };
 
 const getOperationLabel = (value?: string) =>

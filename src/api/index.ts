@@ -130,6 +130,10 @@ import type {
   CashCountUpdateInput,
   CashCountQuery,
   CashCountSheetDetail,
+  SmtpConfig,
+  SmtpConfigMasked,
+  NotificationLog,
+  NotificationLogQuery,
 } from '@/types';
 import { INSTRUMENT_STATUS_LABEL } from '@/types';
 
@@ -551,6 +555,29 @@ const mockApprovalEvents: ApprovalEvent[] = [
 let mockMakerChecker = false;
 // 账期提醒提前天数（预览态内存值，缺省 7 与后端 app_settings 缺省一致）
 let mockReminderAdvanceDays = 7;
+
+// ==================== 通知设置预览数据（第九阶段 Task 3） ====================
+// 内存态 SMTP 配置与发送记录（演示用，完整校验以后端为准）。
+// 预置一条已配置样例，便于走「配置→测试→记录」全流程。
+let mockSmtpConfig: SmtpConfig | null = {
+  host: 'smtp.qq.com',
+  port: 465,
+  encryption: 'ssl',
+  username: 'salary@example.com',
+  password: 'mock-auth-99',
+  from_name: '工资专员',
+};
+
+const mockMaskPassword = (password: string): string => `****${password.slice(-2)}`;
+
+const mockMaskedSmtpConfig = (config: SmtpConfig): SmtpConfigMasked => ({
+  host: config.host,
+  port: config.port,
+  encryption: config.encryption,
+  username: config.username,
+  password_masked: mockMaskPassword(config.password),
+  from_name: config.from_name,
+});
 
 // ==================== 付款批次预览数据（第七阶段 Task 9） ====================
 // 内存态模拟 payment_batches / payment_items 与批次-资金单状态机联动（演示用，
@@ -2199,6 +2226,52 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
     case 'set_reminder_advance_days':
       mockReminderAdvanceDays = Number(args?.days ?? 7);
       return true;
+    // ==================== 通知设置（第九阶段 Task 3） ====================
+    case 'get_smtp_config':
+      return mockSmtpConfig ? mockMaskedSmtpConfig(mockSmtpConfig) : null;
+    case 'set_smtp_config': {
+      const next = { ...(args?.config as SmtpConfig) };
+      // 与后端同规则：脱敏值（****开头）带回 → 保留原授权码
+      if (String(next.password).startsWith('****') && mockSmtpConfig) {
+        next.password = mockSmtpConfig.password;
+      }
+      mockSmtpConfig = next;
+      return mockMaskedSmtpConfig(next);
+    }
+    case 'send_test_email':
+      if (!mockSmtpConfig) {
+        throw new Error('尚未配置 SMTP，请先在通知设置中保存邮箱配置');
+      }
+      return null;
+    case 'get_notification_logs': {
+      const month = new Date().toISOString().slice(0, 7);
+      return [
+        {
+          id: 1,
+          channel: 'email',
+          employee_id: null,
+          recipient: mockSmtpConfig?.username ?? 'salary@example.com',
+          belong_month: null,
+          subject: '工资条邮件发送测试',
+          status: 'sent',
+          error_msg: null,
+          operator: '管理员',
+          created_at: new Date().toISOString(),
+        },
+        {
+          id: 2,
+          channel: 'email',
+          employee_id: 1,
+          recipient: 'zhangsan@example.com',
+          belong_month: month,
+          subject: `${month} 工资条`,
+          status: 'failed',
+          error_msg: '授权码错误，请检查邮箱设置（QQ/163 需使用授权码而非登录密码）',
+          operator: '管理员',
+          created_at: new Date(Date.now() - 3600000).toISOString(),
+        },
+      ] satisfies Partial<NotificationLog>[];
+    }
     default: {
       // 预览模式兜底（Minor 8）：不再无差别 return true——只读命令按语义返回空集合，
       // 其余（写操作/状态机命令）抛中文错误，避免浏览器预览里
@@ -3585,4 +3658,45 @@ export async function confirmCountSheet(id: number): Promise<CashCountSheet> {
 
 export async function voidCountSheet(id: number, reason?: string): Promise<CashCountSheet> {
   return invoke<CashCountSheet>('void_count_sheet', { id, reason: reason ?? null });
+}
+
+// ==================== 通知设置（第九阶段 Task 3） ====================
+
+/** SMTP 配置（脱敏回显）：未配置时返回 null */
+export async function getSmtpConfig(): Promise<SmtpConfigMasked | null> {
+  return invoke<SmtpConfigMasked | null>('get_smtp_config');
+}
+
+/** 保存 SMTP 配置：password 回传 `****` 开头的脱敏值时，后端保留原授权码 */
+export async function setSmtpConfig(config: SmtpConfig): Promise<SmtpConfigMasked> {
+  return invoke<SmtpConfigMasked>('set_smtp_config', { config });
+}
+
+/** 发测试邮件给自己（收件人=发件账号）；未配置时后端抛中文错误 */
+export async function sendTestEmail(): Promise<void> {
+  await invoke<null>('send_test_email');
+}
+
+/** 通知发送记录：月份/状态/媒介筛选，最新在前 */
+export async function getNotificationLogs(query: NotificationLogQuery = {}): Promise<NotificationLog[]> {
+  const rows = await invoke<Array<Partial<NotificationLog>>>('get_notification_logs', {
+    query: {
+      channel: query.channel ?? null,
+      belong_month: query.belong_month ?? null,
+      status: query.status ?? null,
+      limit: query.limit ?? 200,
+    },
+  });
+  return (rows ?? []).map((row) => ({
+    id: row.id ?? 0,
+    channel: row.channel ?? 'email',
+    employee_id: row.employee_id ?? null,
+    recipient: row.recipient ?? '',
+    belong_month: row.belong_month ?? null,
+    subject: row.subject ?? '',
+    status: row.status ?? 'failed',
+    error_msg: row.error_msg ?? null,
+    operator: row.operator ?? null,
+    created_at: row.created_at ?? '',
+  }));
 }

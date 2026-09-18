@@ -36,6 +36,7 @@ import {
   UserOutlined,
   PayCircleOutlined,
   AccountBookOutlined,
+  MailOutlined,
 } from '@ant-design/icons';
 import Dashboard from '@/pages/Dashboard';
 import Employees from '@/pages/Employees';
@@ -65,6 +66,7 @@ import FundJournals from '@/pages/FundJournals';
 import Advances from '@/pages/Advances';
 import NotesInstruments from '@/pages/NotesInstruments';
 import CashCount from '@/pages/CashCount';
+import NotificationSettings from '@/pages/NotificationSettings';
 import LockScreen from '@/components/LockScreen';
 import SetupSecurity from '@/components/SetupSecurity';
 import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
@@ -150,7 +152,15 @@ const menuItems: MenuProps['items'] = [
       { key: '/data-safety', label: '数据安全', icon: <DatabaseOutlined /> },
     ],
   },
-  { key: '/rules', label: '系统设置', icon: <SettingOutlined /> },
+  {
+    key: 'system-settings',
+    label: '系统设置',
+    icon: <SettingOutlined />,
+    children: [
+      { key: '/rules', label: '工资规则', icon: <SettingOutlined /> },
+      { key: '/notification-settings', label: '通知设置', icon: <MailOutlined /> },
+    ],
+  },
   { key: '/security', label: '安全中心', icon: <LockOutlined /> },
 ];
 
@@ -347,6 +357,7 @@ const AppLayout: React.FC = () => {
               <Route path="/month-close" element={<MonthClose />} />
               <Route path="/financial-analysis" element={<FinancialAnalysis />} />
               <Route path="/rules" element={<SalaryRules />} />
+              <Route path="/notification-settings" element={<NotificationSettings />} />
               <Route path="/salary" element={<SalaryCalculate />} />
               <Route path="/payments" element={<Payments />} />
               <Route path="/bank-transactions" element={<BankTransactions />} />

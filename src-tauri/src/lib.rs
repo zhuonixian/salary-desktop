@@ -335,6 +335,11 @@ pub fn run() {
         security_commands::migrate_legacy_resources,
         security_commands::get_decrypted_invoice_url,
         security_commands::get_decrypted_attachment_url,
+        // ===== Notification（第九阶段 通知设置/EmailChannel） =====
+        commands::get_smtp_config,
+        commands::set_smtp_config,
+        commands::send_test_email,
+        commands::get_notification_logs,
     ]);
 
     diag("calling builder.run()...");

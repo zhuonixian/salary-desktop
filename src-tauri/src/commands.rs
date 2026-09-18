@@ -16,6 +16,7 @@ use crate::errors::{AppError, AppResult};
 use crate::excel;
 use crate::models::*;
 use crate::notes;
+use crate::notification;
 use crate::ocr;
 use crate::salary;
 
@@ -3566,12 +3567,312 @@ pub fn void_count_sheet(
     Ok(sheet)
 }
 
+// ==================== Notification Commands（第九阶段 Task 3） ====================
+
+/// 授权码脱敏展示前缀（与 notification::mask_password 的输出约定一致）
+const SMTP_PASSWORD_MASK_PREFIX: &str = "****";
+
+/// 掩码回存防呆（spec 6）：前端把脱敏展示值原样带回时（`****` 开头），保留
+/// 已存的真实授权码；此前未保存过配置则拒绝（没有可保留的真实密码）。
+pub fn resolve_smtp_save_config(
+    conn: &Connection,
+    sec: &crate::security::SecurityState,
+    config: SmtpConfig,
+) -> AppResult<SmtpConfig> {
+    if !config.password.starts_with(SMTP_PASSWORD_MASK_PREFIX) {
+        return Ok(config);
+    }
+    let existing = notification::get_smtp_config(conn, sec)?.ok_or_else(|| {
+        AppError::InvalidParam("尚未保存过 SMTP 配置，请填写真实授权码后再保存".into())
+    })?;
+    Ok(SmtpConfig {
+        password: existing.password,
+        ..config
+    })
+}
+
+/// 读取 SMTP 配置（未配置显式拒绝）：send_test_email 等发送入口共用（spec 7 入口拦截）。
+pub fn require_smtp_config(
+    conn: &Connection,
+    sec: &crate::security::SecurityState,
+) -> AppResult<SmtpConfig> {
+    notification::get_smtp_config(conn, sec)?
+        .ok_or_else(|| AppError::General("尚未配置 SMTP，请先在通知设置中保存邮箱配置".into()))
+}
+
+/// 测试邮件（spec 6）：收件人=发件账号，belong_month 为 NULL（非账期通知）。
+/// 渠道由调用方注入（生产传 EmailChannel，单测传假通道）；无论成败都写
+/// notification_logs 且署名操作人；失败时错误原样返回给前端即时反馈。
+pub fn send_test_email_inner(
+    config: &SmtpConfig,
+    log_conn: &Connection,
+    channel: &dyn notification::NotifyChannel,
+    operator: &str,
+) -> AppResult<()> {
+    let message = notification::NotifyMessage {
+        recipient: config.username.trim().to_string(),
+        subject: "工资条邮件发送测试".into(),
+        html_body: Some(format!(
+            "<p>这是工资核算助手「通知设置」发出的测试邮件。</p><p>发件账号：{}。测试通过后即可用于工资条批量发送。</p>",
+            config.username
+        )),
+        text_body: Some(format!(
+            "这是工资核算助手「通知设置」发出的测试邮件。发件账号：{}。测试通过后即可用于工资条批量发送。",
+            config.username
+        )),
+    };
+    let result = channel.send(&message);
+    match &result {
+        Ok(()) => {
+            notification::insert_notification_log(
+                log_conn,
+                NOTIFICATION_CHANNEL_EMAIL,
+                None,
+                &config.username,
+                None,
+                &message.subject,
+                NOTIFICATION_STATUS_SENT,
+                None,
+                Some(operator),
+            )?;
+        }
+        Err(e) => {
+            notification::insert_notification_log(
+                log_conn,
+                NOTIFICATION_CHANNEL_EMAIL,
+                None,
+                &config.username,
+                None,
+                &message.subject,
+                NOTIFICATION_STATUS_FAILED,
+                Some(&e.to_string()),
+                Some(operator),
+            )?;
+        }
+    }
+    result
+}
+
+#[tauri::command]
+pub fn get_smtp_config(
+    state: tauri::State<'_, Mutex<Connection>>,
+    sec: tauri::State<'_, crate::security::SecurityState>,
+) -> Result<Option<SmtpConfigMasked>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    notification::get_smtp_config_masked(&conn, sec.inner())
+}
+
+#[tauri::command]
+pub fn set_smtp_config(
+    config: SmtpConfig,
+    state: tauri::State<'_, Mutex<Connection>>,
+    sec: tauri::State<'_, crate::security::SecurityState>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<SmtpConfigMasked, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let config = resolve_smtp_save_config(&conn, sec.inner(), config)?;
+    let operator = cashier::current_operator_name(&conn, &current);
+    notification::set_smtp_config(&conn, &config, &operator, sec.inner())?;
+    notification::get_smtp_config_masked(&conn, sec.inner())?
+        .ok_or_else(|| AppError::General("SMTP 配置保存后读取失败，请重试".into()))
+}
+
+#[tauri::command]
+pub fn send_test_email(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Mutex<Connection>>,
+    sec: tauri::State<'_, crate::security::SecurityState>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<(), AppError> {
+    // 不持锁跨网络 IO（发票 OCR 同款先例）：主连接锁内仅完成取数（配置解密、
+    // 操作人署名、db 目录），随后守卫即释放；发送与留痕写库用独立连接
+    // （journal_mode=WAL 允许与主连接并存），网络慢不阻塞其他命令。
+    let (config, operator, db_dir) = {
+        let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+        let config = require_smtp_config(&conn, sec.inner())?;
+        let operator = cashier::current_operator_name(&conn, &current);
+        let db_dir = app_data_dir(&app)?;
+        (config, operator, db_dir)
+    };
+
+    let log_conn = Connection::open(db_dir.join("salary.db"))?;
+    let channel = notification::EmailChannel::new(config.clone());
+    send_test_email_inner(&config, &log_conn, &channel, &operator)
+}
+
+#[tauri::command]
+pub fn get_notification_logs(
+    query: NotificationLogQuery,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<NotificationLog>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    notification::get_notification_logs(&conn, &query)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn temp_dir(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("salary-{name}-{}", uuid::Uuid::new_v4()))
+    }
+
+    // ==================== Notification Commands（第九阶段 Task 3） ====================
+
+    fn notif_sec() -> crate::security::SecurityState {
+        let sec = crate::security::SecurityState::new();
+        sec.install_dek_for_test([9u8; 32]);
+        sec
+    }
+
+    fn notif_config() -> SmtpConfig {
+        SmtpConfig {
+            host: "smtp.qq.com".into(),
+            port: 465,
+            encryption: "ssl".into(),
+            username: "salary@example.com".into(),
+            password: "RealAuth-88z".into(),
+            from_name: "工资专员".into(),
+        }
+    }
+
+    /// 测试用假邮件通道：按 fail 开关决定成功/失败，不触网
+    struct StubEmailChannel {
+        fail: bool,
+    }
+
+    impl notification::NotifyChannel for StubEmailChannel {
+        fn name(&self) -> &'static str {
+            NOTIFICATION_CHANNEL_EMAIL
+        }
+
+        fn send(&self, _message: &notification::NotifyMessage) -> AppResult<()> {
+            if self.fail {
+                Err(AppError::General("SMTP 服务器拒绝连接".into()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// 掩码回存防呆（Task 3）：存脱敏值后真实授权码不变
+    #[test]
+    fn smtp_save_masked_password_keeps_original() {
+        let app_dir = temp_dir("notif-mask");
+        fs::create_dir_all(&app_dir).unwrap();
+        let conn = db::init_db(&app_dir.to_string_lossy()).unwrap();
+        let sec = notif_sec();
+
+        notification::set_smtp_config(&conn, &notif_config(), "管理员", &sec).unwrap();
+
+        // 前端把脱敏展示值（****+末2位）原样带回 → 保留已存真实授权码，其余字段可更新
+        let mut masked_back = notif_config();
+        masked_back.host = "smtp.163.com".into();
+        masked_back.port = 25;
+        masked_back.password = "****8z".into();
+        let resolved = resolve_smtp_save_config(&conn, &sec, masked_back).unwrap();
+        assert_eq!(
+            resolved.password, "RealAuth-88z",
+            "脱敏值带回时保留真实授权码"
+        );
+        assert_eq!(resolved.host, "smtp.163.com");
+        assert_eq!(resolved.port, 25);
+
+        // 填写新授权码 → 原样保存
+        let mut fresh = notif_config();
+        fresh.password = "NewAuth-01a".into();
+        let resolved = resolve_smtp_save_config(&conn, &sec, fresh).unwrap();
+        assert_eq!(resolved.password, "NewAuth-01a");
+
+        // 从未保存过配置时带回脱敏值 → 拒绝（没有可保留的真实密码）
+        let empty_dir = temp_dir("notif-mask-empty");
+        fs::create_dir_all(&empty_dir).unwrap();
+        let empty_conn = db::init_db(&empty_dir.to_string_lossy()).unwrap();
+        let err = resolve_smtp_save_config(
+            &empty_conn,
+            &sec,
+            SmtpConfig {
+                password: "****".into(),
+                ..notif_config()
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("尚未保存过"));
+
+        drop(conn);
+        drop(empty_conn);
+        let _ = fs::remove_dir_all(app_dir);
+        let _ = fs::remove_dir_all(empty_dir);
+    }
+
+    /// send_test_email：未配置拒绝；成功/失败均写留痕（belong_month=NULL、署名、
+    /// 收件=发件账号）；查询命令层筛选透传。
+    #[test]
+    fn send_test_email_requires_config_and_logs_result() {
+        let app_dir = temp_dir("notif-test-mail");
+        fs::create_dir_all(&app_dir).unwrap();
+        let conn = db::init_db(&app_dir.to_string_lossy()).unwrap();
+        let sec = notif_sec();
+
+        // 未配置 → 入口拦截（spec 7）
+        let err = require_smtp_config(&conn, &sec).unwrap_err();
+        assert!(err.to_string().contains("尚未配置 SMTP"));
+
+        notification::set_smtp_config(&conn, &notif_config(), "管理员", &sec).unwrap();
+        let config = require_smtp_config(&conn, &sec).unwrap();
+
+        // 成功：写 sent 记录，收件=发件账号、belong_month 为 NULL、署名操作人
+        send_test_email_inner(
+            &config,
+            &conn,
+            &StubEmailChannel { fail: false },
+            "出纳小王",
+        )
+        .unwrap();
+        let logs = notification::get_notification_logs(
+            &conn,
+            &NotificationLogQuery {
+                channel: Some("email".into()),
+                status: Some("sent".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].recipient, "salary@example.com");
+        assert_eq!(logs[0].belong_month, None, "测试邮件非账期通知");
+        assert_eq!(logs[0].operator.as_deref(), Some("出纳小王"));
+        assert_eq!(logs[0].subject, "工资条邮件发送测试");
+
+        // 失败：写 failed 记录（含原因）并把错误返回前端即时反馈
+        let err =
+            send_test_email_inner(&config, &conn, &StubEmailChannel { fail: true }, "出纳小王")
+                .unwrap_err();
+        assert_eq!(err.to_string(), "SMTP 服务器拒绝连接");
+        let failed = notification::get_notification_logs(
+            &conn,
+            &NotificationLogQuery {
+                status: Some("failed".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].error_msg.as_deref(), Some("SMTP 服务器拒绝连接"));
+
+        // belong_month 筛选：测试邮件（NULL）不落入月份筛选结果
+        let by_month = notification::get_notification_logs(
+            &conn,
+            &NotificationLogQuery {
+                belong_month: Some("2026-09".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(by_month.is_empty(), "belong_month=NULL 不参与月份筛选");
+
+        drop(conn);
+        let _ = fs::remove_dir_all(app_dir);
     }
 
     fn setup_closed_month_package_db(app_dir: &std::path::Path) -> Connection {

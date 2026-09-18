@@ -2026,3 +2026,85 @@ export const CASH_COUNT_STATUS_LABEL: Record<string, string> = {
 
 /** 面额模式固定八档（spec 6） */
 export const CASH_COUNT_DENOMINATIONS: number[] = [100, 50, 20, 10, 5, 1, 0.5, 0.1];
+
+// ==================== 通知模块（第九阶段 Task 3） ====================
+
+/** SMTP 配置（保存用）：password 为授权码；回传 `****` 开头的脱敏值表示保留原授权码 */
+export interface SmtpConfig {
+  host: string;
+  port: number;
+  /** 加密方式：starttls | ssl | none */
+  encryption: string;
+  /** 发件账号（同时作为测试邮件的收件人） */
+  username: string;
+  password: string;
+  /** 发件人显示名 */
+  from_name: string;
+}
+
+/** SMTP 配置脱敏回显：不携带真实授权码 */
+export interface SmtpConfigMasked {
+  host: string;
+  port: number;
+  encryption: string;
+  username: string;
+  /** 脱敏展示值（****+末2位；未设置时为 **** 不带尾缀） */
+  password_masked: string;
+  from_name: string;
+}
+
+/** 通知发送记录（notification_logs 行，只追加不修改） */
+export interface NotificationLog {
+  id: number;
+  /** 通知渠道：email / sms */
+  channel: string;
+  /** 关联员工 id（可空：测试邮件等非按员工发送场景） */
+  employee_id: number | null;
+  recipient: string;
+  /** 工资所属月份（YYYY-MM，可空：测试邮件） */
+  belong_month: string | null;
+  subject: string;
+  /** sent / failed / skipped */
+  status: string;
+  /** 失败或跳过原因（成功为空） */
+  error_msg: string | null;
+  operator: string | null;
+  created_at: string;
+}
+
+export interface NotificationLogQuery {
+  channel?: string;
+  belong_month?: string;
+  status?: string;
+  limit?: number;
+}
+
+export const NOTIFICATION_CHANNEL_LABEL: Record<string, string> = {
+  email: '邮件',
+  sms: '短信',
+};
+
+export const NOTIFICATION_STATUS_LABEL: Record<string, string> = {
+  sent: '已发送',
+  failed: '失败',
+  skipped: '已跳过',
+};
+
+export const SMTP_ENCRYPTION_LABEL: Record<string, string> = {
+  starttls: 'STARTTLS',
+  ssl: 'SSL/TLS',
+  none: '无加密',
+};
+
+/** SMTP 预设一键填（spec 6）：QQ/163 用 465 SSL，Outlook 用 587 STARTTLS */
+export const SMTP_PRESETS: Array<{
+  key: string;
+  label: string;
+  host: string;
+  port: number;
+  encryption: string;
+}> = [
+  { key: 'qq', label: 'QQ 邮箱', host: 'smtp.qq.com', port: 465, encryption: 'ssl' },
+  { key: '163', label: '163 邮箱', host: 'smtp.163.com', port: 465, encryption: 'ssl' },
+  { key: 'outlook', label: 'Outlook', host: 'smtp.office365.com', port: 587, encryption: 'starttls' },
+];

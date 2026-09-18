@@ -15,6 +15,7 @@
 
 use base64::Engine;
 use chrono::Utc;
+use lettre::{Message, SmtpTransport, Transport};
 use rusqlite::{params, params_from_iter, Connection};
 use serde::{Deserialize, Serialize};
 
@@ -22,8 +23,8 @@ use crate::db::{get_setting, log_operation, set_setting};
 use crate::errors::{AppError, AppResult};
 use crate::models::{
     NotificationLog, NotificationLogQuery, SmtpConfig, SmtpConfigMasked, NOTIFICATION_CHANNELS,
-    NOTIFICATION_STATUSES, NOTIFICATION_STATUS_FAILED, NOTIFICATION_STATUS_SENT,
-    NOTIFICATION_STATUS_SKIPPED,
+    NOTIFICATION_CHANNEL_EMAIL, NOTIFICATION_STATUSES, NOTIFICATION_STATUS_FAILED,
+    NOTIFICATION_STATUS_SENT, NOTIFICATION_STATUS_SKIPPED,
 };
 use crate::security::SecurityState;
 
@@ -211,6 +212,120 @@ fn mask_password(password: &str) -> String {
     let chars: Vec<char> = password.chars().collect();
     let start = chars.len().saturating_sub(2);
     format!("****{}", chars[start..].iter().collect::<String>())
+}
+
+// ==================== EmailChannel（lettre blocking，Task 3） ====================
+
+/// SMTP 发送超时（spec 4.2）：连接/整次会话 30s 封顶，避免界面长时间卡在网络 IO。
+const SMTP_SEND_TIMEOUT_SECS: u64 = 30;
+
+/// SMTP 535 = AUTH 凭证被拒：授权码错误，或误用登录密码（QQ/163 最常见）。
+const SMTP_AUTH_DENIED_CODE: &str = "535";
+
+/// 535 的中文业务提示（spec 7）
+pub const SMTP_AUTH_DENIED_HINT: &str =
+    "授权码错误，请检查邮箱设置（QQ/163 需使用授权码而非登录密码）";
+
+/// 邮件通道（spec 4.1）：持有解密后的 SMTP 配置，lettre blocking 实现。
+/// 加密方式映射：starttls→STARTTLS / ssl→隐式 TLS(465) / none→明文。
+/// 真发不进单测（spec 8）：单测经 [`NotifyChannel`] 注入 FakeChannel。
+pub struct EmailChannel {
+    config: SmtpConfig,
+}
+
+impl EmailChannel {
+    pub fn new(config: SmtpConfig) -> Self {
+        Self { config }
+    }
+}
+
+/// SMTP 错误 → 中文业务错误（纯函数可单测，不触网）：
+/// 状态码或错误文本含 535 → 授权码错误提示；其余 → 网络错误透传原文
+/// （spec 7：超时/网络错误 failed + 原因入档）。
+fn smtp_error_to_app_error(status_code: Option<&str>, raw: &str) -> AppError {
+    if status_code == Some(SMTP_AUTH_DENIED_CODE) || raw.contains(SMTP_AUTH_DENIED_CODE) {
+        return AppError::General(SMTP_AUTH_DENIED_HINT.into());
+    }
+    AppError::Network(raw.to_string())
+}
+
+fn translate_smtp_error(error: lettre::transport::smtp::Error) -> AppError {
+    smtp_error_to_app_error(
+        error.status().map(|c| c.to_string()).as_deref(),
+        &error.to_string(),
+    )
+}
+
+impl NotifyChannel for EmailChannel {
+    fn name(&self) -> &'static str {
+        NOTIFICATION_CHANNEL_EMAIL
+    }
+
+    fn send(&self, message: &NotifyMessage) -> AppResult<()> {
+        let recipient: lettre::message::Mailbox =
+            message.recipient.trim().parse().map_err(|e| {
+                AppError::InvalidParam(format!("邮箱地址无效 {}: {e}", message.recipient.trim()))
+            })?;
+        let from_mailbox: lettre::message::Mailbox = if self.config.from_name.trim().is_empty() {
+            self.config
+                .username
+                .trim()
+                .parse()
+                .map_err(|e| AppError::InvalidParam(format!("发件账号邮箱地址无效: {e}")))?
+        } else {
+            let address: lettre::Address = self
+                .config
+                .username
+                .trim()
+                .parse()
+                .map_err(|e| AppError::InvalidParam(format!("发件账号邮箱地址无效: {e}")))?;
+            lettre::message::Mailbox::new(Some(self.config.from_name.trim().to_string()), address)
+        };
+
+        // 正文：html+text 双部分 / 仅 html / 纯文本；主题由 lettre 自动做 RFC 2047 编码
+        let builder = Message::builder()
+            .from(from_mailbox)
+            .to(recipient)
+            .subject(message.subject.as_str());
+        let email = match (message.html_body.as_deref(), message.text_body.as_deref()) {
+            (Some(html), Some(text)) if !html.trim().is_empty() && !text.trim().is_empty() => {
+                builder.multipart(lettre::message::MultiPart::alternative_plain_html(
+                    text.to_string(),
+                    html.to_string(),
+                ))
+            }
+            (Some(html), _) if !html.trim().is_empty() => builder
+                .header(lettre::message::header::ContentType::TEXT_HTML)
+                .body(html.to_string()),
+            (Some(text), _) | (None, Some(text)) => builder.body(text.to_string()),
+            (None, None) => {
+                return Err(AppError::InvalidParam("邮件正文不能为空".into()));
+            }
+        }
+        .map_err(|e| AppError::General(format!("邮件组装失败: {e}")))?;
+
+        let credentials = lettre::transport::smtp::authentication::Credentials::new(
+            self.config.username.trim().to_string(),
+            self.config.password.clone(),
+        );
+        let host = self.config.host.trim();
+        let transport_builder = match self.config.encryption.as_str() {
+            "starttls" => SmtpTransport::starttls_relay(host)
+                .map_err(|e| AppError::Network(format!("SMTP 服务器地址或 TLS 配置无效: {e}")))?,
+            "ssl" => SmtpTransport::relay(host)
+                .map_err(|e| AppError::Network(format!("SMTP 服务器地址或 TLS 配置无效: {e}")))?,
+            _ => SmtpTransport::builder_dangerous(host),
+        };
+        let mailer = transport_builder
+            .port(self.config.port)
+            .credentials(credentials)
+            .timeout(Some(std::time::Duration::from_secs(SMTP_SEND_TIMEOUT_SECS)));
+        mailer
+            .build()
+            .send(&email)
+            .map(|_| ())
+            .map_err(translate_smtp_error)
+    }
 }
 
 // ==================== 发送留痕与批量发送 ====================
@@ -1107,6 +1222,30 @@ mod tests {
         )
         .unwrap();
         assert_eq!(limited.len(), 2);
+    }
+
+    // ==================== EmailChannel（错误映射，不触网） ====================
+
+    #[test]
+    fn smtp_error_535_maps_to_auth_hint() {
+        // 结构化状态码命中
+        let err = smtp_error_to_app_error(Some("535"), "permanent error (535)");
+        assert_eq!(err.to_string(), SMTP_AUTH_DENIED_HINT);
+        // 无结构化状态码时按错误文本兜底识别（兼容历史 lettre 行为）
+        let err = smtp_error_to_app_error(None, "permanent error (535): auth failed");
+        assert_eq!(err.to_string(), SMTP_AUTH_DENIED_HINT);
+        // 非 535 的网络/服务器错误透传原文入档（spec 7）
+        let err = smtp_error_to_app_error(Some("421"), "transient error (421)");
+        assert!(matches!(err, AppError::Network(ref msg) if msg.contains("421")));
+        let err = smtp_error_to_app_error(None, "connection refused");
+        assert!(matches!(err, AppError::Network(ref msg) if msg.contains("connection refused")));
+    }
+
+    #[test]
+    fn email_channel_name_matches_log_check() {
+        let channel = EmailChannel::new(sample_config());
+        assert_eq!(channel.name(), NOTIFICATION_CHANNEL_EMAIL);
+        assert!(NOTIFICATION_CHANNELS.contains(&channel.name()));
     }
 
     #[test]
