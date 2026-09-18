@@ -11,6 +11,8 @@ permissions:
 
 jobs:
   build-windows:
+    # tag push 触发；workflow_dispatch 手动验证时跳过（避免重复上传同名 exe 冲突）
+    if: ${{ github.event_name == 'push' }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
