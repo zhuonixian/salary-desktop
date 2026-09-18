@@ -115,3 +115,11 @@ gh release edit vX.Y.Z --repo zhuonixian/salary-desktop \
 ## 错过的 codex review
 
 发版前可选：`/codex review` 跑独立 diff review（用 `danger-full-access` 模式，因 sandbox bubblewrap 在某些机器初始化失败）。cost ~30k tokens / review。
+
+## macOS 产物（v0.9.0 起验证）
+
+- `build-macos` job：tag push 触发（同 Windows），`--target aarch64-apple-darwin --bundles dmg`，Apple Silicon dmg，未签名（首开右键→打开绕过 Gatekeeper）
+- 版本注入用 BSD sed（`sed -i ''`），且有 tag 正则守卫——非 tag ref（如 dispatch master）跳过注入，否则 `master+YYYYMMDD` 非 semver 会被 tauri 拒绝
+- **dispatch 验证坑**：`gh workflow run --ref <tag>` 用的是 tag 处的旧 workflow 文件——新 job 要用 `--ref master` 验证；dispatch 模式产物挂到 "master" draft release（tag_name=master），不覆盖正式 release
+- build-windows 有 `if: github.event_name == 'push'` 条件——dispatch 时不重跑，避免同名 exe 覆盖上传
+- build-linux 仅 dispatch 触发（历史如此）；Linux 三件套在 v0.9.0 曾被误触发挂上（无害保留）
