@@ -340,6 +340,10 @@ pub fn run() {
         commands::set_smtp_config,
         commands::send_test_email,
         commands::get_notification_logs,
+        // ===== Notification（第九阶段 Task 5 工资条邮件） =====
+        commands::preview_payslip_email,
+        commands::send_payslip_emails,
+        commands::resend_payslip_emails,
     ]);
 
     diag("calling builder.run()...");

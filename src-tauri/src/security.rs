@@ -136,6 +136,10 @@ pub struct SecurityState {
 #[derive(Default)]
 struct SecurityInner {
     dek: Option<ZeroizedKey>,
+    /// 敏感数据解锁到期时刻（unix 秒）：reveal_sensitive_data 成功后按
+    /// sensitive_reveal_seconds 设置，lock 时清除（与前端 revealExpiresAt 对齐）。
+    /// 仅内存态，不落库——重启后须重新解锁，与前端行为一致。
+    sensitive_reveal_until: Option<i64>,
 }
 
 impl SecurityState {
@@ -178,6 +182,36 @@ impl SecurityState {
     #[cfg(test)]
     pub(crate) fn install_dek_for_test(&self, dek: [u8; 32]) {
         self.set_dek(dek);
+    }
+
+    /// 敏感数据是否处于解锁态（Task 5）：reveal_sensitive_data 成功后在
+    /// sensitive_reveal_seconds 时长内为 true；lock 即失效；重启后为 false。
+    /// 既有 reveal 流程语义不变——本状态是其后端只读镜像，供工资条等
+    /// 明文出口做服务端门禁（此前仅前端 revealExpiresAt 判定）。
+    pub fn is_sensitive_revealed(&self) -> bool {
+        let until = self
+            .inner()
+            .lock()
+            .ok()
+            .and_then(|g| g.sensitive_reveal_until);
+        match until {
+            Some(t) => Utc::now().timestamp() < t,
+            None => false,
+        }
+    }
+
+    /// 标记敏感数据解锁到期时刻（reveal_sensitive_data 成功后调用）。
+    pub fn mark_sensitive_revealed(&self, seconds: u32) {
+        if let Ok(mut g) = self.inner().lock() {
+            g.sensitive_reveal_until = Some(Utc::now().timestamp() + i64::from(seconds));
+        }
+    }
+
+    /// 清除敏感解锁态（lock 时调用，与前端 setRevealExpiresAt(null) 对齐）。
+    pub fn clear_sensitive_reveal(&self) {
+        if let Ok(mut g) = self.inner().lock() {
+            g.sensitive_reveal_until = None;
+        }
     }
 }
 
@@ -366,6 +400,7 @@ pub fn unlock(conn: &Connection, state: &SecurityState, password: &str) -> AppRe
 /// 锁屏:清空内存中的 DEK,所有加密字段保持在 DB 中。
 pub fn lock(state: &SecurityState) {
     state.clear_dek();
+    state.clear_sensitive_reveal();
 }
 
 // ===== Task 5: 改密 + 找回密码 + 闲置/敏感设置 =====

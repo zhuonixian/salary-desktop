@@ -2108,3 +2108,20 @@ export const SMTP_PRESETS: Array<{
   { key: '163', label: '163 邮箱', host: 'smtp.163.com', port: 465, encryption: 'ssl' },
   { key: 'outlook', label: 'Outlook', host: 'smtp.office365.com', port: 587, encryption: 'starttls' },
 ];
+
+// ==================== 工资条邮件（第九阶段 Task 5，前端接入在 Task 6） ====================
+
+/** 批量发送汇总（send_payslip_emails / resend_payslip_emails 返回） */
+export interface BatchSummary {
+  sent: number;
+  failed: number;
+  skipped: number;
+  /** 失败留痕 id（供勾选重发） */
+  failed_log_ids: number[];
+}
+
+/** 无邮箱被跳过的员工（向导「缺邮箱 N 人」名单来源） */
+export interface PayslipSkippedEmployee {
+  employee_id: number;
+  employee_name: string;
+}

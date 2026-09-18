@@ -3709,6 +3709,86 @@ pub fn get_notification_logs(
     notification::get_notification_logs(&conn, &query)
 }
 
+// ==================== Payslip Email Commands（第九阶段 Task 5） ====================
+
+/// 预览工资条邮件 HTML（spec 5 步骤 1，只读不写留痕）：服务端复核敏感解锁态，
+/// 未解锁拒绝返回明文金额（复用 require_sensitive_revealed 门禁与文案）。
+#[tauri::command]
+pub fn preview_payslip_email(
+    month: String,
+    employee_id: i64,
+    state: tauri::State<'_, Mutex<Connection>>,
+    sec: tauri::State<'_, crate::security::SecurityState>,
+) -> Result<String, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    notification::require_sensitive_revealed(sec.inner())?;
+    notification::payslip_html(&conn, &month, employee_id)
+}
+
+/// 批量发送工资条邮件（spec 5）：不持锁模式同 send_test_email——主连接锁内
+/// 仅完成构建计划（月份/SMTP/敏感三重门禁 + 组装 + 发起留痕），随后守卫释放；
+/// 发送与留痕写库用独立连接，网络慢不阻塞其他命令。
+#[tauri::command]
+pub fn send_payslip_emails(
+    app: tauri::AppHandle,
+    month: String,
+    employee_ids: Vec<i64>,
+    state: tauri::State<'_, Mutex<Connection>>,
+    sec: tauri::State<'_, crate::security::SecurityState>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<notification::BatchSummary, AppError> {
+    let (plan, config, operator, db_dir) = {
+        let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+        let config = require_smtp_config(&conn, sec.inner())?;
+        let operator = cashier::current_operator_name(&conn, &current);
+        let db_dir = app_data_dir(&app)?;
+        let plan = notification::build_payslip_batch(
+            &conn,
+            sec.inner(),
+            &month,
+            &employee_ids,
+            &operator,
+        )?;
+        (plan, config, operator, db_dir)
+    };
+
+    let log_conn = Connection::open(db_dir.join("salary.db"))?;
+    let channel = notification::EmailChannel::new(config);
+    notification::send_payslip_batch(&log_conn, sec.inner(), &channel, plan, &operator)
+}
+
+/// 重发工资条邮件（spec 5 步骤 3：失败可勾选重发，重发仅失败者）：留痕无正文，
+/// 按失败记录的 employee_id 重新组装 HTML 后重发。不持锁模式同 send_payslip_emails，
+/// 重建（读）与发送（写留痕）全在独立连接上完成。
+#[tauri::command]
+pub fn resend_payslip_emails(
+    app: tauri::AppHandle,
+    month: String,
+    log_ids: Vec<i64>,
+    state: tauri::State<'_, Mutex<Connection>>,
+    sec: tauri::State<'_, crate::security::SecurityState>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<notification::BatchSummary, AppError> {
+    let (config, operator, db_dir) = {
+        let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+        let config = require_smtp_config(&conn, sec.inner())?;
+        let operator = cashier::current_operator_name(&conn, &current);
+        let db_dir = app_data_dir(&app)?;
+        (config, operator, db_dir)
+    };
+
+    let log_conn = Connection::open(db_dir.join("salary.db"))?;
+    let channel = notification::EmailChannel::new(config);
+    notification::resend_payslip_batch(
+        &log_conn,
+        sec.inner(),
+        &channel,
+        &month,
+        &log_ids,
+        &operator,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

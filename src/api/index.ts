@@ -134,6 +134,7 @@ import type {
   SmtpConfigMasked,
   NotificationLog,
   NotificationLogQuery,
+  BatchSummary,
 } from '@/types';
 import { INSTRUMENT_STATUS_LABEL } from '@/types';
 
@@ -2272,6 +2273,25 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
         },
       ] satisfies Partial<NotificationLog>[];
     }
+    // ==================== 工资条邮件（第九阶段 Task 5） ====================
+    case 'preview_payslip_email':
+      return `<div style="font-family:sans-serif;max-width:640px"><h3>${String(
+        args?.month ?? '',
+      )} 工资条</h3><p>员工 #${String(args?.employeeId ?? '')} 工资明细预览（示意）</p></div>`;
+    case 'send_payslip_emails': {
+      if (!mockSmtpConfig) {
+        throw new Error('尚未配置 SMTP，请先在通知设置中保存邮箱配置');
+      }
+      const ids = (args?.employeeIds as number[] | undefined) ?? [];
+      return { sent: ids.length, failed: 0, skipped: 0, failed_log_ids: [] } satisfies BatchSummary;
+    }
+    case 'resend_payslip_emails': {
+      if (!mockSmtpConfig) {
+        throw new Error('尚未配置 SMTP，请先在通知设置中保存邮箱配置');
+      }
+      const ids = (args?.logIds as number[] | undefined) ?? [];
+      return { sent: ids.length, failed: 0, skipped: 0, failed_log_ids: [] } satisfies BatchSummary;
+    }
     default: {
       // 预览模式兜底（Minor 8）：不再无差别 return true——只读命令按语义返回空集合，
       // 其余（写操作/状态机命令）抛中文错误，避免浏览器预览里
@@ -3699,4 +3719,21 @@ export async function getNotificationLogs(query: NotificationLogQuery = {}): Pro
     operator: row.operator ?? null,
     created_at: row.created_at ?? '',
   }));
+}
+
+// ==================== 工资条邮件（第九阶段 Task 5，页面接入在 Task 6） ====================
+
+/** 预览工资条邮件 HTML（只读不写留痕）；敏感未解锁时后端抛中文错误 */
+export async function previewPayslipEmail(month: string, employeeId: number): Promise<string> {
+  return invoke<string>('preview_payslip_email', { month, employeeId });
+}
+
+/** 批量发送工资条邮件：返回 sent/failed/skipped 汇总与失败留痕 id（供勾选重发） */
+export async function sendPayslipEmails(month: string, employeeIds: number[]): Promise<BatchSummary> {
+  return invoke<BatchSummary>('send_payslip_emails', { month, employeeIds });
+}
+
+/** 重发工资条邮件：仅失败留痕，后端按 employee_id 重建正文后重发 */
+export async function resendPayslipEmails(month: string, logIds: number[]): Promise<BatchSummary> {
+  return invoke<BatchSummary>('resend_payslip_emails', { month, logIds });
 }

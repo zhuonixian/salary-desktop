@@ -307,6 +307,8 @@ pub fn reveal_sensitive_data(
         return Err(AppError::InvalidParam("密码错误，无法查看敏感数据".into()));
     }
     let seconds = security::get_idle_settings(&conn)?.2;
+    // 后端镜像敏感解锁态（Task 5）：供工资条等明文出口做服务端门禁。
+    sec.mark_sensitive_revealed(seconds);
     let expires_at = (Utc::now() + chrono::Duration::seconds(seconds as i64)).to_rfc3339();
     let detail = format!(
         "{{\"expires_at\":\"{}\",\"seconds\":{}}}",
