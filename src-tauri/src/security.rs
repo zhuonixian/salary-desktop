@@ -172,6 +172,13 @@ impl SecurityState {
             g.dek = Some(Zeroizing::new(dek));
         }
     }
+
+    /// 测试专用：绕过 setup/unlock 流程直接装载 DEK（仅测试编译参与），
+    /// 供通知等模块的加密存取单测注入密钥，不用于生产路径。
+    #[cfg(test)]
+    pub(crate) fn install_dek_for_test(&self, dek: [u8; 32]) {
+        self.set_dek(dek);
+    }
 }
 
 impl Default for SecurityState {

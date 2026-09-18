@@ -10,6 +10,7 @@ mod invoice;
 mod legacy_migration;
 mod models;
 mod notes;
+mod notification;
 mod ocr;
 mod salary;
 pub mod security;

@@ -2287,3 +2287,38 @@ pub struct SmtpConfig {
     /// 发件人显示名
     pub from_name: String,
 }
+
+/// SMTP 配置脱敏回显（命令层/设置页用，Task 2 notification.rs 消费）：
+/// 不携带真实授权码，仅 `****`+末 2 位（未设置时为 `****` 不带尾缀），
+/// 避免「脱敏值被原样存回」事故。
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SmtpConfigMasked {
+    pub host: String,
+    pub port: u16,
+    /// 加密方式：starttls | ssl | none
+    pub encryption: String,
+    pub username: String,
+    /// 脱敏后的授权码展示值
+    pub password_masked: String,
+    pub from_name: String,
+}
+
+/// 通知发送记录查询条件（Task 2 notification.rs 消费）：
+/// channel/belong_month/status 可选筛选；limit<=0 时由实现取默认值。
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NotificationLogQuery {
+    /// 通知渠道：email / sms
+    #[serde(default)]
+    pub channel: Option<String>,
+    /// 工资所属月份（YYYY-MM）
+    #[serde(default)]
+    pub belong_month: Option<String>,
+    /// sent / failed / skipped
+    #[serde(default)]
+    pub status: Option<String>,
+    /// 返回条数上限；0 表示使用默认（200）
+    #[serde(default)]
+    pub limit: u32,
+}
