@@ -444,7 +444,7 @@
 
   <div class="card">
     <div class="card-title"><span class="icon">🎯</span>产品定位</div>
-    <p>工资核算助手是一款面向中小微企业的<strong>本地单机桌面工具</strong>，帮助出纳独立完成员工管理、考勤统计、工资核算、发票去重、报销付款、月结打包、银行流水匹配等全流程工作。所有数据存储在本地，不上云、不联网（仅调用百度 OCR 时联网），最大程度保护企业薪酬隐私。</p>
+    <p>工资核算助手是一款面向中小微企业的<strong>本地单机桌面工具</strong>，帮助出纳独立完成员工管理、考勤统计、工资核算、发票去重、报销付款、月结打包、银行流水匹配等全流程工作。所有数据存储在本地，不上云、不联网（仅调用百度 OCR 识别与工资条邮件 SMTP 通知时联网），最大程度保护企业薪酬隐私。</p>
   </div>
 
   <div class="card">
@@ -676,7 +676,7 @@
 
   <div class="card">
     <div class="card-title"><span class="icon">🛠️</span>安全中心</div>
-    <p>菜单「系统设置 → 安全中心」提供：</p>
+    <p>侧边栏顶级菜单「安全中心」提供：</p>
     <ul>
       <li><strong>改密码</strong>：输入原密码 + 新密码</li>
       <li><strong>闲置锁定配置</strong>：开关 + 时长（1 / 5 / 15 / 30 分钟）</li>
@@ -1265,6 +1265,22 @@
   </div>
 
   <div class="card">
+    <div class="card-title"><span class="icon">📧</span>通知与工资条邮件 <span class="badge badge-new">v0.9.0 新增</span></div>
+    <p><strong>路径</strong>：菜单「系统设置 → 通知设置」（SMTP 配置）；工资核算页 →「邮件发送工资条」（向导）</p>
+    <div class="steps">
+      <div class="step"><strong>第一步 · 配置 SMTP</strong>：进入「系统设置 → 通知设置」，点 QQ / 163 / Outlook 预设一键填好服务器地址与端口；填入发件邮箱账号、<strong>授权码</strong>与发件人显示名后保存。授权码加密存储，界面只回显脱敏掩码，留空表示不修改。</div>
+      <div class="step"><strong>第二步 · 测试发送</strong>：点「发测试邮件给自己」，系统向发件账号发一封测试邮件，收到即配置成功；失败按提示排查（最常见是把登录密码当成了授权码）。无论成败都会记入「发送记录」Tab。</div>
+      <div class="step"><strong>第三步 · 向导之选员工</strong>：在工资核算页对<strong>已锁定</strong>月份点「邮件发送工资条」；默认勾选已填邮箱的员工，缺邮箱者灰显并提示「缺邮箱 N 人」，可先到员工管理补录邮箱再进向导。</div>
+      <div class="step"><strong>第四步 · 向导之预览</strong>：逐员工预览邮件正文，发放项、扣款项、五险一金个人与单位两侧、个税与实发合计与工资条完全一致；工资明细为明文，需处于敏感数据解锁状态（点任意金额的眼睛图标解锁）才能发送。</div>
+      <div class="step"><strong>第五步 · 向导之发送</strong>：点发送后逐封投递并显示进度，结果逐封记入发送记录与操作日志；失败者可勾选「重发」，系统按员工当前邮箱重新组包只补发失败者。</div>
+    </div>
+    <div class="callout callout-info">
+      <strong>ℹ️ 授权码与外联边界</strong>
+      QQ 邮箱：设置 → 账户 → 开启「IMAP/SMTP 服务」后生成授权码；163 邮箱：设置 → POP3/SMTP/IMAP → 开启并获取授权码。授权码 AES-GCM 加密入库、日志不落明文。仅通知模块访问网络（SMTP 发信），收件人仅为员工本人邮箱不群发，发送行为全部留痕可追溯。
+    </div>
+  </div>
+
+  <div class="card">
     <div class="card-title"><span class="icon">📊</span>报表上年同期对比 <span class="badge badge-new">v0.6.0 新增</span></div>
     <p><strong>路径</strong>：菜单「财务管理 → 财务报表」各 Tab</p>
     <div class="steps">
@@ -1514,7 +1530,7 @@
         <tr><td>考勤管理</td><td>月度考勤数据</td></tr>
         <tr><td>打卡表管理</td><td>OCR 识别打卡表</td></tr>
         <tr><td>OCR 识别中心</td><td>OCR 设置 / 百度 token 配置</td></tr>
-        <tr><td rowspan="2"><strong>薪酬核算</strong></td><td>工资计算</td><td>一键计算 / 单人重算 / 锁定 / 工资条 / 个税年度汇总 / 扣缴申报表</td></tr>
+        <tr><td rowspan="2"><strong>薪酬核算</strong></td><td>工资计算</td><td>一键计算 / 单人重算 / 锁定 / 工资条 / 邮件发送工资条 <span class="badge badge-new">v0.9</span> / 个税年度汇总 / 扣缴申报表</td></tr>
         <tr><td>社保台账</td><td>按员工×年度基数费率 / 年度调基 / 上下限</td></tr>
         <tr><td rowspan="3"><strong>票据报销</strong></td><td>发票管理</td><td>OCR 上传 / 去重 / 详情</td></tr>
         <tr><td>报销管理</td><td>报销单审批 / 经办复核 / 反审批</td></tr>
@@ -1534,7 +1550,8 @@
         <tr><td>操作日志</td><td>业务 + 安全事件审计</td></tr>
         <tr><td>数据安全</td><td>备份 / 恢复 / 体检 / 压缩</td></tr>
         <tr><td rowspan="2"><strong>系统设置</strong></td><td>工资规则</td><td>社保 / 公积金 / 个税 / 扣款标准</td></tr>
-        <tr><td>安全中心</td><td>改密 / 闲置锁 / 敏感解锁配置 / 手动锁屏</td></tr>
+        <tr><td>通知设置 <span class="badge badge-new">v0.9</span></td><td>SMTP 配置 / 预设一键填 / 测试发送 / 发送记录</td></tr>
+        <tr><td><strong>顶级菜单</strong></td><td>安全中心</td><td>改密 / 闲置锁 / 敏感解锁配置 / 手动锁屏</td></tr>
       </tbody>
     </table>
   </div>
@@ -1544,7 +1561,8 @@
     <table>
       <thead><tr><th>版本</th><th>主要能力</th></tr></thead>
       <tbody>
-        <tr><td><strong>v0.8.0（待发版）</strong></td><td>票据台账与申报台账（票据状态机 + 背书 / 贴现 / 托收 / 冲正 / 账期提醒 / 现金盘点差异凭证 / 资金日报 / 个税扣缴申报表 / 进项台账）</td></tr>
+        <tr><td><strong>v0.9.0（待发版）</strong></td><td>通知模块与工资条邮件（SMTP 授权码加密存储 / 测试发送 / 发送留痕 / 工资条邮件三步向导 / 失败重发 / 员工邮箱录入）</td></tr>
+        <tr><td><strong>v0.8.0（已发版 2026-09-18）</strong></td><td>票据台账与申报台账（票据状态机 + 背书 / 贴现 / 托收 / 冲正 / 账期提醒 / 现金盘点差异凭证 / 资金日报 / 个税扣缴申报表 / 进项台账）</td></tr>
         <tr><td><strong>v0.7.0（已发版 2026-09-05）</strong></td><td>出纳运营闭环（资金账户 / 收付款单审批留痕 / 通用付款批次 / 多对多银行对账 / 资金日记账 / 余额调节表 / 借款核销 / 报销治理 / 月结资金联动）</td></tr>
         <tr><td><strong>v0.6.0</strong></td><td>财务功能拓展（科目余额表 / 年末结转 / 社保台账 / 累计预扣 / 工资条 / 同期列）</td></tr>
         <tr><td><strong>v0.5.2</strong></td><td>受控解锁工资与月结防漏锁（2026-08-21）</td></tr>
@@ -1582,7 +1600,7 @@
 <footer>
   <div class="container">
     <div>工资核算助手 · 产品使用说明书 · v0.6.0</div>
-    <div class="footer-meta">本地单机桌面工具 · 不上云 · 不联网（仅 OCR 时调用百度） · 数据完全自主可控</div>
+    <div class="footer-meta">本地单机桌面工具 · 不上云 · 不联网（OCR 识别与工资条邮件通知时才外联） · 数据完全自主可控</div>
   </div>
 </footer>
 

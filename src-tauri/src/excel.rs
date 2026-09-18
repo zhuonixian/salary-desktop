@@ -115,8 +115,7 @@ pub fn read_employee_excel(path: &str) -> AppResult<Vec<Employee>> {
             email: {
                 // 邮箱 trim 后空归 None（带空白邮箱会导致 SMTP 收件失败）
                 let raw = get_string(col_email);
-                raw.map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
+                raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
             },
             bank_account: get_string(col_bank),
             bank_name: get_string(col_bankname),
@@ -3086,13 +3085,7 @@ mod tests {
         ));
         let mut workbook = rust_xlsxwriter::Workbook::new();
         let sheet = workbook.add_worksheet();
-        let headers = [
-            "工号",
-            "姓名",
-            "手机号",
-            "邮箱(email)",
-            "基本工资",
-        ];
+        let headers = ["工号", "姓名", "手机号", "邮箱(email)", "基本工资"];
         for (col, h) in headers.iter().enumerate() {
             sheet.write_string(0, col as u16, *h).unwrap();
         }

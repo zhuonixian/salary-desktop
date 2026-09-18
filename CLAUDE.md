@@ -25,7 +25,7 @@ npm run lint                             # ESLint
 
 ## 架构摘要
 
-后端模块：`commands.rs`（Tauri 命令入口）→ `db.rs`（schema/CRUD）+ `invoice.rs`（发票业务）+ `ocr.rs`（考勤 OCR）+ `salary.rs`（工资引擎）+ `accounting.rs`（凭证与报表）+ `cashier.rs`（资金出纳：账户/资金单/批次/核销/日记账/调节表/借款）+ `notes.rs`（票据台账：状态机/背书链/贴现/托收/冲正）+ `cash_count.rs`（现金盘点：面额明细/差异凭证）+ `security*.rs`（安全）+ `data_safety.rs`（备份恢复）+ `excel.rs`（导入导出）。前端为 `App.tsx` + 28 个 page。SQLite 单文件 `salary.db` 存于 `app_data_dir`。发票原图归档 `app_data_dir/invoices/{belong_month}/{timestamp}_{filename}`。
+后端模块：`commands.rs`（Tauri 命令入口）→ `db.rs`（schema/CRUD）+ `invoice.rs`（发票业务）+ `ocr.rs`（考勤 OCR）+ `salary.rs`（工资引擎）+ `accounting.rs`（凭证与报表）+ `cashier.rs`（资金出纳：账户/资金单/批次/核销/日记账/调节表/借款）+ `notes.rs`（票据台账：状态机/背书链/贴现/托收/冲正）+ `cash_count.rs`（现金盘点：面额明细/差异凭证）+ `notification.rs`（通知底座：媒介抽象/SMTP 配置加密/工资条邮件批量与重发）+ `security*.rs`（安全）+ `data_safety.rs`（备份恢复）+ `excel.rs`（导入导出）。前端为 `App.tsx` + 29 个 page。SQLite 单文件 `salary.db` 存于 `app_data_dir`。发票原图归档 `app_data_dir/invoices/{belong_month}/{timestamp}_{filename}`。
 
 ## 关键设计
 
@@ -55,6 +55,7 @@ npm run lint                             # ESLint
 - [第六阶段财务功能拓展](.claude/memory/stage6-finance-extensions.md) — 科目余额表、年末结转、社保台账、累计预扣、工资条、同期列；spec 见 `docs/superpowers/specs/2026-08-22-stage6-finance-extensions-design.md`、plan 见 `docs/superpowers/plans/2026-08-22-stage6-finance-extensions.md`
 - [第七阶段出纳运营闭环](.claude/memory/stage7-cashier-operations.md) — 资金账户、通用收付款、审批留痕、多对多银行对账、资金日记账、借款核销；spec 见 `docs/superpowers/specs/2026-08-30-stage7-cashier-operations-design.md`、plan 见 `docs/superpowers/plans/2026-08-30-stage7-cashier-operations.md`
 - [第八阶段票据与申报](.claude/memory/stage8-notes-tax-reports.md) — 票据台账、账期提醒、现金盘点、资金日报、个税扣缴申报表、进项台账；spec 见 `docs/superpowers/specs/2026-09-18-stage8-notes-tax-reports-design.md`、plan 见 `docs/superpowers/plans/2026-09-18-stage8-notes-tax-reports.md`
+- [第九阶段通知模块](.claude/memory/stage9-notifications.md) — 通知底座（媒介抽象/SMTP 授权码加密/发送留痕）、工资条邮件三步向导、失败重发；spec 见 `docs/superpowers/specs/2026-09-19-stage9-notifications-design.md`、plan 见 `docs/superpowers/plans/2026-09-19-stage9-notifications.md`
 
 ## 第三阶段开发
 
@@ -79,6 +80,10 @@ npm run lint                             # ESLint
 ## 第八阶段开发
 
 第八阶段以票据台账与申报台账为目标，按 8A 票据台账与账期提醒 → 8B 现金盘点与资金日报 → 8C 个税扣缴申报表/进项台账/Minor 12 项/收尾推进，Task 1-12 已全部交付（收尾含导航核对、OperationLogs 映射核对、全量回归与文档四件套）。开发前先读 `.claude/memory/stage8-notes-tax-reports.md`、`docs/superpowers/plans/2026-09-18-stage8-progress.md` 和 spec（4.1 已勘误：2201=应付票据、2202=应付账款）；票据状态机与凭证分录、冲正恢复前置状态、盘点差异凭证、月结双查（登记月+操作月）为阻断项，Windows exe 手工验收（票据全流程+冲正、盘点差异凭证、提醒卡、三导出）挂账待做。涉及多模块开发时用 subagent 按互不重叠文件范围协作，由主 agent 统一集成、测试、commit、push。
+
+## 第九阶段开发
+
+第九阶段以可选外联的通知能力为目标（仅 SMTP 外联，其余模块维持零外联），按 9A 通知底座与设置页 → 9B 工资条组装器/邮件向导/回归收尾推进，Task 1-7 已全部交付（通知底座、SMTP 授权码 AES-GCM 加密入库、通知设置页、工资条邮件三步向导、失败重发、员工 email 录入）。开发前先读 `.claude/memory/stage9-notifications.md`、`docs/superpowers/plans/2026-09-19-stage9-progress.md` 和 spec；阻断项：授权码不落明文（整键加密+回显脱敏+留空不修改）、发送不持 DB 锁（锁内取数后独立连接发送+留痕）、工资条发送三重门禁（月份已锁定+SMTP 已配置+敏感数据解锁）。Windows exe 手工验收（QQ 授权码配置→测试发送→批量 2 员工→记录核对→失败重发）挂账待做。涉及多模块开发时用 subagent 按互不重叠文件范围协作，由主 agent 统一集成、测试、commit、push。
 
 ## 编码约定
 
