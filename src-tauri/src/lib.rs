@@ -12,6 +12,7 @@ mod models;
 mod notes;
 mod notification;
 mod ocr;
+mod onboarding;
 mod salary;
 pub mod security;
 mod security_commands;
@@ -344,6 +345,19 @@ pub fn run() {
         commands::preview_payslip_email,
         commands::send_payslip_emails,
         commands::resend_payslip_emails,
+        // ===== Onboarding（第十阶段 上手引导与办税落地） =====
+        commands::get_bootstrap_status,
+        commands::get_company_info,
+        commands::save_company_info,
+        commands::seed_demo_data,
+        commands::clear_demo_data,
+        commands::get_tax_calendar,
+        commands::get_tax_calendar_settings,
+        commands::save_tax_calendar_settings,
+        commands::finish_setup_wizard,
+        commands::dismiss_setup_checklist,
+        commands::complete_tax_filing,
+        commands::undo_tax_filing,
     ]);
 
     diag("calling builder.run()...");

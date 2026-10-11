@@ -457,6 +457,16 @@ pub fn create_tables(conn: &Connection) -> AppResult<()> {
           started_at TEXT,
           completed_at TEXT
         );
+
+        -- 第十阶段：办税征期完成留痕（期次数据由规则即时生成，本表仅记已完成）
+        CREATE TABLE IF NOT EXISTS tax_filing_records (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          period TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          completed_at TEXT NOT NULL,
+          operator TEXT NOT NULL,
+          UNIQUE (period, kind)
+        );
         ",
     )?;
     migrate_existing_schema(conn)?;

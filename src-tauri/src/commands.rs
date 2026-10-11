@@ -3790,6 +3790,170 @@ pub fn resend_payslip_emails(
     )
 }
 
+// ==================== Onboarding（第十阶段 上手引导与办税落地） ====================
+
+#[tauri::command]
+pub fn get_bootstrap_status(
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<crate::onboarding::BootstrapStatus, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(crate::onboarding::get_bootstrap_status(&conn)?)
+}
+
+#[tauri::command]
+pub fn get_company_info(
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<CompanyInfo, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let (company_name, taxpayer_id) = crate::onboarding::get_company_info(&conn)?;
+    Ok(CompanyInfo {
+        company_name,
+        taxpayer_id,
+    })
+}
+
+#[tauri::command]
+pub fn save_company_info(
+    data: CompanyInfo,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    crate::onboarding::save_company_info(&conn, data.company_name, data.taxpayer_id)?;
+    db::log_operation(
+        &conn,
+        "save_company_info",
+        "保存企业信息（公司名/统一社会信用代码）",
+        "system",
+        None,
+    )?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn seed_demo_data(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Mutex<Connection>>,
+    sec: tauri::State<'_, crate::security::SecurityState>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<crate::onboarding::DemoSeedSummary, AppError> {
+    let dir = app_data_dir(&app)?;
+    Ok(crate::onboarding::seed_demo_data(
+        state.inner(),
+        &dir,
+        Some(sec.inner()),
+        current.inner(),
+    )?)
+}
+
+#[tauri::command]
+pub fn clear_demo_data(
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<bool, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    crate::onboarding::clear_demo_data(&conn, current.inner())?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn get_tax_calendar(
+    from_month: String,
+    months: Option<u32>,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<crate::onboarding::TaxCalendarItem>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(crate::onboarding::get_tax_calendar(
+        &conn,
+        &from_month,
+        months.unwrap_or(3),
+    )?)
+}
+
+#[tauri::command]
+pub fn get_tax_calendar_settings(
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<TaxCalendarSettings, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(TaxCalendarSettings {
+        enabled_kinds: crate::onboarding::get_tax_calendar_settings(&conn)?,
+    })
+}
+
+#[tauri::command]
+pub fn save_tax_calendar_settings(
+    data: TaxCalendarSettings,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    crate::onboarding::save_tax_calendar_settings(&conn, &data.enabled_kinds)?;
+    db::log_operation(
+        &conn,
+        "save_tax_calendar_settings",
+        &format!("更新征期提醒启用项：{}", data.enabled_kinds.join("/")),
+        "system",
+        None,
+    )?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn finish_setup_wizard(state: tauri::State<'_, Mutex<Connection>>) -> Result<bool, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    crate::onboarding::finish_setup_wizard(&conn)?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn dismiss_setup_checklist(
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    crate::onboarding::dismiss_setup_checklist(&conn)?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn complete_tax_filing(
+    period: String,
+    kind: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<bool, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let operator = cashier::current_operator_name(&conn, &current);
+    let created = crate::onboarding::complete_tax_filing(&conn, &period, &kind, &operator)?;
+    if created {
+        db::log_operation(
+            &conn,
+            "complete_tax_filing",
+            &format!("标记已完成征期申报：{period} {kind}"),
+            &operator,
+            None,
+        )?;
+    }
+    Ok(created)
+}
+
+#[tauri::command]
+pub fn undo_tax_filing(
+    period: String,
+    kind: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let removed = crate::onboarding::undo_tax_filing(&conn, &period, &kind)?;
+    if removed {
+        db::log_operation(
+            &conn,
+            "undo_tax_filing",
+            &format!("撤销征期完成标记：{period} {kind}"),
+            "system",
+            None,
+        )?;
+    }
+    Ok(removed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

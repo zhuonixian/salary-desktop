@@ -2326,3 +2326,18 @@ pub struct NotificationLogQuery {
     #[serde(default)]
     pub limit: u32,
 }
+
+// ==================== Onboarding（第十阶段 上手引导与办税落地） ====================
+
+/// 企业信息（存 app_settings，申报模板表头消费）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompanyInfo {
+    pub company_name: Option<String>,
+    pub taxpayer_id: Option<String>,
+}
+
+/// 征期提醒启用项设置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaxCalendarSettings {
+    pub enabled_kinds: Vec<String>,
+}
