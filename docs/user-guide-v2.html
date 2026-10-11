@@ -906,15 +906,16 @@
   <a href="#budget"><span class="no">09</span>预算与分析</a>
   <a href="#accounting"><span class="no">10</span>财务管理与报表</a>
   <a href="#data-safety"><span class="no">11</span>数据安全</a>
-  <a href="#faq"><span class="no">12</span>常见问题</a>
-  <a href="#appendix"><span class="no">13</span>附录</a>
+  <a href="#onboarding-tax"><span class="no">12</span>初始化向导与办税</a>
+  <a href="#faq"><span class="no">13</span>常见问题</a>
+  <a href="#appendix"><span class="no">14</span>附录</a>
 </nav>
 
 <!-- ==================== 正文（详细指南层） ==================== -->
 <main>
 <div class="guide-divider">
   <span class="guide-divider-line"></span>
-  <span class="guide-divider-text">详 细 指 南 · 十三章</span>
+  <span class="guide-divider-text">详 细 指 南 · 十四章</span>
   <span class="guide-divider-line"></span>
 </div>
 
@@ -1867,10 +1868,68 @@
   </div>
 </section>
 
-<!-- ==================== 12. 常见问题 ==================== -->
-<section id="faq">
+<!-- ==================== 12. 初始化向导与办税辅助 ==================== -->
+<section id="onboarding-tax">
   <div class="sec-head">
     <div class="sec-stamp sm">壹拾贰</div>
+    <div>
+      <h2>初始化向导与办税辅助<span class="tag tag-green">v0.10 新增</span></h2>
+      <div class="sec-desc">第一次上手不迷路；申报导出与征期提醒补齐报税最后一公里</div>
+    </div>
+    <div class="sec-right"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">首次运行向导</div>
+    <p><strong>路径</strong>：全新账套首次打开应用时自动进入（应用内可随时访问「初始化向导」页重新打开）</p>
+    <p>七个步骤，<strong>每一步都可以跳过</strong>，稍后在对应页面随时补充：</p>
+    <div class="step"><strong>欢迎</strong>：产品定位——本地单机、数据不出本机，可先载入示例数据体验</div>
+    <div class="step"><strong>启动密码</strong>：密码 + 找回码（仅显示一次，务必抄写保存）+ 安全问题；向导完成时统一生效</div>
+    <div class="step"><strong>企业信息</strong>：公司名称与统一社会信用代码（选填），用于申报模板表头</div>
+    <div class="step"><strong>工资与社保</strong>：工资规则与社保基数已预置常规默认值，当地比例不同可跳转修改</div>
+    <div class="step"><strong>员工导入</strong> / <strong>期初余额</strong>：跳转到员工管理页、科目表页完成</div>
+    <div class="step"><strong>完成</strong>：账套为空时可一键<strong>载入示例账套</strong>先体验，或直接开始使用</div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">示例账套：先体验，再清空</div>
+    <p>载入后得到一套完整演示数据：8 名员工、两个月的考勤与工资（上月已复核锁定）、社保台账、3 张发票、2 张已审批报销单、收款/付款资金单、付款批次与银行流水，业务凭证自动生成且借贷平衡。</p>
+    <p><strong>推荐体验路径</strong>：付款批次导出 → 标记已付款 → 银行对账点「自动匹配」——有一条与批次金额一致的流水等着被匹配。</p>
+    <p>体验完成后，在首页检查清单卡点<strong>「清除示例数据」</strong>一键重置（科目、规则、设置与审计日志保留）。<strong>注意</strong>：账套一旦混入真实业务数据（含正式月结、往来单位、票据、盘点），将拒绝一键清除并提示逐项处理。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-title">首页检查清单</div>
+    <p>首页顶部按账套状态动态列出未完成的基础配置：<strong>启动密码、员工、社保基数台账、期初余额、首次算薪锁定</strong>，未完成项点击直达对应页面。全部完成后自动消失，也可点「不再显示」手动关闭。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-title">申报模板三件（报税最后一公里）</div>
+    <p><strong>路径</strong>：菜单「输出审计 → 导出中心」</p>
+    <ul>
+      <li><strong>人员信息采集模板</strong>：全体在职员工一次导出，列序对齐自然人电子税务局（扣缴端）「人员信息采集」导入模板</li>
+      <li><strong>工资薪金申报模板</strong>：按月导出，仅限<strong>已锁定月份</strong>（与个税扣缴申报表同一门禁）；三险个人部分按社保台账或全局规则拆列</li>
+      <li><strong>社保缴费基数年度申报表</strong>：按员工 × 年度输出基数与费率，表头带单位名称与统一社会信用代码（未配置时表尾提示补填）</li>
+    </ul>
+    <p>提示：税局模板可能更新，若导入时列序不符，请以扣缴端当前模板为准并反馈调整。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-title">办税征期提醒</div>
+    <p><strong>路径</strong>：首页「征期提醒」卡</p>
+    <p>内置五类征期：<strong>个人所得税扣缴申报</strong>（每月，截止次月 15 日）、<strong>个税年度汇算</strong>与<strong>工商年报</strong>（每年 6-30）默认开启；<strong>企业所得税季度预缴</strong>与<strong>社保缴费基数年度申报</strong>默认关闭，可在卡片右上角齿轮中按需开启。</p>
+    <ul>
+      <li>临近 15 天金色提醒、逾期红色标注；个税期次附带「上月工资是否已锁定」的操作提示</li>
+      <li>完成申报后点「标记已完成」留痕（操作人 + 时间，可在操作日志追溯），可撤销恢复提醒</li>
+      <li>截止日按自然日计算，<strong>如遇节假日顺延，以税局公告为准</strong></li>
+    </ul>
+  </div>
+</section>
+
+<!-- ==================== 13. 常见问题 ==================== -->
+<section id="faq">
+  <div class="sec-head">
+    <div class="sec-stamp sm">壹拾叁</div>
     <div>
       <h2>常见问题</h2>
       <div class="sec-desc">出纳使用最高频的问题与解答</div>
@@ -1996,7 +2055,7 @@
   </details>
 </section>
 
-<!-- ==================== 13. 附录 ==================== -->
+<!-- ==================== 14. 附录 ==================== -->
 <section id="appendix">
   <div class="sec-head">
     <div class="sec-stamp sm">附录</div>
