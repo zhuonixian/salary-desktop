@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use calamine::{open_workbook_auto, Data, Reader};
-use rusqlite::params;
+use rusqlite::{params, Connection};
 use rust_xlsxwriter::{Format, Workbook};
 
 use crate::cashier::get_fund_daily_report;
@@ -2276,6 +2276,489 @@ pub fn export_tax_withholding_declaration(
     Ok(())
 }
 
+/// 扣缴端「人员信息采集」导入模板（spec 10B）：全体在职员工一行一条，
+/// 列序对齐自然人电子税务局（扣缴端）人员信息采集导入模板。
+/// 门禁：无在职员工时报错。身份证号此处按明文导出（导入税局本就需要明文，
+/// 敏感数据门禁在命令层）；在职口径与工资计算一致（status='active'）。
+pub fn export_eit_payer_template(conn: &Connection, path: &str) -> AppResult<()> {
+    // ---- 在职员工行：身份证号/入职日期/手机号/备注可空，取空串占位 ----
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(id_card, ''), name, COALESCE(hire_date, ''), COALESCE(phone, ''),
+                COALESCE(remark, '')
+         FROM employees
+         WHERE IFNULL(status, 'active') = 'active'
+         ORDER BY employee_no",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(AppError::from)?;
+    if rows.is_empty() {
+        return Err(AppError::InvalidParam(
+            "无在职员工，无法导出人员信息采集模板".to_string(),
+        ));
+    }
+
+    let mut workbook = Workbook::new();
+    let sheet = workbook.add_worksheet();
+    sheet.set_name("人员信息采集")?;
+    let title = Format::new().set_bold().set_font_size(14);
+    let header = Format::new()
+        .set_bold()
+        .set_border(rust_xlsxwriter::FormatBorder::Thin);
+    let cell = Format::new().set_border(rust_xlsxwriter::FormatBorder::Thin);
+    let note = Format::new().set_font_color("#8C8C8C").set_font_size(10);
+
+    sheet.merge_range(0, 0, 0, 7, "人员信息采集导入模板", &title)?;
+    let headers = [
+        "纳税人识别号",
+        "姓名",
+        "身份证件类型",
+        "人员状态",
+        "是否雇员",
+        "入职日期",
+        "手机号码",
+        "备注",
+    ];
+    for (i, h) in headers.iter().enumerate() {
+        sheet.write_with_format(1, i as u16, *h, &header)?;
+    }
+
+    // 固定取值列：证件类型=居民身份证、人员状态=正常、是否雇员=是（对齐扣缴端模板口径）
+    let mut r: u32 = 2;
+    for (id_card, name, hire_date, phone, remark) in &rows {
+        sheet.write_with_format(r, 0, id_card, &cell)?;
+        sheet.write_with_format(r, 1, name, &cell)?;
+        sheet.write_with_format(r, 2, "居民身份证", &cell)?;
+        sheet.write_with_format(r, 3, "正常", &cell)?;
+        sheet.write_with_format(r, 4, "是", &cell)?;
+        sheet.write_with_format(r, 5, hire_date, &cell)?;
+        sheet.write_with_format(r, 6, phone, &cell)?;
+        sheet.write_with_format(r, 7, remark, &cell)?;
+        r += 1;
+    }
+
+    // ---- 整表尾注：列序对齐提示（税局模板可能更新） ----
+    sheet.merge_range(
+        r,
+        0,
+        r,
+        7,
+        "注：列序对齐自然人电子税务局（扣缴端）人员信息采集导入模板；税局模板可能更新，\
+         若导入列序不符请以扣缴端当前模板为准并反馈调整。",
+        &note,
+    )?;
+
+    let widths = [24u16, 10, 14, 10, 10, 14, 16, 20];
+    for (col, w) in widths.iter().enumerate() {
+        sheet.set_column_width(col as u16, *w)?;
+    }
+
+    workbook.save(path)?;
+    Ok(())
+}
+
+/// 扣缴端「正常工资薪金收入」导入模板（spec 10B）：仅锁定月份可导出。
+/// 门禁、取数与三险拆分口径与 `export_tax_withholding_declaration` 完全一致
+/// （此处按规范复制一份，不改动原函数）：有社保台账按台账三险个人分摊比例拆
+/// `social_security_personal`，无台账按全局工资规则三险个人比例拆；比例之和
+/// ≠ 100%（容差 0.005）时该行退合并展示（养老列=总额、医疗/失业列空）并在备注注明。
+pub fn export_eit_salary_template(conn: &Connection, month: &str, path: &str) -> AppResult<()> {
+    const SPLIT_TOLERANCE: f64 = 0.005;
+
+    // ---- 门禁：仅锁定（locked=1）月份可导出；无数据拒绝（口径同个税扣缴申报表） ----
+    let total: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM salary_monthly_results WHERE salary_month = ?1",
+        params![month],
+        |r| r.get(0),
+    )?;
+    if total == 0 {
+        return Err(AppError::InvalidParam(format!(
+            "{month} 无工资数据，无法导出工资薪金收入导入模板"
+        )));
+    }
+    let unlocked: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM salary_monthly_results WHERE salary_month = ?1 AND locked = 0",
+        params![month],
+        |r| r.get(0),
+    )?;
+    if unlocked > 0 {
+        return Err(AppError::InvalidParam(format!(
+            "{month} 存在 {unlocked} 条未锁定的工资数据，请先复核并锁定后再导出工资薪金收入导入模板"
+        )));
+    }
+
+    // ---- 全局三险个人比例（工资规则页，键缺省视为未配置） ----
+    let global_rates: Option<(f64, f64, f64)> = {
+        let rules = crate::db::get_salary_rules(conn)?;
+        let get = |key: &str| {
+            rules
+                .iter()
+                .find(|r| r.enabled == 1 && r.rule_key == key)
+                .map(|r| r.rule_value)
+        };
+        match (
+            get("pension_personal_rate"),
+            get("medical_personal_rate"),
+            get("unemployment_personal_rate"),
+        ) {
+            (Some(p), Some(m), Some(u)) => Some((p, m, u)),
+            _ => None,
+        }
+    };
+
+    let valid_rates = |rates: (f64, f64, f64)| -> bool {
+        let (p, m, u) = rates;
+        p >= 0.0 && m >= 0.0 && u >= 0.0 && (p + m + u - 1.0).abs() <= SPLIT_TOLERANCE
+    };
+
+    #[derive(Debug)]
+    struct SalaryTemplateRow {
+        employee_no: String,
+        name: String,
+        id_card: String,
+        special_deduction: f64,
+        gross: f64,
+        ss_personal: f64,
+        hf_personal: f64,
+    }
+
+    // ---- 数据行：工资结果联员工表取身份证号/专项附加（口径同个税扣缴申报表） ----
+    let mut stmt = conn.prepare(
+        "SELECT r.employee_no, COALESCE(e.name, r.name), COALESCE(e.id_card, ''),
+                COALESCE(e.special_deduction, 0),
+                r.gross_salary, r.social_security_personal, r.housing_fund_personal
+         FROM salary_monthly_results r
+         LEFT JOIN employees e ON e.employee_no = r.employee_no
+         WHERE r.salary_month = ?1
+         ORDER BY r.employee_no",
+    )?;
+    let rows = stmt
+        .query_map(params![month], |row| {
+            Ok(SalaryTemplateRow {
+                employee_no: row.get(0)?,
+                name: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                id_card: row.get(2)?,
+                special_deduction: row.get(3)?,
+                gross: row.get(4)?,
+                ss_personal: row.get(5)?,
+                hf_personal: row.get(6)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(AppError::from)?;
+
+    // 台账年度取工资月前四位（与个税扣缴申报表的台账匹配口径一致）
+    let year: i64 = month.get(0..4).and_then(|y| y.parse().ok()).unwrap_or(0);
+
+    let mut workbook = Workbook::new();
+    let sheet = workbook.add_worksheet();
+    sheet.set_name("工资薪金收入")?;
+    let title = Format::new().set_bold().set_font_size(14);
+    let header = Format::new()
+        .set_bold()
+        .set_border(rust_xlsxwriter::FormatBorder::Thin);
+    let cell = Format::new().set_border(rust_xlsxwriter::FormatBorder::Thin);
+    // 导入模板金额用纯数字格式（不带千分位），避免税局端解析歧义
+    let money = Format::new()
+        .set_border(rust_xlsxwriter::FormatBorder::Thin)
+        .set_num_format("0.00");
+    let note = Format::new().set_font_color("#8C8C8C").set_font_size(10);
+
+    sheet.merge_range(
+        0,
+        0,
+        0,
+        10,
+        &format!("正常工资薪金收入导入模板（{month}）"),
+        &title,
+    )?;
+    let headers = [
+        "姓名",
+        "身份证件类型",
+        "身份证件号码",
+        "本期收入",
+        "本期免税收入",
+        "基本养老保险费",
+        "基本医疗保险费",
+        "失业保险费",
+        "住房公积金",
+        "专项附加扣除",
+        "备注",
+    ];
+    for (i, h) in headers.iter().enumerate() {
+        sheet.write_with_format(1, i as u16, *h, &header)?;
+    }
+
+    let mut r: u32 = 2;
+    for row in &rows {
+        // 三险拆列：有台账行只认台账比例，无台账行只认全局比例（不交叉回退，口径同扣缴申报表）
+        let ledger_rates: Option<(f64, f64, f64)> = conn
+            .query_row(
+                "SELECT pension_personal_rate, medical_personal_rate, unemployment_personal_rate
+                 FROM social_insurance_profiles WHERE employee_no = ?1 AND profile_year = ?2",
+                params![row.employee_no, year],
+                |x| Ok((x.get(0)?, x.get(1)?, x.get(2)?)),
+            )
+            .ok();
+        let rates = match ledger_rates {
+            // 有台账行只认台账比例：比例非法时直接退合并，不交叉回退全局比例
+            Some(lr) => {
+                if valid_rates(lr) {
+                    Some(lr)
+                } else {
+                    None
+                }
+            }
+            None => match global_rates {
+                Some(gr) if valid_rates(gr) => Some(gr),
+                _ => None,
+            },
+        };
+        let (pension, medical, unemployment) = match rates {
+            Some((p, m, _u)) => {
+                // 逐项四舍五入、失业险吃尾差，保证三列之和精确等于社保个人总额
+                let pension = (row.ss_personal * p * 100.0).round() / 100.0;
+                let medical = (row.ss_personal * m * 100.0).round() / 100.0;
+                let unemployment = ((row.ss_personal - pension - medical) * 100.0).round() / 100.0;
+                (Some(pension), Some(medical), Some(unemployment))
+            }
+            None => (Some(row.ss_personal), None, None), // 退合并：养老列=总额
+        };
+
+        sheet.write_with_format(r, 0, &row.name, &cell)?;
+        sheet.write_with_format(r, 1, "居民身份证", &cell)?;
+        sheet.write_with_format(r, 2, &row.id_card, &cell)?;
+        // 本期收入四舍五入 2 位；免税收入固定 0
+        let gross = (row.gross * 100.0).round() / 100.0;
+        sheet.write_number_with_format(r, 3, gross, &money)?;
+        sheet.write_number_with_format(r, 4, 0.0, &money)?;
+        match pension {
+            Some(v) => {
+                sheet.write_number_with_format(r, 5, v, &money)?;
+            }
+            None => {
+                sheet.write_with_format(r, 5, "", &cell)?;
+            }
+        }
+        match medical {
+            Some(v) => {
+                sheet.write_number_with_format(r, 6, v, &money)?;
+            }
+            None => {
+                sheet.write_with_format(r, 6, "", &cell)?;
+            }
+        }
+        match unemployment {
+            Some(v) => {
+                sheet.write_number_with_format(r, 7, v, &money)?;
+            }
+            None => {
+                sheet.write_with_format(r, 7, "", &cell)?;
+            }
+        }
+        sheet.write_number_with_format(r, 8, row.hf_personal, &money)?;
+        sheet.write_number_with_format(r, 9, row.special_deduction, &money)?;
+        match medical {
+            Some(_) => {
+                sheet.write_with_format(r, 10, "", &cell)?;
+            }
+            None => {
+                sheet.write_with_format(
+                    r,
+                    10,
+                    "三险未拆分：社保个人部分已并入基本养老保险费列",
+                    &cell,
+                )?;
+            }
+        }
+        r += 1;
+    }
+
+    // ---- 整表尾注：列序对齐提示（税局模板可能更新） ----
+    sheet.merge_range(
+        r,
+        0,
+        r,
+        10,
+        "注：列序对齐自然人电子税务局（扣缴端）正常工资薪金收入导入模板；税局模板可能更新，\
+         若导入列序不符请以扣缴端当前模板为准并反馈调整。",
+        &note,
+    )?;
+
+    let widths = [10u16, 14, 22, 12, 12, 14, 14, 12, 14, 12, 30];
+    for (col, w) in widths.iter().enumerate() {
+        sheet.set_column_width(col as u16, *w)?;
+    }
+
+    workbook.save(path)?;
+    Ok(())
+}
+
+/// 社保缴费基数年度申报表（spec 10B）：按年度导出社保公积金台账
+/// （social_insurance_profiles JOIN employees），按员工号排序。
+/// 表头区含单位名称与统一社会信用代码（取 app_settings，缺省留空并在表尾提示补填）。
+/// 比例列库内存小数（0.26=26%），以百分比格式呈现。
+pub fn export_social_base_declaration(conn: &Connection, year: i64, path: &str) -> AppResult<()> {
+    #[derive(Debug)]
+    struct SocialBaseRow {
+        name: String,
+        id_card: String,
+        ss_base: f64,
+        hf_base: f64,
+        ss_employer_rate: f64,
+        ss_personal_rate: f64,
+        hf_employer_rate: f64,
+        hf_personal_rate: f64,
+        pension_share: f64,
+        medical_share: f64,
+        unemployment_share: f64,
+        remark: String,
+    }
+
+    // ---- 数据：该年度台账联员工表取姓名/身份证号，按员工号排序 ----
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(e.name, ''), COALESCE(e.id_card, ''),
+                p.ss_base, p.hf_base,
+                p.ss_employer_rate, p.ss_personal_rate, p.hf_employer_rate, p.hf_personal_rate,
+                p.pension_personal_rate, p.medical_personal_rate, p.unemployment_personal_rate,
+                COALESCE(p.remark, '')
+         FROM social_insurance_profiles p
+         LEFT JOIN employees e ON e.employee_no = p.employee_no
+         WHERE p.profile_year = ?1
+         ORDER BY p.employee_no",
+    )?;
+    let rows = stmt
+        .query_map(params![year], |row| {
+            Ok(SocialBaseRow {
+                name: row.get(0)?,
+                id_card: row.get(1)?,
+                ss_base: row.get(2)?,
+                hf_base: row.get(3)?,
+                ss_employer_rate: row.get(4)?,
+                ss_personal_rate: row.get(5)?,
+                hf_employer_rate: row.get(6)?,
+                hf_personal_rate: row.get(7)?,
+                pension_share: row.get(8)?,
+                medical_share: row.get(9)?,
+                unemployment_share: row.get(10)?,
+                remark: row.get(11)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(AppError::from)?;
+    if rows.is_empty() {
+        return Err(AppError::InvalidParam(format!(
+            "{year} 年度无社保台账数据，无法导出社保缴费基数申报表"
+        )));
+    }
+
+    // ---- 表头区公司信息（系统设置，可空） ----
+    let company_name = crate::db::get_setting(conn, "company_name")?.unwrap_or_default();
+    let taxpayer_id = crate::db::get_setting(conn, "taxpayer_id")?.unwrap_or_default();
+
+    let mut workbook = Workbook::new();
+    let sheet = workbook.add_worksheet();
+    sheet.set_name("社保基数申报")?;
+    let title = Format::new().set_bold().set_font_size(14);
+    let info = Format::new().set_bold();
+    let header = Format::new()
+        .set_bold()
+        .set_border(rust_xlsxwriter::FormatBorder::Thin);
+    let cell = Format::new().set_border(rust_xlsxwriter::FormatBorder::Thin);
+    let money = Format::new()
+        .set_border(rust_xlsxwriter::FormatBorder::Thin)
+        .set_num_format("0.00");
+    let percent = Format::new()
+        .set_border(rust_xlsxwriter::FormatBorder::Thin)
+        .set_num_format("0.00%");
+    let note = Format::new().set_font_color("#8C8C8C").set_font_size(10);
+
+    // ---- 顶部表头区：标题 + 单位名称 + 统一社会信用代码 ----
+    sheet.merge_range(
+        0,
+        0,
+        0,
+        12,
+        &format!("社保缴费基数年度申报表（{year}年度）"),
+        &title,
+    )?;
+    sheet.merge_range(1, 0, 1, 12, &format!("单位名称：{company_name}"), &info)?;
+    sheet.merge_range(
+        2,
+        0,
+        2,
+        12,
+        &format!("统一社会信用代码：{taxpayer_id}"),
+        &info,
+    )?;
+
+    let headers = [
+        "序号",
+        "姓名",
+        "身份证件号码",
+        "社保缴费基数",
+        "公积金缴费基数",
+        "社保单位比例(%)",
+        "社保个人比例(%)",
+        "公积金单位比例(%)",
+        "公积金个人比例(%)",
+        "养老个人份额",
+        "医疗个人份额",
+        "失业个人份额",
+        "备注",
+    ];
+    for (i, h) in headers.iter().enumerate() {
+        sheet.write_with_format(3, i as u16, *h, &header)?;
+    }
+
+    let mut r: u32 = 4;
+    for (idx, row) in rows.iter().enumerate() {
+        sheet.write_number_with_format(r, 0, (idx + 1) as f64, &cell)?;
+        sheet.write_with_format(r, 1, &row.name, &cell)?;
+        sheet.write_with_format(r, 2, &row.id_card, &cell)?;
+        sheet.write_number_with_format(r, 3, row.ss_base, &money)?;
+        sheet.write_number_with_format(r, 4, row.hf_base, &money)?;
+        sheet.write_number_with_format(r, 5, row.ss_employer_rate, &percent)?;
+        sheet.write_number_with_format(r, 6, row.ss_personal_rate, &percent)?;
+        sheet.write_number_with_format(r, 7, row.hf_employer_rate, &percent)?;
+        sheet.write_number_with_format(r, 8, row.hf_personal_rate, &percent)?;
+        sheet.write_number_with_format(r, 9, row.pension_share, &percent)?;
+        sheet.write_number_with_format(r, 10, row.medical_share, &percent)?;
+        sheet.write_number_with_format(r, 11, row.unemployment_share, &percent)?;
+        sheet.write_with_format(r, 12, &row.remark, &cell)?;
+        r += 1;
+    }
+
+    // ---- 整表尾注：公司信息缺项提示 ----
+    if company_name.trim().is_empty() || taxpayer_id.trim().is_empty() {
+        sheet.merge_range(
+            r,
+            0,
+            r,
+            12,
+            "注：请补填单位名称与统一社会信用代码（系统设置→初始化向导第 3 步）。",
+            &note,
+        )?;
+    }
+
+    let widths = [8u16, 10, 22, 14, 14, 14, 14, 16, 16, 12, 12, 12, 16];
+    for (col, w) in widths.iter().enumerate() {
+        sheet.set_column_width(col as u16, *w)?;
+    }
+
+    workbook.save(path)?;
+    Ok(())
+}
+
 /// 科目余额表（试算平衡）：借/贷四栏余额 + 合计行。
 pub fn export_trial_balance_excel(report: &TrialBalanceReport, path: &str) -> AppResult<()> {
     let mut workbook = rust_xlsxwriter::Workbook::new();
@@ -3629,5 +4112,276 @@ mod tests {
             "累计已预扣合计=上月已预扣之和"
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    // ==================== 申报模板导出（Task 10B） ====================
+
+    fn eit_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("eit-{}-{name}.xlsx", std::process::id()))
+    }
+
+    /// 人员信息采集模板：仅含在职员工（非 active 不计），固定列取值正确，无员工时报错
+    #[test]
+    fn test_eit_payer_template_active_only_and_empty_error() {
+        use calamine::{open_workbook_auto, Data, Reader};
+        let conn = withholding_env();
+        withholding_employee(&conn, "E001", "张三", "110101199001011234", 1500.0);
+        conn.execute(
+            "UPDATE employees SET phone='13800000001', hire_date='2024-03-01', remark='老员工'
+             WHERE employee_no='E001'",
+            [],
+        )
+        .unwrap();
+        // 离职员工不进模板
+        conn.execute(
+            "INSERT INTO employees (employee_no, name, id_card, status, created_at, updated_at)
+             VALUES ('E009', '赵六', '110101199003034567', 'resigned', '2026-01-01', '2026-01-01')",
+            [],
+        )
+        .unwrap();
+
+        let path = eit_path("payer");
+        export_eit_payer_template(&conn, path.to_str().unwrap()).unwrap();
+
+        let mut workbook = open_workbook_auto(path.to_str().unwrap()).unwrap();
+        let sheet = workbook.worksheet_range("人员信息采集").unwrap();
+        let text = |r: u32, c: u32| -> String {
+            match sheet.get_value((r, c)) {
+                Some(Data::String(s)) => s.to_string(),
+                Some(Data::Empty) | None => String::new(),
+                other => panic!("应为文本单元格：({r},{c}) = {other:?}"),
+            }
+        };
+
+        // 标题 + 表头 + 1 在职数据行 + 尾注 = 4 行（离职不计）
+        assert_eq!(sheet.height(), 4, "离职员工不应出现在模板中");
+        assert_eq!(text(2, 0), "110101199001011234", "纳税人识别号=身份证号");
+        assert_eq!(text(2, 1), "张三");
+        assert_eq!(text(2, 2), "居民身份证", "证件类型固定值");
+        assert_eq!(text(2, 3), "正常", "人员状态固定值");
+        assert_eq!(text(2, 4), "是", "是否雇员固定值");
+        assert_eq!(text(2, 5), "2024-03-01", "入职日期取 hire_date");
+        assert_eq!(text(2, 6), "13800000001", "手机号码取 phone");
+        assert_eq!(text(2, 7), "老员工", "备注取 employees.remark");
+        let note = text(3, 0);
+        assert!(note.contains("扣缴端"), "尾注应说明列序对齐扣缴端：{note}");
+        assert!(note.contains("模板"), "尾注应含模板版本提示：{note}");
+
+        // 无在职员工时报错
+        let conn2 = withholding_env();
+        let empty_path = eit_path("payer-empty");
+        let err = export_eit_payer_template(&conn2, empty_path.to_str().unwrap()).unwrap_err();
+        assert!(err.to_string().contains("无在职员工"), "实际错误：{err}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 工资薪金收入模板：锁定月按台账拆列、退合并行备注注明三险未拆分、未锁定门禁
+    #[test]
+    fn test_eit_salary_template_locked_split_fallback_and_gate() {
+        use calamine::{open_workbook_auto, Data, Reader};
+        let conn = withholding_env();
+        withholding_employee(&conn, "E001", "张三", "110101199001011234", 1500.0);
+        // 台账三险个人分摊比例：0.762 + 0.190 + 0.048 = 1.000
+        withholding_profile(&conn, "E001", (0.762, 0.190, 0.048));
+        withholding_result(
+            &conn, "2026-08", "E001", "张三", 10000.0, 1050.0, 1200.0, 80.0, true,
+        );
+
+        let path = eit_path("salary-split");
+        export_eit_salary_template(&conn, "2026-08", path.to_str().unwrap()).unwrap();
+
+        let mut workbook = open_workbook_auto(path.to_str().unwrap()).unwrap();
+        let sheet = workbook.worksheet_range("工资薪金收入").unwrap();
+        let text = |r: u32, c: u32| -> String {
+            match sheet.get_value((r, c)) {
+                Some(Data::String(s)) => s.to_string(),
+                Some(Data::Empty) | None => String::new(),
+                other => panic!("应为文本单元格：({r},{c}) = {other:?}"),
+            }
+        };
+        let num = |r: u32, c: u32| -> f64 {
+            match sheet.get_value((r, c)) {
+                Some(Data::Float(v)) => *v,
+                Some(Data::Int(v)) => *v as f64,
+                other => panic!("应为数字单元格：({r},{c}) = {other:?}"),
+            }
+        };
+
+        // 标题 + 表头 + 1 数据行 + 尾注 = 4 行（无退合并尾注，仅固定版本提示尾注）
+        assert_eq!(sheet.height(), 4);
+        assert_eq!(text(2, 0), "张三");
+        assert_eq!(text(2, 1), "居民身份证", "证件类型固定值");
+        assert_eq!(text(2, 2), "110101199001011234", "身份证号取 employees");
+        assert!((num(2, 3) - 10000.0).abs() < 0.005, "本期收入=应发合计");
+        assert!((num(2, 4) - 0.0).abs() < 0.005, "本期免税收入固定 0");
+        assert!((num(2, 5) - 800.1).abs() < 0.005, "养老=1050×0.762");
+        assert!((num(2, 6) - 199.5).abs() < 0.005, "医疗=1050×0.190");
+        assert!(
+            (num(2, 7) - 50.4).abs() < 0.005,
+            "失业=总额-养老-医疗（尾差）"
+        );
+        assert!((num(2, 8) - 1200.0).abs() < 0.005, "公积金个人");
+        assert!(
+            (num(2, 9) - 1500.0).abs() < 0.005,
+            "专项附加=employees.special_deduction"
+        );
+        assert!(text(2, 10).is_empty(), "正常拆分行备注为空");
+
+        // 退合并行：比例之和≠100% → 养老列=总额、医疗/失业列空、备注注明三险未拆分
+        let conn2 = withholding_env();
+        withholding_profile(&conn2, "E003", (0.5, 0.2, 0.1)); // 和 = 0.8 ≠ 100%
+        withholding_result(
+            &conn2, "2026-08", "E003", "王五", 10000.0, 1050.0, 1200.0, 80.0, true,
+        );
+        let fallback_path = eit_path("salary-fallback");
+        export_eit_salary_template(&conn2, "2026-08", fallback_path.to_str().unwrap()).unwrap();
+        let mut workbook2 = open_workbook_auto(fallback_path.to_str().unwrap()).unwrap();
+        let sheet2 = workbook2.worksheet_range("工资薪金收入").unwrap();
+        let num2 = |r: u32, c: u32| -> f64 {
+            match sheet2.get_value((r, c)) {
+                Some(Data::Float(v)) => *v,
+                Some(Data::Int(v)) => *v as f64,
+                other => panic!("应为数字单元格：({r},{c}) = {other:?}"),
+            }
+        };
+        let text2 = |r: u32, c: u32| -> String {
+            match sheet2.get_value((r, c)) {
+                Some(Data::String(s)) => s.to_string(),
+                Some(Data::Empty) | None => String::new(),
+                other => panic!("应为文本单元格：({r},{c}) = {other:?}"),
+            }
+        };
+        let blank2 = |r: u32, c: u32| match sheet2.get_value((r, c)) {
+            None | Some(Data::Empty) => {}
+            Some(Data::String(s)) if s.is_empty() => {}
+            other => panic!("应为空单元格：({r},{c}) = {other:?}"),
+        };
+        assert_eq!(text2(2, 0), "王五", "无员工档案时姓名回落工资结果");
+        assert!(
+            (num2(2, 5) - 1050.0).abs() < 0.005,
+            "退合并：养老列=社保个人总额"
+        );
+        blank2(2, 6);
+        blank2(2, 7);
+        assert!(
+            text2(2, 10).contains("三险未拆分"),
+            "退合并行应备注：{}",
+            text2(2, 10)
+        );
+
+        // 门禁：存在未锁定（草稿）工资数据的月份拒绝导出
+        let conn3 = withholding_env();
+        withholding_result(
+            &conn3, "2026-08", "E001", "张三", 10000.0, 1050.0, 1200.0, 80.0, false,
+        );
+        let gate_path = eit_path("salary-gate");
+        let err =
+            export_eit_salary_template(&conn3, "2026-08", gate_path.to_str().unwrap()).unwrap_err();
+        assert!(err.to_string().contains("未锁定"), "实际错误：{err}");
+
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(fallback_path);
+    }
+
+    /// 社保基数申报表：表头区公司信息 + 主表列口径 + 无台账年度报错 + 信息缺项尾注
+    #[test]
+    fn test_social_base_declaration_export_and_empty_year_error() {
+        use calamine::{open_workbook_auto, Data, Reader};
+        let conn = withholding_env();
+        withholding_employee(&conn, "E001", "张三", "110101199001011234", 1500.0);
+        // 当年台账：基数与比例全字段（比例库存小数：0.26=26%）
+        conn.execute(
+            "INSERT INTO social_insurance_profiles
+                (employee_no, profile_year, ss_base, hf_base,
+                 ss_employer_rate, ss_personal_rate, hf_employer_rate, hf_personal_rate,
+                 pension_personal_rate, medical_personal_rate, unemployment_personal_rate,
+                 remark, created_at, updated_at)
+             VALUES ('E001', 2026, 6000, 6000, 0.26, 0.105, 0.12, 0.12, 0.762, 0.19, 0.048,
+                     '测试台账', '2026-01-01', '2026-01-01')",
+            [],
+        )
+        .unwrap();
+        crate::db::set_setting(&conn, "company_name", "示例科技有限公司").unwrap();
+        crate::db::set_setting(&conn, "taxpayer_id", "91110000MA01AB2C3X").unwrap();
+
+        let path = eit_path("social-base");
+        export_social_base_declaration(&conn, 2026, path.to_str().unwrap()).unwrap();
+
+        let mut workbook = open_workbook_auto(path.to_str().unwrap()).unwrap();
+        let sheet = workbook.worksheet_range("社保基数申报").unwrap();
+        let text = |r: u32, c: u32| -> String {
+            match sheet.get_value((r, c)) {
+                Some(Data::String(s)) => s.to_string(),
+                Some(Data::Empty) | None => String::new(),
+                other => panic!("应为文本单元格：({r},{c}) = {other:?}"),
+            }
+        };
+        let num = |r: u32, c: u32| -> f64 {
+            match sheet.get_value((r, c)) {
+                Some(Data::Float(v)) => *v,
+                Some(Data::Int(v)) => *v as f64,
+                other => panic!("应为数字单元格：({r},{c}) = {other:?}"),
+            }
+        };
+
+        // 标题 + 单位名称 + 信用代码 + 表头 + 1 数据行 = 5 行（公司信息齐全无尾注）
+        assert_eq!(sheet.height(), 5, "公司信息齐全时不应有补填尾注");
+        assert_eq!(text(1, 0), "单位名称：示例科技有限公司");
+        assert_eq!(text(2, 0), "统一社会信用代码：91110000MA01AB2C3X");
+        assert!((num(4, 0) - 1.0).abs() < 0.005, "序号从 1 开始");
+        assert_eq!(text(4, 1), "张三");
+        assert_eq!(text(4, 2), "110101199001011234", "身份证号取 employees");
+        assert!((num(4, 3) - 6000.0).abs() < 0.005, "社保缴费基数");
+        assert!((num(4, 4) - 6000.0).abs() < 0.005, "公积金缴费基数");
+        assert!((num(4, 5) - 0.26).abs() < 0.000001, "社保单位比例");
+        assert!((num(4, 6) - 0.105).abs() < 0.000001, "社保个人比例");
+        assert!((num(4, 7) - 0.12).abs() < 0.000001, "公积金单位比例");
+        assert!((num(4, 8) - 0.12).abs() < 0.000001, "公积金个人比例");
+        assert!((num(4, 9) - 0.762).abs() < 0.000001, "养老个人份额");
+        assert!((num(4, 10) - 0.19).abs() < 0.000001, "医疗个人份额");
+        assert!((num(4, 11) - 0.048).abs() < 0.000001, "失业个人份额");
+        assert_eq!(text(4, 12), "测试台账", "备注取台账 remark");
+
+        // 无台账年度报错
+        let miss_path = eit_path("social-base-empty-year");
+        let err =
+            export_social_base_declaration(&conn, 2099, miss_path.to_str().unwrap()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("2099") && msg.contains("无社保台账"),
+            "实际错误：{msg}"
+        );
+
+        // 公司信息缺项 → 表尾提示补填
+        let conn2 = withholding_env();
+        conn2
+            .execute(
+                "INSERT INTO social_insurance_profiles
+                (employee_no, profile_year, ss_base, hf_base, created_at, updated_at)
+             VALUES ('E001', 2026, 5000, 5000, '2026-01-01', '2026-01-01')",
+                [],
+            )
+            .unwrap();
+        let path2 = eit_path("social-base-missing-info");
+        export_social_base_declaration(&conn2, 2026, path2.to_str().unwrap()).unwrap();
+        let mut workbook2 = open_workbook_auto(path2.to_str().unwrap()).unwrap();
+        let sheet2 = workbook2.worksheet_range("社保基数申报").unwrap();
+        let text2 = |r: u32, c: u32| -> String {
+            match sheet2.get_value((r, c)) {
+                Some(Data::String(s)) => s.to_string(),
+                Some(Data::Empty) | None => String::new(),
+                other => panic!("应为文本单元格：({r},{c}) = {other:?}"),
+            }
+        };
+        // 标题 + 单位名称（空） + 信用代码（空） + 表头 + 1 数据行 + 尾注 = 6 行
+        assert_eq!(sheet2.height(), 6, "信息缺项时应有补填尾注");
+        let note = text2(5, 0);
+        assert!(
+            note.contains("请补填") && note.contains("初始化向导"),
+            "尾注应提示补填：{note}"
+        );
+
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(path2);
     }
 }

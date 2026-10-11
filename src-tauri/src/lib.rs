@@ -358,6 +358,10 @@ pub fn run() {
         commands::dismiss_setup_checklist,
         commands::complete_tax_filing,
         commands::undo_tax_filing,
+        // ===== Onboarding（第十阶段 10B 申报模板导出） =====
+        commands::export_eit_payer_template,
+        commands::export_eit_salary_template,
+        commands::export_social_base_declaration,
     ]);
 
     diag("calling builder.run()...");

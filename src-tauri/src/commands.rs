@@ -2498,6 +2498,61 @@ pub fn export_tax_withholding_declaration(
     Ok(path)
 }
 
+// ===== 申报模板导出（第十阶段 Task 5，spec 10B） =====
+
+#[tauri::command]
+pub fn export_eit_payer_template(
+    path: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<String, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    excel::export_eit_payer_template(&conn, &path)?;
+    db::log_operation(
+        &conn,
+        "export_eit_payer_template",
+        &format!("导出人员信息采集模板到{path}"),
+        "system",
+        None,
+    )?;
+    Ok(path)
+}
+
+#[tauri::command]
+pub fn export_eit_salary_template(
+    month: String,
+    path: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<String, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    excel::export_eit_salary_template(&conn, &month, &path)?;
+    db::log_operation(
+        &conn,
+        "export_eit_salary_template",
+        &format!("导出{month}工资薪金申报模板到{path}"),
+        "system",
+        None,
+    )?;
+    Ok(path)
+}
+
+#[tauri::command]
+pub fn export_social_base_declaration(
+    year: i64,
+    path: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<String, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    excel::export_social_base_declaration(&conn, year, &path)?;
+    db::log_operation(
+        &conn,
+        "export_social_base_declaration",
+        &format!("导出{year}社保缴费基数年度申报表到{path}"),
+        "system",
+        None,
+    )?;
+    Ok(path)
+}
+
 // ===== 社保公积金台账（第六阶段 Task 6） =====
 
 #[tauri::command]
