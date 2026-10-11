@@ -2129,3 +2129,70 @@ export interface PayslipSkippedEmployee {
   employee_id: number;
   employee_name: string;
 }
+
+// ==================== 上手引导与征期日历（第十阶段） ====================
+
+/** 账套初始化状态聚合（get_bootstrap_status 返回，向导与首页清单共用） */
+export interface BootstrapStatus {
+  has_password: boolean;
+  has_employees: boolean;
+  has_salary_rules: boolean;
+  has_social_profiles: boolean;
+  has_opening_balance: boolean;
+  has_locked_salary: boolean;
+  is_empty_ledger: boolean;
+  setup_wizard_done: boolean;
+  setup_checklist_dismissed: boolean;
+  has_demo_data: boolean;
+  company_name: string | null;
+  taxpayer_id: string | null;
+}
+
+/** 企业信息（get_company_info / save_company_info） */
+export interface CompanyInfo {
+  company_name: string | null;
+  taxpayer_id: string | null;
+}
+
+/** 示例账套种子摘要（seed_demo_data 返回） */
+export interface DemoSeedSummary {
+  months: string[];
+  employees: number;
+  invoices: number;
+  claims: number;
+  fund_documents: number;
+  bank_transactions: number;
+  payment_batches: number;
+  locked_month: string | null;
+  /** 体验提示：付款批次导出→标记已付款→银行对账可自动匹配对应流水 */
+  try_auto_match_amount: number | null;
+}
+
+/** 征期完成状态 */
+export type TaxFilingStatus = 'pending' | 'done';
+
+/** 征期日历条目（get_tax_calendar 返回；days_left 为负表示已逾期） */
+export interface TaxCalendarItem {
+  period: string;
+  kind: string;
+  label: string;
+  due_date: string;
+  days_left: number;
+  status: TaxFilingStatus;
+  overdue: boolean;
+  hint: string | null;
+}
+
+/** 征期提醒启用项（get/save_tax_calendar_settings） */
+export interface TaxCalendarSettings {
+  enabled_kinds: string[];
+}
+
+/** 征期 kind → 勾选项展示名（与后端 TAX_CALENDAR_RULES 对齐） */
+export const TAX_CALENDAR_KIND_LABEL: Record<string, string> = {
+  eit_withholding: '个人所得税扣缴申报（每月）',
+  cit_quarterly: '企业所得税季度预缴（每季）',
+  eit_annual: '个税综合所得年度汇算（年度）',
+  gs_annual_report: '工商年报（年度）',
+  social_base: '社保缴费基数年度申报（年度）',
+};

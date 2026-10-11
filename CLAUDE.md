@@ -56,6 +56,7 @@ npm run lint                             # ESLint
 - [第七阶段出纳运营闭环](.claude/memory/stage7-cashier-operations.md) — 资金账户、通用收付款、审批留痕、多对多银行对账、资金日记账、借款核销；spec 见 `docs/superpowers/specs/2026-08-30-stage7-cashier-operations-design.md`、plan 见 `docs/superpowers/plans/2026-08-30-stage7-cashier-operations.md`
 - [第八阶段票据与申报](.claude/memory/stage8-notes-tax-reports.md) — 票据台账、账期提醒、现金盘点、资金日报、个税扣缴申报表、进项台账；spec 见 `docs/superpowers/specs/2026-09-18-stage8-notes-tax-reports-design.md`、plan 见 `docs/superpowers/plans/2026-09-18-stage8-notes-tax-reports.md`
 - [第九阶段通知模块](.claude/memory/stage9-notifications.md) — 通知底座（媒介抽象/SMTP 授权码加密/发送留痕）、工资条邮件三步向导、失败重发；spec 见 `docs/superpowers/specs/2026-09-19-stage9-notifications-design.md`、plan 见 `docs/superpowers/plans/2026-09-19-stage9-notifications.md`
+- [第十阶段上手引导与办税落地](.claude/memory/stage10-onboarding-tax-filing.md) — 首启向导、示例账套 seed/clear、bootstrap_status、申报模板三件、征期日历；spec 见 `docs/superpowers/specs/2026-10-11-stage10-onboarding-tax-filing-design.md`、plan 见 `docs/superpowers/plans/2026-10-11-stage10-onboarding-tax-filing.md`
 
 ## 第三阶段开发
 
@@ -84,6 +85,10 @@ npm run lint                             # ESLint
 ## 第九阶段开发
 
 第九阶段以可选外联的通知能力为目标（仅 SMTP 外联，其余模块维持零外联），按 9A 通知底座与设置页 → 9B 工资条组装器/邮件向导/回归收尾推进，Task 1-7 已全部交付（通知底座、SMTP 授权码 AES-GCM 加密入库、通知设置页、工资条邮件三步向导、失败重发、员工 email 录入）。开发前先读 `.claude/memory/stage9-notifications.md`、`docs/superpowers/plans/2026-09-19-stage9-progress.md` 和 spec；阻断项：授权码不落明文（整键加密+回显脱敏+留空不修改）、发送不持 DB 锁（锁内取数后独立连接发送+留痕）、工资条发送三重门禁（月份已锁定+SMTP 已配置+敏感数据解锁）。Windows exe 手工验收（QQ 授权码配置→测试发送→批量 2 员工→记录核对→失败重发）挂账待做。涉及多模块开发时用 subagent 按互不重叠文件范围协作，由主 agent 统一集成、测试、commit、push。
+
+## 第十阶段开发
+
+第十阶段以上手引导与办税落地辅助为目标（零外联原则不变），按 10A 上手引导（bootstrap_status → 首启向导 → 示例账套 seed/clear → 首页检查清单）→ 10B 申报模板三件（扣缴端人员/工资薪金导入模板、社保基数申报表）→ 10C 征期日历（规则常量 + 完成留痕 + Dashboard 征期卡）推进。开发前先读 `.claude/memory/stage10-onboarding-tax-filing.md`、`docs/superpowers/plans/2026-10-11-stage10-progress.md` 和 spec；阻断项：示例账套双门禁（seed 仅核心业务表全 0、clear 校验数量一致且无月结后整表清理）、申报模板仅锁定月份、征期不内置节假日顺延。Windows exe 手工验收（向导全流程、示例体验与清除、扣缴端模板人工导入核对列序）挂账待做。涉及多模块开发时用 subagent 按互不重叠文件范围协作，由主 agent 统一集成、测试、commit、push。
 
 ## 编码约定
 

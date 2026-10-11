@@ -15,17 +15,17 @@ plan：`docs/superpowers/plans/2026-10-11-stage10-onboarding-tax-filing.md`
 | 5 | onboarding.rs：征期日历（规则常量/期次生成/启用设置/完成留痕幂等） | ✅ |
 | 6 | commands.rs + lib.rs：12 条新命令注册 | ✅ |
 | 7 | 后端单元测试 9 个（seed 往返/隔离/混入拒绝/征期跨年跨季/幂等） | ✅（369 全绿） |
-| 8 | 10B excel.rs 三导出（subagent 并行） | 🔄 进行中 |
+| 8 | 10B excel.rs 三导出（subagent 并行） | ✅（3 新测试，372 全绿） |
 | 9 | 前端 SetupWizard + Dashboard 两卡 + 导出中心（subagent 并行） | 🔄 进行中 |
-| 10 | 集成：excel 命令包装/注册 + 全量回归 | ⏳ |
+| 10 | 集成：excel 命令包装/注册 + 全量回归 | ✅（export 命令已注册） |
 | 11 | 文档四件套（memory 收尾/progress/手册挂账/发版说明） | ⏳ |
 
 ## 后端 API（已注册命令）
 
 get_bootstrap_status / get_company_info / save_company_info / seed_demo_data /
 clear_demo_data / get_tax_calendar / get_tax_calendar_settings / save_tax_calendar_settings /
-finish_setup_wizard / dismiss_setup_checklist / complete_tax_filing / undo_tax_filing
-（10B 将加：export_eit_payer_template / export_eit_salary_template / export_social_base_declaration）
+finish_setup_wizard / dismiss_setup_checklist / complete_tax_filing / undo_tax_filing /
+export_eit_payer_template / export_eit_salary_template / export_social_base_declaration
 
 ## 实现决策与偏差记录
 

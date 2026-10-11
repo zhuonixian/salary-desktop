@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   HashRouter,
   Routes,
@@ -67,12 +67,15 @@ import Advances from '@/pages/Advances';
 import NotesInstruments from '@/pages/NotesInstruments';
 import CashCount from '@/pages/CashCount';
 import NotificationSettings from '@/pages/NotificationSettings';
+import SetupWizard from '@/pages/SetupWizard';
 import LockScreen from '@/components/LockScreen';
 import SetupSecurity from '@/components/SetupSecurity';
+import { getBootstrapStatus } from '@/api';
 import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
 import { useSecurity } from '@/contexts/SecurityContext';
 import { useOperator } from '@/contexts/OperatorContext';
 import { OPERATOR_ROLE_LABEL } from '@/types';
+import type { BootstrapStatus } from '@/types';
 
 const { Sider, Header, Content } = Layout;
 
@@ -175,8 +178,14 @@ for (const item of menuItems) {
 
 const defaultOpenKeys = ['workbench'];
 
-// 无有效操作人时仅放行的路径：基础资料（含操作人选择）与安全类页面。
-const OPERATOR_FREE_PATHS = new Set<string>(['/fund-accounts', '/security', '/data-safety']);
+// 无有效操作人时仅放行的路径：基础资料（含操作人选择）、安全类页面与初始化向导。
+// /setup 面向全新账套：首次进入时通常尚未选择操作人，不能被操作人门禁拦下。
+const OPERATOR_FREE_PATHS = new Set<string>([
+  '/fund-accounts',
+  '/security',
+  '/data-safety',
+  '/setup',
+]);
 
 // 未选择操作人时禁用其余菜单叶子项（分组保留可展开）。
 function gateMenuItems(items: MenuProps['items']): MenuProps['items'] {
@@ -219,6 +228,9 @@ const AppLayout: React.FC = () => {
       keys.includes(groupKey) ? keys : [...keys, groupKey]
     ));
   }, [location.pathname]);
+
+  // 初始化向导的自动进入已上移到 App 启动分流（见 App 内 bootProbe）：
+  // 全新账套时安全门禁直接渲染独立向导，不经 AppLayout。
 
   const handleOpenChange: MenuProps['onOpenChange'] = (keys) => {
     // 折叠态下不响应 onOpenChange：
@@ -347,6 +359,7 @@ const AppLayout: React.FC = () => {
           ) : (
             <Routes>
               <Route path="/" element={<Dashboard />} />
+              <Route path="/setup" element={<SetupWizard />} />
               <Route path="/employees" element={<Employees />} />
               <Route path="/attendance" element={<Attendance />} />
               <Route path="/punch-card" element={<PunchCard />} />
@@ -393,6 +406,21 @@ function App() {
     lock,
   } = useSecurity();
 
+  // 启动时探测一次账套状态（第十阶段）：全新账套（无启动密码 + 空账 + 未完成向导）
+  // 时，安全门禁改为渲染初始化向导（其第 2 步包含安全设置）。探测失败保持原
+  // SetupSecurity 流程，不阻断使用。
+  const [bootProbe, setBootProbe] = useState<BootstrapStatus | null>(null);
+  const reprobeBoot = useCallback(async () => {
+    try {
+      setBootProbe(await getBootstrapStatus());
+    } catch {
+      // 探测失败保持上次结果（可能为 null → 走 SetupSecurity 兜底）
+    }
+  }, []);
+  useEffect(() => {
+    void reprobeBoot();
+  }, [reprobeBoot]);
+
   // 闲置自动锁：仅当用户启用闲置锁、当前未锁、安全中心已初始化时挂监听。
   // 在 effect 内部访问 lock callback 是安全的（已列入依赖），
   // 不在 render 期调用任何非纯函数。
@@ -428,9 +456,27 @@ function App() {
     lock,
   ]);
 
-  // 启动分流：未初始化 → 安全设置向导；已锁 → 锁屏；否则进入业务页面。
+  // 启动分流：全新账套首次运行 → 初始化向导（standalone，密码在向导内完成）；
+  // 安全未初始化（非全新或向导已跳过）→ 安全设置页；已锁 → 锁屏；否则业务页面。
   // 这就是路由守卫——未解锁时不渲染任何业务页面（含 /security 后台）。
   if (!isInitialized) {
+    const freshLedger =
+      bootProbe !== null &&
+      !bootProbe.has_password &&
+      bootProbe.is_empty_ledger &&
+      !bootProbe.setup_wizard_done;
+    if (freshLedger) {
+      return (
+        <HashRouter>
+          <Routes>
+            <Route
+              path="*"
+              element={<SetupWizard standalone onFinished={() => void reprobeBoot()} />}
+            />
+          </Routes>
+        </HashRouter>
+      );
+    }
     return <SetupSecurity />;
   }
   if (isLocked) {

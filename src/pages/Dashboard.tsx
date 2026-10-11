@@ -1,5 +1,22 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Row, Col, Card, Statistic, DatePicker, Spin, message, Tag, Table, Space, Select } from 'antd';
+import {
+  Row,
+  Col,
+  Card,
+  Statistic,
+  DatePicker,
+  Spin,
+  message,
+  Tag,
+  Table,
+  Space,
+  Select,
+  Button,
+  Alert,
+  Checkbox,
+  Popconfirm,
+  Popover,
+} from 'antd';
 import {
   TeamOutlined,
   CalculatorOutlined,
@@ -15,25 +32,39 @@ import {
   AccountBookOutlined,
   SwapOutlined,
   BellOutlined,
+  RightOutlined,
+  SettingOutlined,
 } from '@ant-design/icons';
+import dayjs from 'dayjs';
 import { useNavigate } from 'react-router-dom';
 import {
+  clearDemoData,
+  completeTaxFiling,
+  dismissSetupChecklist,
+  getBootstrapStatus,
   getDashboardReminders,
   getDashboardSummary,
   getMonthCloseWorkbench,
   getReminderAdvanceDays,
+  getTaxCalendar,
+  getTaxCalendarSettings,
+  saveTaxCalendarSettings,
   setReminderAdvanceDays,
+  undoTaxFiling,
 } from '@/api';
 import { SensitiveText } from '@/components/SensitiveText';
 import { SensitiveStatistic } from '@/components/SensitiveStatistic';
 import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
 import type {
+  BootstrapStatus,
   DashboardSummary,
   MonthCloseCheckItem,
   MonthCloseWorkbench,
   ReminderCategory,
   ReminderItem,
+  TaxCalendarItem,
 } from '@/types';
+import { TAX_CALENDAR_KIND_LABEL } from '@/types';
 
 type ChartDatum = {
   label: string;
@@ -73,6 +104,362 @@ const reminderBadge = (item: ReminderItem): { color: string; text: string } => {
   if (item.days_left < 0) return { color: 'red', text: `逾期 ${-item.days_left} 天` };
   if (item.days_left === 0) return { color: 'gold', text: '今日到期' };
   return { color: 'gold', text: `剩 ${item.days_left} 天` };
+};
+
+// ==================== 上手检查清单卡（第十阶段） ====================
+
+const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
+interface ChecklistEntry {
+  key: string;
+  text: string;
+  done: boolean;
+  path: string;
+}
+
+const SetupChecklistCard: React.FC<{ onDataChanged: () => void }> = ({ onDataChanged }) => {
+  const navigate = useNavigate();
+  const [status, setStatus] = useState<BootstrapStatus | null>(null);
+  const [clearing, setClearing] = useState(false);
+
+  const fetchStatus = useCallback(async () => {
+    try {
+      setStatus(await getBootstrapStatus());
+    } catch (e: unknown) {
+      message.error('获取初始化状态失败: ' + errText(e));
+    }
+  }, []);
+
+  useEffect(() => {
+    void fetchStatus();
+  }, [fetchStatus]);
+
+  const handleDismiss = async () => {
+    try {
+      await dismissSetupChecklist();
+      // 后端已持久化「不再显示」，本地同步隐藏即可。
+      setStatus((prev) => (prev ? { ...prev, setup_checklist_dismissed: true } : prev));
+    } catch (e: unknown) {
+      message.error('操作失败: ' + errText(e));
+    }
+  };
+
+  const handleClearDemo = async () => {
+    setClearing(true);
+    try {
+      await clearDemoData();
+      message.success('示例数据已清除');
+      // 清除后刷新清单状态与整页仪表盘数据（不用 location.reload）。
+      await fetchStatus();
+      onDataChanged();
+    } catch (e: unknown) {
+      message.error('清除示例数据失败: ' + errText(e));
+    } finally {
+      setClearing(false);
+    }
+  };
+
+  // 加载中 / 已永久隐藏 / 全部完成且无示例数据 → 不展示。
+  if (!status) return null;
+  const allDone =
+    status.has_password &&
+    status.has_employees &&
+    status.has_social_profiles &&
+    status.has_opening_balance &&
+    status.has_locked_salary;
+  if (status.setup_checklist_dismissed || (allDone && !status.has_demo_data)) return null;
+
+  // has_salary_rules 恒真（后端预置默认规则），不进清单。
+  const entries: ChecklistEntry[] = [
+    { key: 'password', text: '设置启动密码', done: status.has_password, path: '/security' },
+    { key: 'employees', text: '导入员工', done: status.has_employees, path: '/employees' },
+    { key: 'social', text: '社保基数台账', done: status.has_social_profiles, path: '/social-insurance' },
+    { key: 'opening', text: '期初余额', done: status.has_opening_balance, path: '/accounts' },
+    { key: 'locked', text: '首次算薪并锁定', done: status.has_locked_salary, path: '/salary' },
+  ];
+
+  return (
+    <Card
+      size="small"
+      title="上手检查清单"
+      extra={
+        <Button type="link" size="small" onClick={() => void handleDismiss()}>
+          不再显示
+        </Button>
+      }
+    >
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+          gap: 8,
+        }}
+      >
+        {entries.map((entry) => (
+          <div
+            key={entry.key}
+            onClick={() => !entry.done && navigate(entry.path)}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              padding: '8px 12px',
+              borderRadius: 6,
+              background: '#f7f9fc',
+              cursor: entry.done ? 'default' : 'pointer',
+            }}
+          >
+            {entry.done ? (
+              <CheckCircleOutlined style={{ color: '#52c41a' }} />
+            ) : (
+              <RightOutlined style={{ color: '#faad14' }} />
+            )}
+            <span style={{ color: entry.done ? '#8c98a8' : '#1f2a37' }}>{entry.text}</span>
+            {!entry.done && (
+              <Tag color="gold" style={{ margin: '0 0 0 auto' }}>
+                去完成
+              </Tag>
+            )}
+          </div>
+        ))}
+      </div>
+      {status.has_demo_data && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginTop: 12 }}
+          message={
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                flexWrap: 'wrap',
+                gap: 8,
+              }}
+            >
+              <span>当前为示例数据，体验完成后请清除</span>
+              <Popconfirm
+                title="确认清除示例数据？"
+                description="仅清除示例数据产生的记录，不影响后续正式录入。"
+                okText="清除"
+                cancelText="取消"
+                onConfirm={() => void handleClearDemo()}
+              >
+                <Button danger size="small" loading={clearing}>
+                  清除示例数据
+                </Button>
+              </Popconfirm>
+            </div>
+          }
+        />
+      )}
+    </Card>
+  );
+};
+
+// ==================== 征期提醒卡（第十阶段） ====================
+
+const TAX_CALENDAR_MONTHS = 3;
+
+const taxKindOptions = Object.entries(TAX_CALENDAR_KIND_LABEL).map(([value, label]) => ({
+  value,
+  label,
+}));
+
+// done 灰 / 逾期红 / 15 日内金 / 其余默认
+const taxBadge = (item: TaxCalendarItem): { color: string; text: string } => {
+  if (item.status === 'done') return { color: 'default', text: '已完成' };
+  if (item.overdue) return { color: 'red', text: `已逾期 ${-item.days_left} 天` };
+  if (item.days_left <= 15) return { color: 'gold', text: `剩 ${item.days_left} 天` };
+  return { color: 'default', text: `剩 ${item.days_left} 天` };
+};
+
+const TaxCalendarCard: React.FC = () => {
+  const [items, setItems] = useState<TaxCalendarItem[]>([]);
+  const [enabledKinds, setEnabledKinds] = useState<string[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [actingKey, setActingKey] = useState<string | null>(null);
+
+  const fetchCalendar = useCallback(async () => {
+    try {
+      setItems(await getTaxCalendar(dayjs().format('YYYY-MM'), TAX_CALENDAR_MONTHS));
+    } catch (e: unknown) {
+      message.error('获取征期日历失败: ' + errText(e));
+    }
+  }, []);
+
+  const fetchAll = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [calendar, settings] = await Promise.all([
+        getTaxCalendar(dayjs().format('YYYY-MM'), TAX_CALENDAR_MONTHS),
+        getTaxCalendarSettings(),
+      ]);
+      setItems(calendar);
+      setEnabledKinds(settings.enabled_kinds);
+    } catch (e: unknown) {
+      message.error('获取征期提醒失败: ' + errText(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void fetchAll();
+  }, [fetchAll]);
+
+  // 勾选即保存，保存后按新启用项刷新列表。
+  const handleSettingsChange = async (kinds: string[]) => {
+    setSavingSettings(true);
+    try {
+      await saveTaxCalendarSettings({ enabled_kinds: kinds });
+      setEnabledKinds(kinds);
+      await fetchCalendar();
+      message.success('征期提醒设置已保存');
+    } catch (e: unknown) {
+      message.error('保存征期提醒设置失败: ' + errText(e));
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
+  const handleFilingAction = async (item: TaxCalendarItem, action: 'complete' | 'undo') => {
+    const key = `${item.period}|${item.kind}`;
+    setActingKey(key);
+    try {
+      if (action === 'complete') {
+        await completeTaxFiling(item.period, item.kind);
+        message.success(`已标记 ${item.period} ${item.label} 为已完成`);
+      } else {
+        await undoTaxFiling(item.period, item.kind);
+        message.success(`已撤销 ${item.period} ${item.label} 的完成标记`);
+      }
+      await fetchCalendar();
+    } catch (e: unknown) {
+      message.error('操作失败: ' + errText(e));
+    } finally {
+      setActingKey(null);
+    }
+  };
+
+  return (
+    <Card
+      title={<Space><ScheduleOutlined />征期提醒</Space>}
+      extra={
+        <Popover
+          trigger="click"
+          placement="bottomRight"
+          content={
+            <div style={{ minWidth: 240 }}>
+              <div style={{ fontWeight: 600, marginBottom: 8 }}>启用的征期类型</div>
+              <Checkbox.Group
+                value={enabledKinds}
+                onChange={(values) => void handleSettingsChange(values.map(String))}
+                style={{ display: 'grid', gap: 6 }}
+              >
+                {taxKindOptions.map((option) => (
+                  <Checkbox key={option.value} value={option.value}>
+                    {option.label}
+                  </Checkbox>
+                ))}
+              </Checkbox.Group>
+            </div>
+          }
+        >
+          <Button type="text" size="small" icon={<SettingOutlined />} loading={savingSettings} />
+        </Popover>
+      }
+    >
+      <Spin spinning={loading}>
+        {items.length === 0 ? (
+          <div style={{ color: '#5f6b7a', padding: '12px 0' }}>
+            近期暂无征期提醒，可在右上角设置启用的申报类型
+          </div>
+        ) : (
+          <div style={{ display: 'grid', gap: 8 }}>
+            {items.map((item) => {
+              const badge = taxBadge(item);
+              const key = `${item.period}|${item.kind}`;
+              return (
+                <div key={key}>
+                  <div
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: '86px 1fr 110px 92px 92px',
+                      alignItems: 'center',
+                      gap: 8,
+                      padding: '6px 8px',
+                      borderRadius: 6,
+                      background: '#f7f9fc',
+                    }}
+                  >
+                    <span
+                      style={{
+                        fontVariantNumeric: 'tabular-nums',
+                        color: '#5f6b7a',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}
+                      title={item.period}
+                    >
+                      {item.period}
+                    </span>
+                    <span
+                      style={{
+                        color: item.status === 'done' ? '#8c98a8' : '#1f2a37',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}
+                      title={item.label}
+                    >
+                      {item.label}
+                    </span>
+                    <span style={{ fontVariantNumeric: 'tabular-nums', color: '#5f6b7a' }}>
+                      截止 {item.due_date}
+                    </span>
+                    <Tag color={badge.color} style={{ margin: 0, textAlign: 'center' }}>
+                      {badge.text}
+                    </Tag>
+                    {item.status === 'pending' ? (
+                      <Button
+                        type="link"
+                        size="small"
+                        loading={actingKey === key}
+                        onClick={() => void handleFilingAction(item, 'complete')}
+                      >
+                        标记已完成
+                      </Button>
+                    ) : (
+                      <Button
+                        type="link"
+                        size="small"
+                        loading={actingKey === key}
+                        onClick={() => void handleFilingAction(item, 'undo')}
+                      >
+                        撤销
+                      </Button>
+                    )}
+                  </div>
+                  {item.hint && (
+                    <div style={{ color: '#8c98a8', fontSize: 12, padding: '2px 8px 0' }}>
+                      {item.hint}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+        <div style={{ color: '#8c98a8', fontSize: 12, marginTop: 10 }}>
+          如遇节假日顺延，以税局公告为准
+        </div>
+      </Spin>
+    </Card>
+  );
 };
 
 const MiniBarChart: React.FC<{ data: ChartDatum[]; unit?: string }> = ({ data, unit = '' }) => {
@@ -213,6 +600,11 @@ const Dashboard: React.FC = () => {
     fetchSummary(month.format('YYYY-MM'));
   }, [month, fetchSummary]);
 
+  // 检查清单卡「清除示例数据」后整页数据重跑（不用 location.reload）。
+  const reloadAfterDataChange = useCallback(() => {
+    void fetchSummary(month.format('YYYY-MM'));
+  }, [fetchSummary, month]);
+
   const monthStr = month.format('YYYY-MM');
   const data = summary ?? {
     month: monthStr,
@@ -292,6 +684,12 @@ const Dashboard: React.FC = () => {
       </div>
 
       <Spin spinning={loading}>
+        <Row className="mb-16">
+          <Col span={24}>
+            <SetupChecklistCard onDataChanged={reloadAfterDataChange} />
+          </Col>
+        </Row>
+
         <Row gutter={[16, 16]} className="mb-16">
           <Col xs={24} sm={12} lg={6}>
             <Card className="stat-card">
@@ -457,7 +855,7 @@ const Dashboard: React.FC = () => {
         </Row>
 
         <Row gutter={[16, 16]} className="mb-16">
-          <Col xs={24}>
+          <Col xs={24} lg={12}>
             <Card
               title={<Space><BellOutlined />账期提醒</Space>}
               extra={
@@ -479,7 +877,7 @@ const Dashboard: React.FC = () => {
                   {reminderGroups.map((group) => {
                     const items = reminders.filter((r) => r.category === group.category);
                     return (
-                      <Col xs={24} md={8} key={group.category}>
+                      <Col span={24} key={group.category}>
                         <div style={{ fontWeight: 600, marginBottom: 10 }}>
                           {group.label}
                           <Tag
@@ -544,6 +942,9 @@ const Dashboard: React.FC = () => {
                 </Row>
               )}
             </Card>
+          </Col>
+          <Col xs={24} lg={12}>
+            <TaxCalendarCard />
           </Col>
         </Row>
 

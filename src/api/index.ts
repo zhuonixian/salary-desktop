@@ -135,6 +135,11 @@ import type {
   NotificationLog,
   NotificationLogQuery,
   BatchSummary,
+  BootstrapStatus,
+  CompanyInfo,
+  DemoSeedSummary,
+  TaxCalendarItem,
+  TaxCalendarSettings,
 } from '@/types';
 import { INSTRUMENT_STATUS_LABEL } from '@/types';
 
@@ -556,6 +561,11 @@ const mockApprovalEvents: ApprovalEvent[] = [
 let mockMakerChecker = false;
 // 账期提醒提前天数（预览态内存值，缺省 7 与后端 app_settings 缺省一致）
 let mockReminderAdvanceDays = 7;
+
+// ==================== 征期日历预览数据（第十阶段） ====================
+// 完成留痕（"period|kind"）与启用 kinds 的内存态，支持标记/撤销交互演示。
+const mockTaxFilingDone = new Set<string>();
+const mockTaxCalendarKinds: string[] = [];
 
 // ==================== 通知设置预览数据（第九阶段 Task 3） ====================
 // 内存态 SMTP 配置与发送记录（演示用，完整校验以后端为准）。
@@ -2537,6 +2547,108 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
       });
       return { sent, failed: 0, skipped: logIds.length - sent, failed_log_ids: [] } satisfies BatchSummary;
     }
+    // ==================== 上手引导与征期日历（第十阶段） ====================
+    // 预览态：bootstrap 按典型“有员工/有锁定工资/带示例数据”的中间态回显，
+    // 让首页检查清单卡与向导完成态在浏览器里可走查。
+    case 'get_bootstrap_status':
+      return {
+        has_password: true,
+        has_employees: ensureMockEmployees().length > 0,
+        has_salary_rules: true,
+        has_social_profiles: false,
+        has_opening_balance: false,
+        has_locked_salary: true,
+        is_empty_ledger: false,
+        setup_wizard_done: false,
+        setup_checklist_dismissed: false,
+        has_demo_data: true,
+        company_name: '示例科技有限公司',
+        taxpayer_id: '91110108MA01X0001X',
+      };
+    case 'get_company_info':
+      return { company_name: '示例科技有限公司', taxpayer_id: '91110108MA01X0001X' };
+    case 'save_company_info':
+    case 'clear_demo_data':
+    case 'finish_setup_wizard':
+    case 'dismiss_setup_checklist':
+      return true;
+    case 'save_tax_calendar_settings': {
+      const settings = args?.data as TaxCalendarSettings | undefined;
+      mockTaxCalendarKinds.splice(0, mockTaxCalendarKinds.length, ...(settings?.enabled_kinds ?? []));
+      return true;
+    }
+    case 'seed_demo_data':
+      return {
+        months: [mockCurrentMonth()],
+        employees: ensureMockEmployees().length,
+        invoices: 3,
+        claims: 2,
+        fund_documents: 6,
+        bank_transactions: 4,
+        payment_batches: 1,
+        locked_month: mockCurrentMonth(),
+        try_auto_match_amount: 7800,
+      };
+    case 'get_tax_calendar': {
+      // 与后端同口径的轻量演示：个税/季度预缴按每月 15 日、社保基数年度申报 6 月 30 日；
+      // 完成留痕存内存 Set，撤销同样可演示。
+      const fromMonth = String(args?.fromMonth ?? mockCurrentMonth());
+      const months = Number(args?.months ?? 3);
+      const now = new Date();
+      const items: TaxCalendarItem[] = [];
+      const pushItem = (period: string, kind: string, label: string, dueDate: string): void => {
+        const due = new Date(`${dueDate}T00:00:00`);
+        const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const daysLeft = Math.round((due.getTime() - today.getTime()) / 86400000);
+        const isDone = mockTaxFilingDone.has(`${period}|${kind}`);
+        items.push({
+          period,
+          kind,
+          label,
+          due_date: dueDate,
+          days_left: daysLeft,
+          status: isDone ? 'done' : 'pending',
+          overdue: !isDone && daysLeft < 0,
+          hint:
+            kind === 'eit_withholding' && !isDone
+              ? '上月工资已锁定，可导出扣缴申报表与申报模板'
+              : null,
+        });
+      };
+      const [fromYear, fromMonthNum] = fromMonth.split('-').map(Number);
+      // 与后端同口径：仅返回设置中启用的 kinds（未配置时缺省个税按月）。
+      const enabledKinds =
+        mockTaxCalendarKinds.length > 0 ? mockTaxCalendarKinds : ['eit_withholding'];
+      for (let i = 0; i < months; i++) {
+        const d = new Date(fromYear, (fromMonthNum || 1) - 1 + i, 15);
+        const period = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+        if (enabledKinds.includes('eit_withholding')) {
+          pushItem(period, 'eit_withholding', '个人所得税扣缴申报', `${period}-15`);
+        }
+        if (i === 0 && enabledKinds.includes('cit_quarterly')) {
+          pushItem(period, 'cit_quarterly', '企业所得税季度预缴', `${period}-15`);
+        }
+      }
+      if (enabledKinds.includes('social_base')) {
+        pushItem(`${fromYear}`, 'social_base', '社保缴费基数年度申报', `${fromYear}-06-30`);
+      }
+      return items.sort((a, b) => a.due_date.localeCompare(b.due_date));
+    }
+    case 'get_tax_calendar_settings': {
+      return {
+        enabled_kinds: mockTaxCalendarKinds.length > 0
+          ? [...mockTaxCalendarKinds]
+          : ['eit_withholding'],
+      };
+    }
+    case 'complete_tax_filing': {
+      mockTaxFilingDone.add(`${String(args?.period ?? '')}|${String(args?.kind ?? '')}`);
+      return true;
+    }
+    case 'undo_tax_filing': {
+      mockTaxFilingDone.delete(`${String(args?.period ?? '')}|${String(args?.kind ?? '')}`);
+      return true;
+    }
     default: {
       // 预览模式兜底（Minor 8）：不再无差别 return true——只读命令按语义返回空集合，
       // 其余（写操作/状态机命令）抛中文错误，避免浏览器预览里
@@ -3982,4 +4094,78 @@ export async function sendPayslipEmails(month: string, employeeIds: number[]): P
 /** 重发工资条邮件：仅失败留痕，后端按 employee_id 重建正文后重发 */
 export async function resendPayslipEmails(month: string, logIds: number[]): Promise<BatchSummary> {
   return invoke<BatchSummary>('resend_payslip_emails', { month, logIds });
+}
+
+// ==================== 上手引导与征期日历（第十阶段） ====================
+// invoke 参数 key 用 camelCase（Tauri 2 自动映射 snake_case），与本文件既有约定一致；
+// 单结构体参数命令沿用 { data: {...} } 风格（如 save_company_info）。
+
+/** 账套初始化状态聚合（向导自动进入判定与首页检查清单共用） */
+export async function getBootstrapStatus(): Promise<BootstrapStatus> {
+  return invoke<BootstrapStatus>('get_bootstrap_status');
+}
+
+export async function getCompanyInfo(): Promise<CompanyInfo> {
+  return invoke<CompanyInfo>('get_company_info');
+}
+
+export async function saveCompanyInfo(data: CompanyInfo): Promise<boolean> {
+  return invoke<boolean>('save_company_info', { data });
+}
+
+/** 种子示例账套（门禁：空账套才允许，后端校验） */
+export async function seedDemoData(): Promise<DemoSeedSummary> {
+  return invoke<DemoSeedSummary>('seed_demo_data');
+}
+
+/** 清除示例账套（仅清除由 marker 标记的示例数据） */
+export async function clearDemoData(): Promise<boolean> {
+  return invoke<boolean>('clear_demo_data');
+}
+
+export async function finishSetupWizard(): Promise<boolean> {
+  return invoke<boolean>('finish_setup_wizard');
+}
+
+export async function dismissSetupChecklist(): Promise<boolean> {
+  return invoke<boolean>('dismiss_setup_checklist');
+}
+
+/** 征期日历：from_month 起 months 个月（默认 3，与后端缺省一致） */
+export async function getTaxCalendar(fromMonth: string, months = 3): Promise<TaxCalendarItem[]> {
+  return invoke<TaxCalendarItem[]>('get_tax_calendar', { fromMonth, months });
+}
+
+export async function getTaxCalendarSettings(): Promise<TaxCalendarSettings> {
+  return invoke<TaxCalendarSettings>('get_tax_calendar_settings');
+}
+
+export async function saveTaxCalendarSettings(data: TaxCalendarSettings): Promise<boolean> {
+  return invoke<boolean>('save_tax_calendar_settings', { data });
+}
+
+/** 标记某期申报已完成；操作人署名由后端会话（当前操作人，无则 system）记录 */
+export async function completeTaxFiling(period: string, kind: string): Promise<boolean> {
+  return invoke<boolean>('complete_tax_filing', { period, kind });
+}
+
+export async function undoTaxFiling(period: string, kind: string): Promise<boolean> {
+  return invoke<boolean>('undo_tax_filing', { period, kind });
+}
+
+// ==================== 税务申报模板导出（第十阶段，后端并行就绪中，直接按名 invoke） ====================
+
+/** 人员信息采集模板（扣缴端）：无需业务参数 */
+export async function exportEitPayerTemplate(path: string): Promise<string> {
+  return invoke<string>('export_eit_payer_template', { path });
+}
+
+/** 工资薪金申报模板（扣缴端）：仅限已锁定月份（门禁后端校验） */
+export async function exportEitSalaryTemplate(month: string, path: string): Promise<string> {
+  return invoke<string>('export_eit_salary_template', { month, path });
+}
+
+/** 社保缴费基数年度申报表：按自然年导出 */
+export async function exportSocialBaseDeclaration(year: number, path: string): Promise<string> {
+  return invoke<string>('export_social_base_declaration', { year, path });
 }
