@@ -16,9 +16,9 @@ plan：`docs/superpowers/plans/2026-10-11-stage10-onboarding-tax-filing.md`
 | 6 | commands.rs + lib.rs：12 条新命令注册 | ✅ |
 | 7 | 后端单元测试 9 个（seed 往返/隔离/混入拒绝/征期跨年跨季/幂等） | ✅（369 全绿） |
 | 8 | 10B excel.rs 三导出（subagent 并行） | ✅（3 新测试，372 全绿） |
-| 9 | 前端 SetupWizard + Dashboard 两卡 + 导出中心（subagent 并行） | 🔄 进行中 |
-| 10 | 集成：excel 命令包装/注册 + 全量回归 | ✅（export 命令已注册） |
-| 11 | 文档四件套（memory 收尾/progress/手册挂账/发版说明） | ⏳ |
+| 9 | 前端 SetupWizard + Dashboard 两卡 + 导出中心（subagent 并行） | ✅ |
+| 10 | 集成：命令注册 + 门禁衔接修复 + 全量回归 | ✅（cargo 372 / tsc 0 / lint 0） |
+| 11 | 文档四件套（memory 收尾/progress/手册挂账/发版说明） | ✅（手册挂账，见下） |
 
 ## 后端 API（已注册命令）
 
@@ -38,6 +38,10 @@ export_eit_payer_template / export_eit_salary_template / export_social_base_decl
 - **删除顺序关键点**：voucher_lines.fund_account_id 外键 → 凭证行/凭证必须先于 fund_accounts 删除。
 - **demo 标记存 app_settings.demo_marker**（JSON：实体 id 集合 + 月份 + 操作人 id）；clear 校验"数量一致 + 无月结/票据/盘点"后整表清理（等价且简单于逐 id），保留科目/规则/设置/审计日志/OCR 记录。
 - **种子发票 employee_id 与报销单员工对齐**：报销单校验"发票报销人与报销单一致"。
+- **向导 × 安全门禁衔接（集成期发现）**：全新账套时旧门禁强制渲染 SetupSecurity，向导重定向走不到；
+  且 standalone 下 setup() 翻转 isInitialized 会中途卸载向导。修复：App 启动探测改为门禁级
+  （fresh ledger → 门禁直接渲染 `SetupWizard standalone`），密码延迟到向导完成生效
+  （finish → setup → hash 回首页 → 宿主重探测）；应用内 /setup 保留手动重进。详见 stage10 memory。
 
 ## 挂账
 
