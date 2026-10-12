@@ -70,6 +70,7 @@ import NotificationSettings from '@/pages/NotificationSettings';
 import SetupWizard from '@/pages/SetupWizard';
 import LockScreen from '@/components/LockScreen';
 import SetupSecurity from '@/components/SetupSecurity';
+import ReminderChecker from '@/components/ReminderChecker';
 import { getBootstrapStatus } from '@/api';
 import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
 import { useSecurity } from '@/contexts/SecurityContext';
@@ -276,6 +277,8 @@ const AppLayout: React.FC = () => {
 
   return (
     <Layout className="app-layout">
+      {/* 提醒触达检查器（无 UI）：周期检查四源提醒并弹系统通知 / 刷新托盘待办数 */}
+      <ReminderChecker />
       <Sider
         className="app-sider"
         trigger={null}

@@ -2196,3 +2196,48 @@ export const TAX_CALENDAR_KIND_LABEL: Record<string, string> = {
   gs_annual_report: '工商年报（年度）',
   social_base: '社保缴费基数年度申报（年度）',
 };
+
+// ==================== 提醒触达（第十一阶段） ====================
+
+/** 聚合提醒类别：征期 / 账期（借款、票据、滞留应付）/ 月结 / 备份 */
+export type DueNotificationKind =
+  | 'tax_filing'
+  | 'advance_due'
+  | 'instrument_due'
+  | 'payable_stuck'
+  | 'month_close'
+  | 'backup';
+
+/** 提醒紧急程度：已逾期 / 即将到期 / 常规提示 */
+export type DueNotificationLevel = 'overdue' | 'soon' | 'info';
+
+/** 聚合提醒条目（get_due_notifications 返回，四源合并；title/body 不含金额等敏感数字，可安全弹系统通知） */
+export interface DueNotification {
+  /** 稳定去重键（配合提醒记忆按日去重） */
+  key: string;
+  kind: DueNotificationKind;
+  title: string;
+  body: string;
+  /** 关联到期日（YYYY-MM-DD），月结/备份类可为空 */
+  due_date: string | null;
+  level: DueNotificationLevel;
+}
+
+/** 本地系统通知设置（get/save_local_notify_settings；后端缺省均 true） */
+export interface LocalNotifySettings {
+  /** 启用系统通知提醒（应用运行中每 30 分钟检查一轮） */
+  enabled: boolean;
+  /** 关闭窗口时最小化到托盘（应用驻留托盘，提醒继续生效） */
+  close_to_tray: boolean;
+}
+
+/** 保存本地通知设置入参（部分更新，后端合并未传字段） */
+export type LocalNotifySettingsInput = Partial<LocalNotifySettings>;
+
+/** 提醒记忆（get_notify_memory 返回；后端按日自动重置） */
+export interface NotifyMemory {
+  /** 记忆所属日期（YYYY-MM-DD） */
+  date: string;
+  /** 当日已提醒过的去重键 */
+  keys: string[];
+}

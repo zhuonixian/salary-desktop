@@ -9,6 +9,7 @@ import {
   InputNumber,
   Select,
   Space,
+  Switch,
   Table,
   Tabs,
   Tag,
@@ -16,11 +17,24 @@ import {
   Typography,
   message,
 } from 'antd';
-import { MailOutlined, ReloadOutlined, SendOutlined, SoundOutlined } from '@ant-design/icons';
+import { BellOutlined, DesktopOutlined, MailOutlined, ReloadOutlined, SendOutlined, SoundOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import type { Dayjs } from 'dayjs';
-import { getNotificationLogs, getSmtpConfig, sendTestEmail, setSmtpConfig } from '@/api';
-import type { NotificationLog, NotificationLogQuery, SmtpConfigMasked } from '@/types';
+import {
+  getLocalNotifySettings,
+  getNotificationLogs,
+  getSmtpConfig,
+  saveLocalNotifySettings,
+  sendTestEmail,
+  setSmtpConfig,
+} from '@/api';
+import type {
+  LocalNotifySettings,
+  LocalNotifySettingsInput,
+  NotificationLog,
+  NotificationLogQuery,
+  SmtpConfigMasked,
+} from '@/types';
 import {
   NOTIFICATION_CHANNEL_LABEL,
   NOTIFICATION_STATUS_LABEL,
@@ -59,6 +73,13 @@ const NotificationSettings: React.FC = () => {
   const [logMonth, setLogMonth] = useState<Dayjs | null>(null);
   const [logStatus, setLogStatus] = useState<string | undefined>(undefined);
   const [logChannel, setLogChannel] = useState<string | undefined>(undefined);
+
+  // 本地系统通知（Tab 三）
+  const [localSettings, setLocalSettings] = useState<LocalNotifySettings>({
+    enabled: true,
+    close_to_tray: true,
+  });
+  const [localLoading, setLocalLoading] = useState(true);
 
   const fetchLogs = useCallback(async () => {
     setLogsLoading(true);
@@ -100,10 +121,22 @@ const NotificationSettings: React.FC = () => {
     }
   }, [form]);
 
+  const fetchLocalSettings = useCallback(async () => {
+    setLocalLoading(true);
+    try {
+      setLocalSettings(await getLocalNotifySettings());
+    } catch (e: unknown) {
+      message.error('获取本地通知设置失败: ' + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setLocalLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     void fetchConfig();
     void fetchLogs();
-  }, [fetchConfig, fetchLogs]);
+    void fetchLocalSettings();
+  }, [fetchConfig, fetchLogs, fetchLocalSettings]);
 
   const handlePreset = (key: string) => {
     const preset = SMTP_PRESETS.find((item) => item.key === key);
@@ -154,6 +187,21 @@ const NotificationSettings: React.FC = () => {
       void fetchLogs();
     } finally {
       setTesting(false);
+    }
+  };
+
+  // 本地系统通知开关：任一开关切换即保存（部分更新，失败回滚乐观值）
+  const handleLocalSwitch = async (field: keyof LocalNotifySettings, value: boolean) => {
+    const prev = localSettings;
+    const input: LocalNotifySettingsInput =
+      field === 'enabled' ? { enabled: value } : { close_to_tray: value };
+    setLocalSettings({ ...prev, ...input });
+    try {
+      await saveLocalNotifySettings(input);
+      message.success('本地通知设置已保存');
+    } catch (e: unknown) {
+      setLocalSettings(prev);
+      message.error('保存失败: ' + (e instanceof Error ? e.message : String(e)));
     }
   };
 
@@ -381,6 +429,49 @@ const NotificationSettings: React.FC = () => {
     </div>
   );
 
+  const localNotifyTab = (
+    <Card loading={localLoading}>
+      <Alert
+        type="info"
+        showIcon
+        message="系统通知为本机触达，不经过邮件服务器；提醒内容仅含事项与日期，不含工资金额等敏感数字"
+        style={{ marginBottom: 16 }}
+      />
+      <Space direction="vertical" size={20} style={{ width: '100%', maxWidth: 620 }}>
+        <div>
+          <Space size={8}>
+            <BellOutlined />
+            <Text strong>启用系统通知提醒</Text>
+            <Switch
+              checked={localSettings.enabled}
+              onChange={(value) => void handleLocalSwitch('enabled', value)}
+            />
+          </Space>
+          <div>
+            <Text type="secondary">
+              应用运行中每 30 分钟检查征期、账期、月结与备份四类提醒；每条提醒每天至多弹一次；关闭窗口最小化到托盘后仍会检查
+            </Text>
+          </div>
+        </div>
+        <div>
+          <Space size={8}>
+            <DesktopOutlined />
+            <Text strong>关闭窗口时最小化到托盘</Text>
+            <Switch
+              checked={localSettings.close_to_tray}
+              onChange={(value) => void handleLocalSwitch('close_to_tray', value)}
+            />
+          </Space>
+          <div>
+            <Text type="secondary">
+              关闭主窗口后应用驻留托盘，托盘菜单「退出」才真正退出；提醒继续生效
+            </Text>
+          </div>
+        </div>
+      </Space>
+    </Card>
+  );
+
   return (
     <div>
       <div className="page-header">
@@ -392,6 +483,7 @@ const NotificationSettings: React.FC = () => {
         defaultActiveKey="smtp"
         items={[
           { key: 'smtp', label: '邮件设置（SMTP）', children: smtpTab },
+          { key: 'local', label: '本地系统通知', children: localNotifyTab },
           { key: 'logs', label: '发送记录', children: logsTab },
         ]}
       />

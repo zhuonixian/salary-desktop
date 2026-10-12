@@ -140,6 +140,10 @@ import type {
   DemoSeedSummary,
   TaxCalendarItem,
   TaxCalendarSettings,
+  DueNotification,
+  LocalNotifySettings,
+  LocalNotifySettingsInput,
+  NotifyMemory,
 } from '@/types';
 import { INSTRUMENT_STATUS_LABEL } from '@/types';
 
@@ -566,6 +570,54 @@ let mockReminderAdvanceDays = 7;
 // 完成留痕（"period|kind"）与启用 kinds 的内存态，支持标记/撤销交互演示。
 const mockTaxFilingDone = new Set<string>();
 const mockTaxCalendarKinds: string[] = [];
+
+// ==================== 提醒触达预览数据（第十一阶段） ====================
+// 内存态：本地通知开关、按日提醒记忆与演示提醒（title/body 不含金额，与后端同约束）。
+const mockLocalNotifySettings: LocalNotifySettings = { enabled: true, close_to_tray: true };
+let mockNotifyMemoryDate = new Date().toISOString().slice(0, 10);
+const mockNotifyMemoryKeys = new Set<string>();
+
+const mockDueNotifications = (): DueNotification[] => {
+  const today = new Date();
+  const mockNotifyDate = (offsetDays: number): string => {
+    const d = new Date(today.getFullYear(), today.getMonth(), today.getDate() + offsetDays);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  };
+  return [
+    {
+      key: 'tax_filing:eit_withholding:demo',
+      kind: 'tax_filing',
+      title: '个税申报征期提醒',
+      body: '本期个人所得税扣缴申报征期将至，请及时办理申报',
+      due_date: mockNotifyDate(1),
+      level: 'soon',
+    },
+    {
+      key: 'advance_due:demo',
+      kind: 'advance_due',
+      title: '员工借款到期提醒',
+      body: '有一笔员工借款已到约定归还日，请跟进核销',
+      due_date: mockNotifyDate(-1),
+      level: 'overdue',
+    },
+    {
+      key: 'month_close:current:demo',
+      kind: 'month_close',
+      title: '月结未完成提醒',
+      body: '当月月结尚未完成，请前往月结工作台处理',
+      due_date: null,
+      level: 'info',
+    },
+    {
+      key: 'backup:stale:demo',
+      kind: 'backup',
+      title: '数据备份提醒',
+      body: '已超过 7 天未备份数据，建议前往数据安全页立即备份',
+      due_date: null,
+      level: 'info',
+    },
+  ];
+};
 
 // ==================== 通知设置预览数据（第九阶段 Task 3） ====================
 // 内存态 SMTP 配置与发送记录（演示用，完整校验以后端为准）。
@@ -2649,6 +2701,35 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
       mockTaxFilingDone.delete(`${String(args?.period ?? '')}|${String(args?.kind ?? '')}`);
       return true;
     }
+    // ==================== 提醒触达（第十一阶段） ====================
+    case 'get_due_notifications':
+      return mockDueNotifications();
+    case 'get_local_notify_settings':
+      return { ...mockLocalNotifySettings };
+    case 'save_local_notify_settings': {
+      const data = (args?.data ?? {}) as LocalNotifySettingsInput;
+      if (typeof data.enabled === 'boolean') mockLocalNotifySettings.enabled = data.enabled;
+      if (typeof data.close_to_tray === 'boolean') {
+        mockLocalNotifySettings.close_to_tray = data.close_to_tray;
+      }
+      return true;
+    }
+    case 'get_notify_memory': {
+      // 与后端同规则：跨日自动重置记忆
+      const today = new Date().toISOString().slice(0, 10);
+      if (mockNotifyMemoryDate !== today) {
+        mockNotifyMemoryDate = today;
+        mockNotifyMemoryKeys.clear();
+      }
+      return { date: mockNotifyMemoryDate, keys: [...mockNotifyMemoryKeys] };
+    }
+    case 'mark_notified': {
+      const keys = Array.isArray(args?.keys) ? (args?.keys as string[]) : [];
+      keys.forEach((k) => mockNotifyMemoryKeys.add(String(k)));
+      return true;
+    }
+    case 'update_tray_badge':
+      return null;
     default: {
       // 预览模式兜底（Minor 8）：不再无差别 return true——只读命令按语义返回空集合，
       // 其余（写操作/状态机命令）抛中文错误，避免浏览器预览里
@@ -4168,4 +4249,36 @@ export async function exportEitSalaryTemplate(month: string, path: string): Prom
 /** 社保缴费基数年度申报表：按自然年导出 */
 export async function exportSocialBaseDeclaration(year: number, path: string): Promise<string> {
   return invoke<string>('export_social_base_declaration', { year, path });
+}
+
+// ==================== 提醒触达（第十一阶段，后端并行就绪中，直接按名 invoke） ====================
+
+/** 聚合提醒：征期/账期/月结/备份四源合并（title/body 不含金额等敏感数字，可安全弹系统通知） */
+export async function getDueNotifications(): Promise<DueNotification[]> {
+  return invoke<DueNotification[]>('get_due_notifications');
+}
+
+/** 本地系统通知设置（后端缺省均 true） */
+export async function getLocalNotifySettings(): Promise<LocalNotifySettings> {
+  return invoke<LocalNotifySettings>('get_local_notify_settings');
+}
+
+/** 保存本地通知设置（部分更新，后端合并未传字段） */
+export async function saveLocalNotifySettings(data: LocalNotifySettingsInput): Promise<boolean> {
+  return invoke<boolean>('save_local_notify_settings', { data });
+}
+
+/** 提醒记忆：keys 为当日已提醒去重键，后端按日自动重置 */
+export async function getNotifyMemory(): Promise<NotifyMemory> {
+  return invoke<NotifyMemory>('get_notify_memory');
+}
+
+/** 合并标记当日已提醒去重键 */
+export async function markNotified(keys: string[]): Promise<boolean> {
+  return invoke<boolean>('mark_notified', { keys });
+}
+
+/** 刷新托盘 tooltip 待办数 */
+export async function updateTrayBadge(count: number): Promise<void> {
+  await invoke<null>('update_tray_badge', { count });
 }
