@@ -13,13 +13,17 @@ mod notes;
 mod notification;
 mod ocr;
 mod onboarding;
+mod reminders;
 mod salary;
 pub mod security;
 mod security_commands;
 
+use rusqlite::Connection;
 use std::io::Write;
 use std::sync::Mutex;
-use tauri::Manager;
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::TrayIconBuilder;
+use tauri::{Emitter, Manager};
 
 fn diag(msg: &str) {
     let tmp_log = std::env::temp_dir().join("salary-desktop-startup.log");
@@ -30,6 +34,52 @@ fn diag(msg: &str) {
     {
         let _ = writeln!(f, "[{}] {}", chrono::Utc::now().format("%H:%M:%S"), msg);
     }
+}
+
+/// 显示主窗口（托盘「打开」与左键点击共用）
+fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+/// 构建系统托盘：图标 + tooltip（badge 由前端 update_tray_badge 刷新）+
+/// 菜单（打开主窗口 / 立即检查提醒 / 退出）。左键点击托盘即显示主窗口。
+fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let open = MenuItem::with_id(app, "tray-open", "打开主窗口", true, None::<&str>)?;
+    let check = MenuItem::with_id(app, "tray-check", "立即检查提醒", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "tray-quit", "退出", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open, &check, &quit])?;
+
+    let mut builder = TrayIconBuilder::with_id(crate::reminders::MAIN_TRAY_ID)
+        .tooltip(crate::reminders::APP_NAME)
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "tray-open" => show_main_window(app),
+            "tray-check" => {
+                let _ = app.emit("tray-check-reminders", ());
+            }
+            "tray-quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let tauri::tray::TrayIconEvent::Click {
+                button: tauri::tray::MouseButton::Left,
+                button_state: tauri::tray::MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main_window(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder.icon(icon.clone());
+    }
+    builder.build(app)?;
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -44,6 +94,9 @@ pub fn run() {
 
     diag("adding fs plugin...");
     builder = builder.plugin(tauri_plugin_fs::init());
+
+    diag("adding notification plugin...");
+    builder = builder.plugin(tauri_plugin_notification::init());
 
     diag("adding log plugin...");
     builder = builder.plugin(
@@ -112,8 +165,35 @@ pub fn run() {
         app.manage(security::SecurityState::new());
         // 当前操作人会话：不随锁屏清空，重启后为空须重新选择（见 cashier.rs）
         app.manage(cashier::CurrentOperatorState::new());
+
+        // ===== 第十一阶段：托盘常驻（菜单：打开 / 立即检查提醒 / 退出） =====
+        diag("building tray icon...");
+        match build_tray(app.handle()) {
+            Ok(_) => diag("tray icon OK"),
+            Err(e) => diag(&format!("WARNING: tray icon failed (headless?): {e}")),
+        }
+
         diag("setup() complete, all OK");
         Ok(())
+    });
+
+    // 关窗行为（第十一阶段）：默认隐藏到托盘而非退出，提醒检查继续生效；
+    // 读设置失败保守驻留，托盘菜单「退出」为唯一退出入口。
+    builder = builder.on_window_event(|window, event| {
+        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            let app = window.app_handle();
+            let close_to_tray = app
+                .try_state::<Mutex<Connection>>()
+                .and_then(|state| {
+                    let conn = state.lock().ok()?;
+                    Some(crate::reminders::should_close_to_tray(&conn))
+                })
+                .unwrap_or(true);
+            if close_to_tray {
+                let _ = window.hide();
+                api.prevent_close();
+            }
+        }
     });
 
     diag("registering invoke handler...");
@@ -362,6 +442,13 @@ pub fn run() {
         commands::export_eit_payer_template,
         commands::export_eit_salary_template,
         commands::export_social_base_declaration,
+        // ===== Reminders（第十一阶段 提醒触达） =====
+        commands::get_due_notifications,
+        commands::get_local_notify_settings,
+        commands::save_local_notify_settings,
+        commands::get_notify_memory,
+        commands::mark_notified,
+        commands::update_tray_badge,
     ]);
 
     diag("calling builder.run()...");

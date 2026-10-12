@@ -4009,6 +4009,69 @@ pub fn undo_tax_filing(
     Ok(removed)
 }
 
+// ==================== Reminders（第十一阶段 提醒触达） ====================
+
+#[tauri::command]
+pub fn get_due_notifications(
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<crate::reminders::DueNotification>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(crate::reminders::get_due_notifications(&conn)?)
+}
+
+#[tauri::command]
+pub fn get_local_notify_settings(
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<crate::reminders::LocalNotifySettings, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(crate::reminders::get_local_notify_settings(&conn)?)
+}
+
+#[tauri::command]
+pub fn save_local_notify_settings(
+    data: crate::reminders::LocalNotifySettingsInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    crate::reminders::save_local_notify_settings(&conn, data.enabled, data.close_to_tray)?;
+    db::log_operation(
+        &conn,
+        "save_local_notify_settings",
+        &format!(
+            "更新本地通知设置：enabled={:?} close_to_tray={:?}",
+            data.enabled, data.close_to_tray
+        ),
+        "system",
+        None,
+    )?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn get_notify_memory(
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<crate::reminders::NotifyMemory, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(crate::reminders::get_notify_memory(&conn)?)
+}
+
+#[tauri::command]
+pub fn mark_notified(
+    keys: Vec<String>,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    crate::reminders::mark_notified(&conn, &keys)?;
+    Ok(true)
+}
+
+/// 刷新托盘 tooltip 待办数（前端每轮检查后调用；无托盘环境静默忽略）。
+#[tauri::command]
+pub fn update_tray_badge(count: i64, app: tauri::AppHandle) -> Result<(), AppError> {
+    crate::reminders::update_tray_badge(&app, count);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
