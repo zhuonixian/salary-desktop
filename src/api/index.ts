@@ -149,6 +149,13 @@ import type {
   LocalNotifySettings,
   LocalNotifySettingsInput,
   NotifyMemory,
+  FixedAssetLedgerRow,
+  FixedAssetInput,
+  FixedAssetRecord,
+  FixedAssetDisposalInput,
+  FixedAssetQuery,
+  FixedDepreciationRunSummary,
+  ManualVoucherInput,
 } from '@/types';
 import { INSTRUMENT_STATUS_LABEL } from '@/types';
 
@@ -999,6 +1006,72 @@ const mockArAllocations: ArReceiptAllocation[] = [
     receipt_document_no: `SK${mockDocMonth.replace('-', '')}0003`,
     receipt_settled_at: '2026-01-02T02:00:00Z',
     receipt_summary: '收到客户样品款',
+  },
+];
+
+// ==================== 固定资产预览数据（第十三阶段） ====================
+// 两台在用（一台已提数月）+ 一台已处置提满，字段结构与后端 FixedAssetLedgerRow 一致；
+// 累计折旧/净值按「原值 × (1 − 残值率) ÷ 年限 × 已提月数」静态折算。
+const mockFixedAssetLedger: FixedAssetLedgerRow[] = [
+  {
+    asset_id: 1,
+    asset_no: 'GD-202503-001',
+    name: '生产车间厂房',
+    category_label: '房屋建筑物',
+    purchase_date: mockMonthDate(-7, 1),
+    belong_month: mockMonthDate(-7, 1).slice(0, 7),
+    original_value: 240000,
+    salvage_rate: 0.05,
+    useful_life_months: 240,
+    expense_account_code: '6602',
+    status: 'in_use',
+    disposal_date: null,
+    disposal_income: null,
+    accumulated_depreciation: 5700,
+    net_book_value: 234300,
+    monthly_amount: 950,
+    depreciated_months: 6,
+    remaining_months: 234,
+  },
+  {
+    asset_id: 2,
+    asset_no: 'GD-202508-002',
+    name: '财务部笔记本电脑',
+    category_label: '电子设备',
+    purchase_date: mockMonthDate(-2, 15),
+    belong_month: mockMonthDate(-2, 1).slice(0, 7),
+    original_value: 8400,
+    salvage_rate: 0.05,
+    useful_life_months: 36,
+    expense_account_code: '6602',
+    status: 'in_use',
+    disposal_date: null,
+    disposal_income: null,
+    accumulated_depreciation: 443.34,
+    net_book_value: 7956.66,
+    monthly_amount: 221.67,
+    depreciated_months: 2,
+    remaining_months: 34,
+  },
+  {
+    asset_id: 3,
+    asset_no: 'GD-202101-003',
+    name: '五菱货运面包车',
+    category_label: '运输工具',
+    purchase_date: mockMonthDate(-56, 5),
+    belong_month: mockMonthDate(-56, 1).slice(0, 7),
+    original_value: 120000,
+    salvage_rate: 0.05,
+    useful_life_months: 60,
+    expense_account_code: '6602',
+    status: 'disposed',
+    disposal_date: mockMonthDate(-4, 20),
+    disposal_income: 5800,
+    accumulated_depreciation: 114000,
+    net_book_value: 6000,
+    monthly_amount: 0,
+    depreciated_months: 60,
+    remaining_months: 0,
   },
 ];
 
@@ -2926,6 +2999,22 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
     }
     case 'update_tray_badge':
       return null;
+    // ==================== 固定资产与手工凭证（第十三阶段） ====================
+    // 写命令（save/dispose/depreciate/手工凭证）走 default 分支统一抛
+    // 「预览模式暂不支持」，与 create_bank_manual_voucher 同口径。
+    case 'get_fixed_assets': {
+      const query = (args ?? {}) as FixedAssetQuery;
+      return mockFixedAssetLedger.filter((r) => {
+        if (query.status && r.status !== query.status) return false;
+        if (
+          query.keyword &&
+          !`${r.asset_no}${r.name}${r.category_label}`.includes(query.keyword)
+        ) {
+          return false;
+        }
+        return true;
+      });
+    }
     default: {
       // 预览模式兜底（Minor 8）：不再无差别 return true——只读命令按语义返回空集合，
       // 其余（写操作/状态机命令）抛中文错误，避免浏览器预览里
@@ -4514,4 +4603,46 @@ export async function markNotified(keys: string[]): Promise<boolean> {
 /** 刷新托盘 tooltip 待办数 */
 export async function updateTrayBadge(count: number): Promise<void> {
   await invoke<null>('update_tray_badge', { count });
+}
+
+// ==================== 固定资产与手工凭证（第十三阶段 记账完整性） ====================
+// invoke 参数 key 用 camelCase（Tauri 2 自动映射 snake_case）；借贷平衡、有效分录≥2、
+// 收/付凭证须含资金科目行、资金科目行须选资金账户、月结门禁等校验以后端为准，
+// 前端仅做保存前预检与错误透传。
+
+export async function getFixedAssets(query: FixedAssetQuery = {}): Promise<FixedAssetLedgerRow[]> {
+  return invoke<FixedAssetLedgerRow[]>('get_fixed_assets', {
+    keyword: query.keyword ?? null,
+    status: query.status ?? null,
+  });
+}
+
+export async function saveFixedAsset(data: FixedAssetInput): Promise<FixedAssetRecord> {
+  return invoke<FixedAssetRecord>('save_fixed_asset', { data });
+}
+
+export async function runAssetDepreciation(month: string): Promise<FixedDepreciationRunSummary> {
+  return invoke<FixedDepreciationRunSummary>('run_asset_depreciation', { month });
+}
+
+export async function disposeFixedAsset(data: FixedAssetDisposalInput): Promise<FixedAssetRecord> {
+  return invoke<FixedAssetRecord>('dispose_fixed_asset', { data });
+}
+
+export async function exportFixedAssetLedger(
+  query: FixedAssetQuery,
+  path: string,
+): Promise<string> {
+  return invoke<string>('export_fixed_asset_ledger', {
+    keyword: query.keyword ?? null,
+    path,
+  });
+}
+
+export async function createManualVoucher(data: ManualVoucherInput): Promise<Voucher> {
+  return invoke<Voucher>('create_manual_voucher', { data });
+}
+
+export async function voidManualVoucher(voucherId: number): Promise<boolean> {
+  return invoke<boolean>('void_manual_voucher', { voucherId });
 }

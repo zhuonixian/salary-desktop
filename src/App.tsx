@@ -37,6 +37,7 @@ import {
   PayCircleOutlined,
   AccountBookOutlined,
   MailOutlined,
+  GoldOutlined,
 } from '@ant-design/icons';
 import Dashboard from '@/pages/Dashboard';
 import Employees from '@/pages/Employees';
@@ -65,6 +66,7 @@ import FundDocuments from '@/pages/FundDocuments';
 import FundJournals from '@/pages/FundJournals';
 import Advances from '@/pages/Advances';
 import ARReceivables from '@/pages/ARReceivables';
+import FixedAssets from '@/pages/FixedAssets';
 import NotesInstruments from '@/pages/NotesInstruments';
 import CashCount from '@/pages/CashCount';
 import NotificationSettings from '@/pages/NotificationSettings';
@@ -145,6 +147,7 @@ const menuItems: MenuProps['items'] = [
     children: [
       { key: '/accounts', label: '科目表', icon: <ProfileOutlined /> },
       { key: '/vouchers', label: '记账凭证', icon: <FileTextOutlined /> },
+      { key: '/fixed-assets', label: '固定资产', icon: <GoldOutlined /> },
       { key: '/reports', label: '财务报表', icon: <BarChartOutlined /> },
     ],
   },
@@ -389,6 +392,7 @@ const AppLayout: React.FC = () => {
               <Route path="/cash-count" element={<CashCount />} />
               <Route path="/accounts" element={<ChartOfAccounts />} />
               <Route path="/vouchers" element={<Vouchers />} />
+              <Route path="/fixed-assets" element={<FixedAssets />} />
               <Route path="/reports" element={<FinancialReports />} />
               <Route path="/export" element={<ExportCenter />} />
               <Route path="/logs" element={<OperationLogs />} />

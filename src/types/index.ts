@@ -1251,6 +1251,10 @@ export const VOUCHER_SOURCE_LABEL: Record<string, string> = {
   invoice_expense: '发票入账',
   bank_manual: '银行流水',
   period_close: '年末结转',
+  manual_voucher: '手工凭证',
+  asset_purchase: '资产购置',
+  asset_depreciation: '折旧计提',
+  asset_disposal: '资产处置',
 };
 
 export interface VoucherQuery {
@@ -2351,4 +2355,146 @@ export interface NotifyMemory {
   date: string;
   /** 当日已提醒过的去重键 */
   keys: string[];
+}
+
+// ==================== 固定资产与手工凭证（第十三阶段 记账完整性） ====================
+// 字段与后端 src-tauri/src/models.rs ManualVoucherInput / FixedAsset* 及
+// assets.rs 入出参结构 1:1 对齐（serde snake_case）；
+// 借贷平衡 / 有效分录≥2 / 收付凭证须含资金科目行等门禁由后端校验，前端同步预检。
+
+/** 凭证种类（收/付/转三式） */
+export type ManualVoucherKind = 'receipt_voucher' | 'payment_voucher' | 'transfer_voucher';
+
+export const MANUAL_VOUCHER_KIND_OPTIONS: { value: ManualVoucherKind; label: string }[] = [
+  { value: 'receipt_voucher', label: '收款凭证' },
+  { value: 'payment_voucher', label: '付款凭证' },
+  { value: 'transfer_voucher', label: '转账凭证' },
+];
+
+/** 手工凭证分录入参 */
+export interface ManualVoucherLineModel {
+  account_code: string;
+  debit_amount: number;
+  credit_amount: number;
+  summary?: string | null;
+  /** 资金科目（1001/1002/1012）行必填的辅助核算账户 */
+  fund_account_id?: number | null;
+}
+
+/** 手工凭证创建入参（create_manual_voucher） */
+export interface ManualVoucherInput {
+  belong_month: string;
+  voucher_date: string;
+  voucher_kind: ManualVoucherKind;
+  lines: ManualVoucherLineModel[];
+  remark?: string | null;
+}
+
+/** 资产类别（与后端 ASSET_CATEGORIES 一致） */
+export type FixedAssetCategory = 'building' | 'machinery' | 'vehicle' | 'electronics' | 'other';
+
+export const FIXED_ASSET_CATEGORY_LABEL: Record<FixedAssetCategory, string> = {
+  building: '房屋建筑物',
+  machinery: '机器设备',
+  vehicle: '运输工具',
+  electronics: '电子设备',
+  other: '其他',
+};
+
+/** 台账 category_label → 类别编码（编辑回填用，标签唯一可反查） */
+export const FIXED_ASSET_CATEGORY_BY_LABEL: Record<string, FixedAssetCategory> = Object.fromEntries(
+  Object.entries(FIXED_ASSET_CATEGORY_LABEL).map(([value, label]) => [label, value as FixedAssetCategory]),
+) as Record<string, FixedAssetCategory>;
+
+/** 资产状态：in_use 在用 / disposed 已处置 */
+export const FIXED_ASSET_STATUS_LABEL: Record<string, string> = {
+  in_use: '在用',
+  disposed: '已处置',
+};
+
+/** 固定资产登记/编辑入参（save_fixed_asset） */
+export interface FixedAssetInput {
+  id?: number | null;
+  name: string;
+  category: FixedAssetCategory;
+  purchase_date: string;
+  belong_month: string;
+  original_value: number;
+  /** 残值率（0~0.5 小数，默认 0.05） */
+  salvage_rate: number;
+  useful_life_months: number;
+  /** 折旧费用科目（默认 6602） */
+  expense_account_code: string;
+  /** 购置凭证贷方科目（空=不生成购置凭证；资金科目须配 counter_fund_account_id） */
+  counter_account_code?: string | null;
+  counter_fund_account_id?: number | null;
+  remark?: string | null;
+}
+
+/** 固定资产记录（save/dispose 返回） */
+export interface FixedAssetRecord {
+  id: number;
+  asset_no: string;
+  name: string;
+  category: string;
+  category_label: string;
+  purchase_date: string;
+  belong_month: string;
+  original_value: number;
+  salvage_rate: number;
+  useful_life_months: number;
+  expense_account_code: string;
+  status: string;
+  disposal_date: string | null;
+  disposal_income: number | null;
+  remark: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+/** 资产台账行（联累计折旧/净值/月折旧，get_fixed_assets 返回） */
+export interface FixedAssetLedgerRow {
+  asset_id: number;
+  asset_no: string;
+  name: string;
+  category_label: string;
+  purchase_date: string;
+  belong_month: string;
+  original_value: number;
+  salvage_rate: number;
+  useful_life_months: number;
+  expense_account_code: string;
+  status: string;
+  disposal_date: string | null;
+  disposal_income: number | null;
+  accumulated_depreciation: number;
+  net_book_value: number;
+  /** 在用且未提满时的常规月折旧 */
+  monthly_amount: number;
+  depreciated_months: number;
+  remaining_months: number;
+}
+
+/** 月度折旧批处理结果（run_asset_depreciation 返回） */
+export interface FixedDepreciationRunSummary {
+  month: string;
+  asset_count: number;
+  total_amount: number;
+  voucher_no: string | null;
+}
+
+/** 资产处置入参（dispose_fixed_asset） */
+export interface FixedAssetDisposalInput {
+  id: number;
+  disposal_date: string;
+  disposal_income: number;
+  /** 处置收入收款资金账户（收入>0 时必填） */
+  income_fund_account_id?: number | null;
+  remark?: string | null;
+}
+
+/** 台账查询条件（get_fixed_assets / export_fixed_asset_ledger） */
+export interface FixedAssetQuery {
+  keyword?: string;
+  status?: string;
 }
