@@ -841,6 +841,8 @@ fn seed_demo_inner(
                 // 发票归属与报销单员工对齐：发票0→员工0（报销1），发票1/2→员工1（报销2）
                 employee_id: Some(marker.employee_ids[if i == 0 { 0 } else { 1 }]),
                 belong_month: Some(m_cur.to_string()),
+                direction: None,
+                partner_id: None,
                 remark: Some("示例数据".into()),
                 image_path: None,
                 raw_ocr_json: None,

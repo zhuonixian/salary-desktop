@@ -1,4 +1,5 @@
 mod accounting;
+mod ar;
 mod cash_count;
 mod cashier;
 mod commands;
@@ -442,6 +443,13 @@ pub fn run() {
         commands::export_eit_payer_template,
         commands::export_eit_salary_template,
         commands::export_social_base_declaration,
+        // ===== AR Receivable（第十二阶段 收入侧闭环） =====
+        commands::get_ar_ledger,
+        commands::get_ar_allocations,
+        commands::create_ar_allocation,
+        commands::cancel_ar_allocation,
+        commands::export_ar_aging_report,
+        commands::export_output_tax_ledger,
         // ===== Reminders（第十一阶段 提醒触达） =====
         commands::get_due_notifications,
         commands::get_local_notify_settings,

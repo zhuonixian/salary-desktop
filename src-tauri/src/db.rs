@@ -186,6 +186,9 @@ pub fn create_tables(conn: &Connection) -> AppResult<()> {
             image_path TEXT,
             raw_ocr_json TEXT,
             image_encrypted INTEGER NOT NULL DEFAULT 0,
+            -- 第十二阶段：发票方向（input 进项 / output 销项，存量默认进项）与客户关联
+            direction TEXT NOT NULL DEFAULT 'input',
+            partner_id INTEGER REFERENCES business_partners(id),
             created_at TEXT,
             updated_at TEXT,
             FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE SET NULL,
@@ -357,7 +360,7 @@ pub fn create_tables(conn: &Connection) -> AppResult<()> {
             source_type TEXT NOT NULL CHECK (source_type IN (
                 'salary_accrual','salary_payment','reimbursement_accrual',
                 'reimbursement_payment','invoice_expense','bank_manual','period_close',
-                'fund_document','instrument','instrument_flow','cash_count')),
+                'fund_document','instrument','instrument_flow','cash_count','sales_invoice')),
             source_id INTEGER NOT NULL,
             total_amount REAL NOT NULL DEFAULT 0,
             status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','void')),
@@ -467,12 +470,31 @@ pub fn create_tables(conn: &Connection) -> AppResult<()> {
           operator TEXT NOT NULL,
           UNIQUE (period, kind)
         );
+
+        -- 第十二阶段：应收核销（收款单 ↔ 销项发票 多对多部分核销，镜像 advance_settlement_links）
+        CREATE TABLE IF NOT EXISTS ar_receipt_allocations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          invoice_id INTEGER NOT NULL REFERENCES invoices(id),
+          receipt_id INTEGER NOT NULL REFERENCES fund_documents(id),
+          allocated_amount REAL NOT NULL CHECK (allocated_amount > 0),
+          status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','cancelled')),
+          remark TEXT,
+          created_by TEXT,
+          created_at TEXT NOT NULL,
+          cancelled_at TEXT,
+          cancel_reason TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_ar_alloc_invoice
+          ON ar_receipt_allocations(invoice_id) WHERE status='active';
+        CREATE INDEX IF NOT EXISTS idx_ar_alloc_receipt
+          ON ar_receipt_allocations(receipt_id) WHERE status='active';
         ",
     )?;
     migrate_existing_schema(conn)?;
     migrate_stage7_schema(conn)?;
     migrate_stage8_schema(conn)?;
     migrate_stage9_schema(conn)?;
+    migrate_stage12_schema(conn)?;
 
     Ok(())
 }
@@ -1439,7 +1461,7 @@ fn rebuild_vouchers_source_type_check_stage8(conn: &Connection) -> AppResult<()>
                 source_type TEXT NOT NULL CHECK (source_type IN (
                     'salary_accrual','salary_payment','reimbursement_accrual',
                     'reimbursement_payment','invoice_expense','bank_manual','period_close',
-                    'fund_document','instrument','instrument_flow','cash_count')),
+                    'fund_document','instrument','instrument_flow','cash_count','sales_invoice')),
                 source_id INTEGER NOT NULL,
                 total_amount REAL NOT NULL DEFAULT 0,
                 status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','void')),
@@ -3395,6 +3417,62 @@ pub fn get_dashboard_reminders(conn: &Connection, today: &str) -> AppResult<Vec<
         );
     }
 
+    // 5. 应收账龄（第十二阶段 spec 4.3）：销项发票未核销余额账龄 > 90 天提醒；
+    //    void 与已核清天然排除（remaining > 0.005），days_left 取账龄天数（与借款口径一致）
+    let ar_cutoff = today_date - chrono::Duration::days(90);
+    let ar_cutoff_str = ar_cutoff.format("%Y-%m-%d").to_string();
+    let mut stmt = conn.prepare(
+        "SELECT i.id, i.invoice_number, COALESCE(b.name, i.buyer_name), i.total_amount, \
+                (SELECT COALESCE(SUM(a.allocated_amount), 0) FROM ar_receipt_allocations a \
+                 WHERE a.invoice_id = i.id AND a.status = 'active'), \
+                COALESCE(NULLIF(i.issue_date, ''), i.belong_month || '-01')
+         FROM invoices i
+         LEFT JOIN business_partners b ON b.id = i.partner_id
+         WHERE i.status != 'void' AND IFNULL(i.direction, 'input') = 'output'
+           AND i.total_amount - (SELECT COALESCE(SUM(a.allocated_amount), 0)
+                 FROM ar_receipt_allocations a
+                 WHERE a.invoice_id = i.id AND a.status = 'active') > 0.005
+           AND COALESCE(NULLIF(i.issue_date, ''), i.belong_month || '-01') < ?1
+         ORDER BY i.issue_date, i.id",
+    )?;
+    let ar_rows = stmt
+        .query_map(params![ar_cutoff_str], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, f64>(3)?,
+                row.get::<_, f64>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+    for (id, number, buyer, total, settled, aging_anchor) in ar_rows {
+        // 日期异常的脏数据跳过（与借款口径一致）
+        let Ok(anchor) = NaiveDate::parse_from_str(&aging_anchor, "%Y-%m-%d") else {
+            continue;
+        };
+        let aging_days = (today_date - anchor).num_days();
+        if aging_days <= 90 {
+            continue;
+        }
+        let outstanding = (total - settled).max(0.0);
+        items.push(ReminderItem {
+            category: REMINDER_CATEGORY_AR_OVERDUE.to_string(),
+            title: format!(
+                "{} 销项 {} 账龄 {} 天",
+                buyer.as_deref().unwrap_or("未知客户"),
+                number.as_deref().unwrap_or("(缺票号)"),
+                aging_days
+            ),
+            days_left: aging_days,
+            amount: Some((outstanding * 100.0).round() / 100.0),
+            due_date: aging_anchor,
+            ref_id: id,
+        });
+    }
+
     Ok(items)
 }
 
@@ -3660,6 +3738,41 @@ pub fn get_month_close_workbench(conn: &Connection, month: &str) -> AppResult<Mo
         advance_overdue_amount: 0.0,
     };
     let mut checks = build_month_close_checks(&summary);
+    // 应收账龄预警（第十二阶段 spec 4.2）：归属本月及以前、账龄>90 天未核销销项 → warning 不阻断
+    let ar_aging_overdue: i64 = {
+        // 与仪表盘提醒同口径：未核销余额>0.005 且账龄锚点早于（今天−90 天）
+        let cutoff = (chrono::Local::now().date_naive() - chrono::Duration::days(90))
+            .format("%Y-%m-%d")
+            .to_string();
+        conn.query_row(
+            "SELECT COUNT(*) FROM invoices i
+             WHERE i.status != 'void' AND IFNULL(i.direction, 'input') = 'output'
+               AND i.total_amount - (SELECT COALESCE(SUM(a.allocated_amount), 0)
+                     FROM ar_receipt_allocations a
+                     WHERE a.invoice_id = i.id AND a.status = 'active') > 0.005
+               AND COALESCE(NULLIF(i.issue_date, ''), i.belong_month || '-01') < ?1",
+            params![cutoff],
+            |r| r.get(0),
+        )
+        .unwrap_or(0)
+    };
+    checks.push(MonthCloseCheckItem {
+        key: "ar_aging_overdue".to_string(),
+        title: "应收账龄预警".to_string(),
+        status: if ar_aging_overdue == 0 {
+            "ok"
+        } else {
+            "warning"
+        }
+        .to_string(),
+        count: ar_aging_overdue as i32,
+        description: if ar_aging_overdue == 0 {
+            "无账龄超 90 天的未核销销项".to_string()
+        } else {
+            format!("存在 {ar_aging_overdue}张开票超 90 天未核销的销项发票，请跟进回款")
+        },
+        action_route: Some("/ar-ledger".to_string()),
+    });
     checks.push(MonthCloseCheckItem {
         key: "voucher_balance".to_string(),
         title: "记账凭证平衡".to_string(),
@@ -6987,7 +7100,7 @@ pub fn count_invoices_by_expense_type(conn: &Connection, code: &str) -> AppResul
 
 // ==================== Invoices ====================
 
-const INVOICE_SELECT_FIELDS: &str = "id, invoice_code, invoice_number, invoice_type, issue_date, check_code, amount, tax_amount, total_amount, seller_name, seller_tax_id, buyer_name, buyer_tax_id, expense_type_code, employee_id, belong_month, status, remark, image_path, raw_ocr_json, created_at, updated_at";
+const INVOICE_SELECT_FIELDS: &str = "id, invoice_code, invoice_number, invoice_type, issue_date, check_code, amount, tax_amount, total_amount, seller_name, seller_tax_id, buyer_name, buyer_tax_id, expense_type_code, employee_id, belong_month, status, remark, image_path, raw_ocr_json, IFNULL(direction, 'input'), partner_id, created_at, updated_at";
 
 fn row_to_invoice(row: &rusqlite::Row<'_>) -> rusqlite::Result<Invoice> {
     Ok(Invoice {
@@ -7011,8 +7124,10 @@ fn row_to_invoice(row: &rusqlite::Row<'_>) -> rusqlite::Result<Invoice> {
         remark: row.get(17)?,
         image_path: row.get(18)?,
         raw_ocr_json: row.get(19)?,
-        created_at: row.get(20)?,
-        updated_at: row.get(21)?,
+        direction: row.get(20)?,
+        partner_id: row.get(21)?,
+        created_at: row.get(22)?,
+        updated_at: row.get(23)?,
     })
 }
 
@@ -7071,7 +7186,34 @@ fn normalized_invoice_input(data: &InvoiceInput) -> InvoiceInput {
         .as_deref()
         .map(normalize_invoice_number)
         .filter(|s| !s.is_empty());
+    // 发票方向（第十二阶段）：缺省进项；非法值拒绝（发票方向决定凭证口径，不能含糊）
+    let direction = data
+        .direction
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("input");
+    if !matches!(direction, "input" | "output") {
+        return normalized; // 校验在 insert 前置函数统一报错，这里不再构造错误
+    }
+    normalized.direction = Some(direction.to_string());
     normalized
+}
+
+/// 发票方向非法值校验（insert/update 入口调用，返回归一后的方向）
+fn validate_invoice_direction(data: &InvoiceInput) -> AppResult<String> {
+    let direction = data
+        .direction
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("input");
+    if !matches!(direction, "input" | "output") {
+        return Err(AppError::InvalidParam(format!(
+            "发票方向必须为 input（进项）或 output（销项）：{direction}"
+        )));
+    }
+    Ok(direction.to_string())
 }
 
 pub fn insert_invoice(
@@ -7083,19 +7225,21 @@ pub fn insert_invoice(
     if let Some(month) = data.belong_month.as_deref() {
         ensure_month_open(conn, month)?;
     }
+    let direction = validate_invoice_direction(data)?;
     let now = Utc::now().to_rfc3339();
     let data = normalized_invoice_input(data);
     // 发票写入与费用凭证生成同事务：凭证失败时发票插入一并回滚
     let tx = conn.unchecked_transaction()?;
     tx.execute(
-        "INSERT INTO invoices (invoice_code, invoice_number, invoice_type, issue_date, check_code, amount, tax_amount, total_amount, seller_name, seller_tax_id, buyer_name, buyer_tax_id, expense_type_code, employee_id, belong_month, status, remark, image_path, raw_ocr_json, image_encrypted, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 'normal', ?16, ?17, ?18, ?19, ?20, ?21)",
+        "INSERT INTO invoices (invoice_code, invoice_number, invoice_type, issue_date, check_code, amount, tax_amount, total_amount, seller_name, seller_tax_id, buyer_name, buyer_tax_id, expense_type_code, employee_id, belong_month, status, remark, image_path, raw_ocr_json, image_encrypted, direction, partner_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 'normal', ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
         params![
             data.invoice_code, data.invoice_number, data.invoice_type, data.issue_date,
             data.check_code, data.amount.unwrap_or(0.0), data.tax_amount.unwrap_or(0.0),
             data.total_amount.unwrap_or(0.0), data.seller_name, data.seller_tax_id,
             data.buyer_name, data.buyer_tax_id, data.expense_type_code, data.employee_id,
-            data.belong_month, data.remark, image_path, data.raw_ocr_json, image_encrypted, now, now
+            data.belong_month, data.remark, image_path, data.raw_ocr_json, image_encrypted,
+            direction, data.partner_id, now, now
         ],
     )?;
     let id = tx.last_insert_rowid();
@@ -7147,10 +7291,24 @@ pub fn update_invoice(
         }
     }
 
+    // 发票方向不可修改（direction 决定凭证口径与台账归属，改向须作废重录）
+    if let Some(new_direction) = data
+        .direction
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let current_direction = existing.direction.as_deref().unwrap_or("input");
+        if new_direction != current_direction {
+            return Err(AppError::InvalidParam(format!(
+                "发票方向不可修改（当前 {current_direction}），如需调整请作废后按新方向重新录入"
+            )));
+        }
+    }
     // 发票更新与凭证重生成同事务：凭证失败时更新一并回滚
     let tx = conn.unchecked_transaction()?;
     let updated = tx.execute(
-        "UPDATE invoices SET invoice_code=?1, invoice_number=?2, invoice_type=?3, issue_date=?4, check_code=?5, amount=?6, tax_amount=?7, total_amount=?8, seller_name=?9, seller_tax_id=?10, buyer_name=?11, buyer_tax_id=?12, expense_type_code=?13, employee_id=?14, belong_month=?15, remark=?16, image_path=?17, raw_ocr_json=?18, updated_at=?19 WHERE id=?20",
+        "UPDATE invoices SET invoice_code=?1, invoice_number=?2, invoice_type=?3, issue_date=?4, check_code=?5, amount=?6, tax_amount=?7, total_amount=?8, seller_name=?9, seller_tax_id=?10, buyer_name=?11, buyer_tax_id=?12, expense_type_code=?13, employee_id=?14, belong_month=?15, remark=?16, image_path=?17, raw_ocr_json=?18, partner_id=?19, updated_at=?20 WHERE id=?21",
         params![
             new_code,
             new_number,
@@ -7170,6 +7328,7 @@ pub fn update_invoice(
             data.remark.as_ref().or(existing.remark.as_ref()),
             image_path,
             data.raw_ocr_json.as_ref().or(existing.raw_ocr_json.as_ref()),
+            data.partner_id.or(existing.partner_id),
             now, id
         ],
     )?;
@@ -7295,6 +7454,17 @@ pub fn query_invoices(conn: &Connection, q: &InvoiceQuery) -> AppResult<Vec<Invo
             "(seller_name LIKE ?{idx} OR buyer_name LIKE ?{idx} OR remark LIKE ?{idx})"
         ));
         params_vec.push(Box::new(pat));
+        idx += 1;
+    }
+    // 发票方向过滤（第十二阶段）：None=全部（兼容既有调用）
+    if let Some(d) = q
+        .direction
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        where_clauses.push(format!("IFNULL(direction, 'input') = ?{idx}"));
+        params_vec.push(Box::new(d.to_string()));
     }
 
     let sql = format!(
@@ -7312,7 +7482,7 @@ pub fn query_invoices(conn: &Connection, q: &InvoiceQuery) -> AppResult<Vec<Invo
 // ==================== 进项台账（第八阶段 Task 10，spec 9） ====================
 
 /// 台账月份入参校验（YYYY-MM），返回规整后的月份字符串
-fn validate_input_tax_ledger_month(value: &str, label: &str) -> AppResult<String> {
+pub fn validate_input_tax_ledger_month(value: &str, label: &str) -> AppResult<String> {
     let m = value.trim();
     chrono::NaiveDate::parse_from_str(&format!("{m}-01"), "%Y-%m-%d")
         .map_err(|_| AppError::InvalidParam(format!("{label}格式应为 YYYY-MM：{value}")))?;
@@ -7355,7 +7525,8 @@ pub fn get_input_tax_ledger(
                 i.expense_type_code, t.name, i.belong_month{claim_columns} \
          FROM invoices i \
          LEFT JOIN invoice_expense_types t ON t.code = i.expense_type_code \
-         WHERE i.status != 'void' AND i.belong_month BETWEEN ?1 AND ?2 \
+         WHERE i.status != 'void' AND IFNULL(i.direction, 'input') = 'input' \
+           AND i.belong_month BETWEEN ?1 AND ?2 \
          ORDER BY i.belong_month, i.issue_date, i.id"
     );
 
@@ -7590,6 +7761,12 @@ pub fn save_reimbursement_claim(
                 "发票ID={invoice_id}已作废，不能报销"
             )));
         }
+        // 门禁（第十二阶段）：销项发票属收入侧，不得混入费用报销流程
+        if invoice.direction.as_deref() == Some("output") {
+            return Err(AppError::InvalidParam(format!(
+                "发票ID={invoice_id}为销项发票，不能用于报销（报销仅限进项发票）"
+            )));
+        }
         if invoice.employee_id != Some(employee_id) {
             return Err(AppError::InvalidParam(format!(
                 "发票ID={invoice_id}的报销人与报销单不一致"
@@ -7803,6 +7980,132 @@ pub fn migrate_stage9_schema(conn: &Connection) -> AppResult<()> {
     })
 }
 
+/// vouchers source_type CHECK 扩展（第十二阶段）：加 'sales_invoice'（销项收入确认凭证）。
+/// 模式照搬 stage8 版：新库 DDL 已含该类型时跳过（幂等）、独立事务 + 原序复制 +
+/// 列清单防漂移 + foreign_key_check 兜底；孤儿数据让主迁移 FK 门统一报错回滚。
+fn rebuild_vouchers_source_type_check_stage12(conn: &Connection) -> AppResult<()> {
+    let create_sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='vouchers'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(None);
+    // 表不存在（最小测试库）或已是新定义时无需重建
+    let Some(sql) = create_sql else {
+        return Ok(());
+    };
+    if sql.contains("'sales_invoice'") {
+        return Ok(());
+    }
+    let orphan_count = count_fk_check_violations(conn)?;
+    if orphan_count > 0 {
+        return Ok(());
+    }
+    let fk_before: i64 = conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0))?;
+    conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
+    let result = run_migration_in_transaction(conn, |c| {
+        // 列清单必须与 create_tables 中 vouchers 定义一致；新增列时同步此处
+        c.execute_batch(
+            "
+            CREATE TABLE vouchers_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                voucher_no TEXT UNIQUE NOT NULL,
+                voucher_date TEXT NOT NULL,
+                belong_month TEXT NOT NULL,
+                source_type TEXT NOT NULL CHECK (source_type IN (
+                    'salary_accrual','salary_payment','reimbursement_accrual',
+                    'reimbursement_payment','invoice_expense','bank_manual','period_close',
+                    'fund_document','instrument','instrument_flow','cash_count','sales_invoice')),
+                source_id INTEGER NOT NULL,
+                total_amount REAL NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','void')),
+                remark TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            );
+            INSERT INTO vouchers_new
+                (id, voucher_no, voucher_date, belong_month, source_type, source_id,
+                 total_amount, status, remark, created_at, updated_at)
+            SELECT id, voucher_no, voucher_date, belong_month, source_type, source_id,
+                   total_amount, status, remark, created_at, updated_at
+            FROM vouchers ORDER BY id;
+            DROP TABLE vouchers;
+            ALTER TABLE vouchers_new RENAME TO vouchers;
+            CREATE INDEX IF NOT EXISTS idx_vouchers_month ON vouchers(belong_month, status);
+            CREATE INDEX IF NOT EXISTS idx_vouchers_source ON vouchers(source_type, source_id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_vouchers_source_active
+                ON vouchers(source_type, source_id) WHERE status = 'active';
+            ",
+        )?;
+        // 结构防漂移：重建后列清单必须与预期一致
+        assert_vouchers_columns(c)?;
+        // 外键兜底：关外键复制期间不允许引入悬空引用
+        let fk_errors = count_fk_check_violations(c)?;
+        if fk_errors > 0 {
+            return Err(AppError::General(format!(
+                "vouchers 表重建异常：发现 {fk_errors} 处外键悬空引用"
+            )));
+        }
+        Ok(())
+    });
+    if fk_before == 0 {
+        conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
+    } else {
+        conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+    }
+    result
+}
+
+/// 第十二阶段迁移：invoices 方向与客户关联列 + 应收核销表 + vouchers source_type 扩展。
+/// 存量行 direction 默认 'input'（进项），不自动改写（buyer=本公司的历史进项票
+/// 留人工确认，见 spec 第 5 节）。
+pub fn migrate_stage12_schema(conn: &Connection) -> AppResult<()> {
+    rebuild_vouchers_source_type_check_stage12(conn)?;
+    run_migration_in_transaction(conn, |c| {
+        ensure_column(c, "invoices", "direction", "TEXT NOT NULL DEFAULT 'input'")?;
+        ensure_column(
+            c,
+            "invoices",
+            "partner_id",
+            "INTEGER REFERENCES business_partners(id)",
+        )?;
+        c.execute_batch(
+            "CREATE TABLE IF NOT EXISTS ar_receipt_allocations (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              invoice_id INTEGER NOT NULL REFERENCES invoices(id),
+              receipt_id INTEGER NOT NULL REFERENCES fund_documents(id),
+              allocated_amount REAL NOT NULL CHECK (allocated_amount > 0),
+              status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','cancelled')),
+              remark TEXT,
+              created_by TEXT,
+              created_at TEXT NOT NULL,
+              cancelled_at TEXT,
+              cancel_reason TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_ar_alloc_invoice
+              ON ar_receipt_allocations(invoice_id) WHERE status='active';
+            CREATE INDEX IF NOT EXISTS idx_ar_alloc_receipt
+              ON ar_receipt_allocations(receipt_id) WHERE status='active';",
+        )?;
+        let exists: i64 = c.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='ar_receipt_allocations'",
+            [],
+            |r| r.get(0),
+        )?;
+        if exists == 0 {
+            return Err(AppError::General(
+                "第十二阶段迁移异常：表 ar_receipt_allocations 创建失败".into(),
+            ));
+        }
+        let fk_errors = count_fk_check_violations(c)?;
+        if fk_errors > 0 {
+            return Err(fk_gate_error("第十二阶段迁移", fk_errors, c));
+        }
+        Ok(())
+    })
+}
+
 #[cfg(test)]
 pub mod tests {
     use super::*;
@@ -7830,6 +8133,8 @@ pub mod tests {
                 status TEXT DEFAULT 'normal', remark TEXT,
                 image_path TEXT, raw_ocr_json TEXT,
                 image_encrypted INTEGER NOT NULL DEFAULT 0,
+                direction TEXT NOT NULL DEFAULT 'input',
+                partner_id INTEGER,
                 created_at TEXT, updated_at TEXT
             );
             CREATE UNIQUE INDEX idx_invoices_code_number ON invoices(COALESCE(invoice_code, ''), invoice_number) WHERE status != 'void';
@@ -7881,13 +8186,15 @@ pub mod tests {
             amount: Some(100.0),
             tax_amount: Some(6.0),
             total_amount: Some(106.0),
-            seller_name: Some("测试销售方".into()),
-            seller_tax_id: Some("91XXXX".into()),
-            buyer_name: Some("测试购买方".into()),
-            buyer_tax_id: Some("92XXXX".into()),
+            seller_name: Some("测试供应商".into()),
+            seller_tax_id: None,
+            buyer_name: Some("本公司".into()),
+            buyer_tax_id: None,
             expense_type_code: Some("office".into()),
-            employee_id: Some(1),
+            employee_id: None,
             belong_month: Some("2026-08".into()),
+            direction: None,
+            partner_id: None,
             remark: None,
             image_path: Some("/tmp/x.pdf".into()),
             raw_ocr_json: Some("{}".into()),
@@ -11325,6 +11632,8 @@ pub mod tests {
                 expense_type_code: Some("office".into()),
                 employee_id: Some(1),
                 belong_month: Some("2026-09".into()),
+                direction: None,
+                partner_id: None,
                 remark: None,
                 image_path: Some("/tmp/cross.pdf".into()),
                 raw_ocr_json: Some("{}".into()),

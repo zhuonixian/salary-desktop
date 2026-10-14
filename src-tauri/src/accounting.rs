@@ -1056,20 +1056,46 @@ pub fn maybe_generate_invoice_expense_voucher(
     conn: &Connection,
     invoice_id: i64,
 ) -> AppResult<Option<Voucher>> {
-    let (belong_month, amount, tax, total, type_code, status): (
+    let (belong_month, amount, tax, total, type_code, status, direction, buyer): (
         Option<String>,
         f64,
         f64,
         f64,
         Option<String>,
         String,
+        String,
+        Option<String>,
     ) = conn.query_row(
-        "SELECT belong_month, amount, tax_amount, total_amount, expense_type_code, status FROM invoices WHERE id = ?1",
+        "SELECT belong_month, amount, tax_amount, total_amount, expense_type_code, status, \
+                IFNULL(direction, 'input'), buyer_name FROM invoices WHERE id = ?1",
         params![invoice_id],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+        |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+            ))
+        },
     )?;
     if status != "normal" {
         return Ok(None);
+    }
+    // 第十二阶段：销项发票分派到收入确认凭证（借应收/贷收入+销项税），不走费用口径
+    if direction == "output" {
+        return maybe_generate_sales_invoice_voucher(
+            conn,
+            invoice_id,
+            &belong_month,
+            amount,
+            tax,
+            total,
+            buyer.as_deref(),
+        );
     }
     if !table_exists(conn, "vouchers") {
         return Ok(None);
@@ -1154,8 +1180,87 @@ pub fn void_reimbursement_accrual_voucher(conn: &Connection, claim_id: i64) -> A
 }
 
 /// 作废某发票的费用入账凭证，返回作废条数。
+/// 第十二阶段起同时作废销项收入凭证（两 source_type 互斥，void 幂等）。
 pub fn void_invoice_expense_voucher(conn: &Connection, invoice_id: i64) -> AppResult<usize> {
-    void_vouchers_for_source(conn, "invoice_expense", invoice_id)
+    let n = void_vouchers_for_source(conn, "invoice_expense", invoice_id)?;
+    let m = void_vouchers_for_source(conn, "sales_invoice", invoice_id)?;
+    Ok(n + m)
+}
+
+/// 销项发票收入确认凭证（第十二阶段 spec 4.1）：
+/// 借 1122 应收账款（价税合计）/ 贷 6001 主营业务收入（不含税）/ 贷 2221 应交税费（销项税额）。
+/// 金额全部取票面，无需税率配置；与费用口径同门禁：status=normal、金额合计为正、
+/// 借贷平衡校验、无 active 重复凭证。
+fn maybe_generate_sales_invoice_voucher(
+    conn: &Connection,
+    invoice_id: i64,
+    belong_month: &Option<String>,
+    amount: f64,
+    tax: f64,
+    total: f64,
+    buyer: Option<&str>,
+) -> AppResult<Option<Voucher>> {
+    if !table_exists(conn, "vouchers") {
+        return Ok(None);
+    }
+    if amount + tax <= 0.0 {
+        return Ok(None);
+    }
+    if (amount + tax - total).abs() > 0.005 {
+        return Ok(None);
+    }
+    let belong_month = match belong_month {
+        Some(m) if !m.trim().is_empty() => m,
+        _ => return Ok(None),
+    };
+    let exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM vouchers WHERE source_type='sales_invoice' AND source_id=?1 AND status='active'",
+        params![invoice_id],
+        |r| r.get(0),
+    )?;
+    if exists > 0 {
+        return Ok(None);
+    }
+    let customer = buyer.unwrap_or("").trim();
+    let mut lines = vec![VoucherLineDraft {
+        account_code: "1122".into(),
+        debit_amount: total,
+        credit_amount: 0.0,
+        summary: Some(if customer.is_empty() {
+            format!("{belong_month} 销项开票（应收）")
+        } else {
+            format!("{belong_month} 销项开票 {customer}（应收）")
+        }),
+        fund_account_id: None,
+    }];
+    lines.push(VoucherLineDraft {
+        account_code: "6001".into(),
+        debit_amount: 0.0,
+        credit_amount: amount,
+        summary: Some("主营业务收入".into()),
+        fund_account_id: None,
+    });
+    if tax > 0.0 {
+        lines.push(VoucherLineDraft {
+            account_code: "2221".into(),
+            debit_amount: 0.0,
+            credit_amount: tax,
+            summary: Some("销项税额".into()),
+            fund_account_id: None,
+        });
+    }
+    let voucher = insert_voucher(
+        conn,
+        &VoucherDraft {
+            belong_month: belong_month.clone(),
+            voucher_date: format!("{belong_month}-28"),
+            source_type: "sales_invoice".into(),
+            source_id: invoice_id,
+            remark: Some("销项发票收入确认".into()),
+            lines,
+        },
+    )?;
+    Ok(Some(voucher))
 }
 
 /// 测试环境（invoice.rs/db.rs 的最小 schema）可能没有 vouchers 表，此时跳过凭证生成。
@@ -3201,6 +3306,8 @@ mod tests {
                 expense_type_code: Some("office".into()),
                 employee_id: Some(1),
                 belong_month: Some("2026-08".into()),
+                direction: None,
+                partner_id: None,
                 remark: None,
                 image_path: None,
                 raw_ocr_json: None,
@@ -3363,6 +3470,8 @@ mod tests {
                 expense_type_code: None,
                 employee_id: None,
                 belong_month: None,
+                direction: None,
+                partner_id: None,
                 remark: None,
                 image_path: None,
                 raw_ocr_json: None,
@@ -3413,6 +3522,8 @@ mod tests {
                 expense_type_code: None,
                 employee_id: None,
                 belong_month: None,
+                direction: None,
+                partner_id: None,
                 remark: None,
                 image_path: None,
                 raw_ocr_json: None,
@@ -3535,6 +3646,8 @@ mod tests {
                 expense_type_code: Some("office".into()),
                 employee_id: Some(1),
                 belong_month: Some("2026-08".into()),
+                direction: None,
+                partner_id: None,
                 remark: None,
                 image_path: None,
                 raw_ocr_json: None,

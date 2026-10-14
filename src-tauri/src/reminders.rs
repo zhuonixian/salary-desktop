@@ -108,6 +108,7 @@ fn collect_due_items(
                     "instrument_due",
                     format!("票据 {} 将于 {} 到期", r.title, r.due_date),
                 ),
+                "ar_overdue" => ("ar_overdue", format!("应收 {}，请跟进回款核销", r.title)),
                 _ => (
                     "payable_stuck",
                     format!("滞留应付 {} 已滞留 {} 天", r.title, r.days_left),
@@ -115,6 +116,8 @@ fn collect_due_items(
             };
             let level = if r.category == "payable_stuck" {
                 "info"
+            } else if r.category == "ar_overdue" {
+                "overdue"
             } else {
                 level_for_days_left(r.days_left)
             };

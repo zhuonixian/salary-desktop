@@ -785,6 +785,8 @@ mod business_tests {
                 status TEXT DEFAULT 'normal', remark TEXT,
                 image_path TEXT, raw_ocr_json TEXT,
                 image_encrypted INTEGER NOT NULL DEFAULT 0,
+                direction TEXT NOT NULL DEFAULT 'input',
+                partner_id INTEGER,
                 created_at TEXT, updated_at TEXT
             );
             CREATE UNIQUE INDEX idx_invoices_code_number ON invoices(COALESCE(invoice_code, ''), invoice_number) WHERE status != 'void';
@@ -836,8 +838,10 @@ mod business_tests {
             buyer_name: Some("购买方".into()),
             buyer_tax_id: Some("92X".into()),
             expense_type_code: Some("office".into()),
-            employee_id: Some(1),
+            employee_id: None,
             belong_month: Some("2026-08".into()),
+            direction: None,
+            partner_id: None,
             remark: None,
             image_path: None,
             raw_ocr_json: Some("{}".into()),

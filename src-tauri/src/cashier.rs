@@ -11214,6 +11214,8 @@ mod tests {
                 expense_type_code: Some("office".into()),
                 employee_id: Some(1),
                 belong_month: Some("2026-08".into()),
+                direction: None,
+                partner_id: None,
                 remark: None,
                 image_path: None,
                 raw_ocr_json: None,

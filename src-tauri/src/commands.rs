@@ -4009,6 +4009,95 @@ pub fn undo_tax_filing(
     Ok(removed)
 }
 
+// ==================== AR Receivable（第十二阶段 收入侧闭环） ====================
+
+#[tauri::command]
+pub fn get_ar_ledger(
+    query: crate::models::ArLedgerQuery,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<crate::models::ArLedgerRow>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(crate::ar::get_ar_ledger(&conn, &query)?)
+}
+
+#[tauri::command]
+pub fn get_ar_allocations(
+    invoice_id: Option<i64>,
+    receipt_id: Option<i64>,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<crate::models::ArReceiptAllocation>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(crate::ar::get_ar_allocations(
+        &conn, invoice_id, receipt_id,
+    )?)
+}
+
+#[tauri::command]
+pub fn create_ar_allocation(
+    data: crate::models::ArAllocationInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<crate::models::ArReceiptAllocation, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(crate::ar::create_ar_allocation(
+        &conn,
+        current.inner(),
+        &data,
+    )?)
+}
+
+#[tauri::command]
+pub fn cancel_ar_allocation(
+    data: crate::models::ArAllocationCancelInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<bool, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(crate::ar::cancel_ar_allocation(
+        &conn,
+        current.inner(),
+        &data,
+    )?)
+}
+
+#[tauri::command]
+pub fn export_ar_aging_report(
+    query: crate::models::ArLedgerQuery,
+    path: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<String, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let rows = crate::ar::get_ar_ledger(&conn, &query)?;
+    excel::export_ar_aging_report(&rows, &path)?;
+    db::log_operation(
+        &conn,
+        "export_ar_aging_report",
+        &format!("导出应收账龄表到{path}（{} 行）", rows.len()),
+        "system",
+        None,
+    )?;
+    Ok(path)
+}
+
+#[tauri::command]
+pub fn export_output_tax_ledger(
+    from_month: String,
+    to_month: String,
+    path: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<String, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    excel::export_output_tax_ledger(&conn, &from_month, &to_month, &path)?;
+    db::log_operation(
+        &conn,
+        "export_output_tax_ledger",
+        &format!("导出{from_month}~{to_month}销项台账到{path}"),
+        "system",
+        None,
+    )?;
+    Ok(path)
+}
+
 // ==================== Reminders（第十一阶段 提醒触达） ====================
 
 #[tauri::command]

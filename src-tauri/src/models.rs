@@ -241,6 +241,8 @@ pub const REMINDER_CATEGORY_INSTRUMENT_DUE: &str = "instrument_due";
 /// 提醒类别：滞留应付（已审批未付款报销单 + 已审批未结算 payment 类资金单，滞留 ≥ N 天）
 #[allow(dead_code)]
 pub const REMINDER_CATEGORY_PAYABLE_STUCK: &str = "payable_stuck";
+/// 提醒类别：应收账龄（销项发票未核销余额账龄 > 90 天，第十二阶段）
+pub const REMINDER_CATEGORY_AR_OVERDUE: &str = "ar_overdue";
 
 /// 账期提醒条目（仪表盘提醒卡，只读查询 `get_dashboard_reminders` 返回）
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -993,6 +995,12 @@ pub struct Invoice {
     pub remark: Option<String>,
     pub image_path: Option<String>,
     pub raw_ocr_json: Option<String>,
+    /// 发票方向：input 进项（默认）/ output 销项（第十二阶段）
+    #[serde(default)]
+    pub direction: Option<String>,
+    /// 销项客户关联（business_partners.id，可空=手工登记未挂客户）
+    #[serde(default)]
+    pub partner_id: Option<i64>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
 }
@@ -1014,6 +1022,10 @@ pub struct InvoiceInput {
     pub expense_type_code: Option<String>,
     pub employee_id: Option<i64>,
     pub belong_month: Option<String>,
+    /// 发票方向：'input'（默认）/ 'output' 销项；仅创建时生效，更新不可改
+    pub direction: Option<String>,
+    /// 销项客户关联（可空）
+    pub partner_id: Option<i64>,
     pub remark: Option<String>,
     pub image_path: Option<String>,
     pub raw_ocr_json: Option<String>,
@@ -1047,6 +1059,9 @@ pub struct InvoiceQuery {
     pub invoice_type: Option<String>,
     pub keyword: Option<String>,
     pub status: Option<String>,
+    /// 发票方向过滤：None=全部（兼容既有调用），'input'/'output'（第十二阶段）
+    #[serde(default)]
+    pub direction: Option<String>,
 }
 
 // ==================== Input Tax Ledger（第八阶段 Task 10，spec 9） ====================
@@ -2340,4 +2355,91 @@ pub struct CompanyInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaxCalendarSettings {
     pub enabled_kinds: Vec<String>,
+}
+
+// ==================== AR Receivable（第十二阶段 收入侧闭环） ====================
+
+/// 应收核销分摊行（ar_receipt_allocations）：收款单 ↔ 销项发票
+#[derive(Debug, Clone, Serialize)]
+pub struct ArReceiptAllocation {
+    pub id: i64,
+    pub invoice_id: i64,
+    pub receipt_id: i64,
+    pub allocated_amount: f64,
+    pub status: String,
+    pub remark: Option<String>,
+    pub created_by: Option<String>,
+    pub created_at: String,
+    pub cancelled_at: Option<String>,
+    pub cancel_reason: Option<String>,
+    /// 联查：收款单号 / 结算日期 / 摘要（核销工作台展示）
+    pub receipt_document_no: Option<String>,
+    pub receipt_settled_at: Option<String>,
+    pub receipt_summary: Option<String>,
+}
+
+/// 核销创建入参
+#[derive(Debug, Clone, Deserialize)]
+pub struct ArAllocationInput {
+    pub receipt_id: i64,
+    pub invoice_id: i64,
+    pub amount: f64,
+    pub remark: Option<String>,
+}
+
+/// 取消核销入参（原因必填）
+#[derive(Debug, Clone, Deserialize)]
+pub struct ArAllocationCancelInput {
+    pub id: i64,
+    pub reason: String,
+}
+
+/// 应收台账行：销项发票维度聚合核销进度与账龄
+#[derive(Debug, Clone, Serialize)]
+pub struct ArLedgerRow {
+    pub invoice_id: i64,
+    pub invoice_code: Option<String>,
+    pub invoice_number: Option<String>,
+    pub issue_date: Option<String>,
+    pub belong_month: Option<String>,
+    pub buyer_name: Option<String>,
+    pub partner_id: Option<i64>,
+    /// 关联客户名（挂了 partner 时回填，否则同 buyer_name）
+    pub partner_name: Option<String>,
+    pub amount: f64,
+    pub tax_amount: f64,
+    pub total_amount: f64,
+    /// active 核销合计
+    pub settled_amount: f64,
+    /// 未核销余额（total − settled，保留 2 位）
+    pub outstanding_amount: f64,
+    /// 未核销 / 部分核销 / 已核清
+    pub status: String,
+    /// 开票日（缺省取归属月 1 日）至基准日天数
+    pub aging_days: i64,
+    /// 账龄分桶：0-30 / 31-60 / 61-90 / 91-180 / 180+
+    pub aging_bucket: String,
+}
+
+/// 应收台账查询条件
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ArLedgerQuery {
+    pub partner_id: Option<i64>,
+    pub keyword: Option<String>,
+    /// 仅看未核清
+    pub only_outstanding: Option<bool>,
+    /// 账龄基准日（YYYY-MM-DD，缺省今天；导出与测试可固定）
+    pub as_of_date: Option<String>,
+}
+
+/// 应收账龄汇总（客户 × 分桶矩阵，导出用）
+#[derive(Debug, Clone, Serialize)]
+pub struct ArAgingSummaryRow {
+    pub partner_key: String,
+    pub bucket_0_30: f64,
+    pub bucket_31_60: f64,
+    pub bucket_61_90: f64,
+    pub bucket_91_180: f64,
+    pub bucket_180_plus: f64,
+    pub total_outstanding: f64,
 }

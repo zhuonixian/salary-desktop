@@ -4385,3 +4385,252 @@ mod tests {
         let _ = std::fs::remove_file(path2);
     }
 }
+
+// ==================== AR Receivable（第十二阶段 收入侧闭环导出） ====================
+
+/// 应收账龄表：客户 × 分桶矩阵（未核销余额），行来自 get_ar_ledger 结果。
+/// 基准日在查询条件里指定（缺省今天），表头回显 rows 首行的账龄基准。
+pub fn export_ar_aging_report(rows: &[crate::models::ArLedgerRow], path: &str) -> AppResult<()> {
+    let summary = crate::ar::ar_aging_summary(rows);
+
+    let mut workbook = Workbook::new();
+    let sheet = workbook.add_worksheet();
+    sheet.set_name("应收账龄表")?;
+    let title = Format::new().set_bold().set_font_size(14);
+    let header = Format::new()
+        .set_bold()
+        .set_border(rust_xlsxwriter::FormatBorder::Thin);
+    let money = Format::new()
+        .set_border(rust_xlsxwriter::FormatBorder::Thin)
+        .set_num_format("#,##0.00");
+    let cell = Format::new().set_border(rust_xlsxwriter::FormatBorder::Thin);
+
+    sheet.merge_range(
+        0,
+        0,
+        0,
+        6,
+        &format!(
+            "应收账款账龄表（共 {} 个客户，未核销余额分桶）",
+            summary.len()
+        ),
+        &title,
+    )?;
+    let headers = [
+        "客户",
+        "0-30 天",
+        "31-60 天",
+        "61-90 天",
+        "91-180 天",
+        "180 天以上",
+        "未核销合计",
+    ];
+    for (i, h) in headers.iter().enumerate() {
+        sheet.write_with_format(1, i as u16, *h, &header)?;
+    }
+    let mut row_idx = 2u32;
+    for r in &summary {
+        sheet.write_with_format(row_idx, 0, &r.partner_key, &cell)?;
+        sheet.write_number_with_format(row_idx, 1, r.bucket_0_30, &money)?;
+        sheet.write_number_with_format(row_idx, 2, r.bucket_31_60, &money)?;
+        sheet.write_number_with_format(row_idx, 3, r.bucket_61_90, &money)?;
+        sheet.write_number_with_format(row_idx, 4, r.bucket_91_180, &money)?;
+        sheet.write_number_with_format(row_idx, 5, r.bucket_180_plus, &money)?;
+        sheet.write_number_with_format(row_idx, 6, r.total_outstanding, &money)?;
+        row_idx += 1;
+    }
+    // 合计行
+    if !summary.is_empty() {
+        sheet.write_with_format(row_idx, 0, "合计", &header)?;
+        let sum = |f: fn(&crate::models::ArAgingSummaryRow) -> f64| -> f64 {
+            summary.iter().map(f).sum()
+        };
+        sheet.write_number_with_format(row_idx, 1, sum(|r| r.bucket_0_30), &money)?;
+        sheet.write_number_with_format(row_idx, 2, sum(|r| r.bucket_31_60), &money)?;
+        sheet.write_number_with_format(row_idx, 3, sum(|r| r.bucket_61_90), &money)?;
+        sheet.write_number_with_format(row_idx, 4, sum(|r| r.bucket_91_180), &money)?;
+        sheet.write_number_with_format(row_idx, 5, sum(|r| r.bucket_180_plus), &money)?;
+        sheet.write_number_with_format(row_idx, 6, sum(|r| r.total_outstanding), &money)?;
+    }
+    sheet.set_column_width(0, 28)?;
+    for c in 1..=6u16 {
+        sheet.set_column_width(c, 14)?;
+    }
+    workbook.save(path)?;
+    Ok(())
+}
+
+/// 销项发票台账：区间 + 月度小计（镜像进项台账列结构，方向=销项）。
+pub fn export_output_tax_ledger(
+    conn: &rusqlite::Connection,
+    from_month: &str,
+    to_month: &str,
+    path: &str,
+) -> AppResult<()> {
+    use rusqlite::params;
+
+    let from = crate::db::validate_input_tax_ledger_month(from_month, "起始月份")?;
+    let to = crate::db::validate_input_tax_ledger_month(to_month, "结束月份")?;
+    if from > to {
+        return Err(AppError::InvalidParam(format!(
+            "起始月份 {from} 不能晚于结束月份 {to}"
+        )));
+    }
+
+    #[derive(Debug)]
+    struct OutputRow {
+        belong_month: String,
+        invoice_code: Option<String>,
+        invoice_number: Option<String>,
+        issue_date: Option<String>,
+        buyer_name: Option<String>,
+        buyer_tax_id: Option<String>,
+        amount: f64,
+        tax_amount: f64,
+        total_amount: f64,
+        settled: f64,
+        outstanding: f64,
+    }
+    let mut stmt = conn.prepare(
+        "SELECT IFNULL(i.belong_month, '-'), i.invoice_code, i.invoice_number, i.issue_date, \
+                i.buyer_name, i.buyer_tax_id, i.amount, i.tax_amount, i.total_amount, \
+                (SELECT COALESCE(SUM(a.allocated_amount), 0) FROM ar_receipt_allocations a \
+                 WHERE a.invoice_id = i.id AND a.status = 'active')
+         FROM invoices i
+         WHERE i.status != 'void' AND IFNULL(i.direction, 'input') = 'output'
+           AND i.belong_month BETWEEN ?1 AND ?2
+         ORDER BY i.belong_month, i.issue_date, i.id",
+    )?;
+    let rows = stmt
+        .query_map(params![from, to], |row| {
+            let total: f64 = row.get(8)?;
+            let settled: f64 = row.get(9)?;
+            Ok(OutputRow {
+                belong_month: row.get(0)?,
+                invoice_code: row.get(1)?,
+                invoice_number: row.get(2)?,
+                issue_date: row.get(3)?,
+                buyer_name: row.get(4)?,
+                buyer_tax_id: row.get(5)?,
+                amount: row.get(6)?,
+                tax_amount: row.get(7)?,
+                total_amount: total,
+                settled,
+                outstanding: (total - settled).max(0.0),
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    if rows.is_empty() {
+        return Err(AppError::InvalidParam(format!(
+            "{from} 至 {to} 无销项发票数据，无法导出销项台账"
+        )));
+    }
+
+    let mut workbook = Workbook::new();
+    let sheet = workbook.add_worksheet();
+    sheet.set_name("销项台账")?;
+    let title = Format::new().set_bold().set_font_size(14);
+    let header = Format::new()
+        .set_bold()
+        .set_border(rust_xlsxwriter::FormatBorder::Thin);
+    let money = Format::new()
+        .set_border(rust_xlsxwriter::FormatBorder::Thin)
+        .set_num_format("#,##0.00");
+    let cell = Format::new().set_border(rust_xlsxwriter::FormatBorder::Thin);
+    let subtotal = Format::new()
+        .set_bold()
+        .set_border(rust_xlsxwriter::FormatBorder::Thin)
+        .set_num_format("#,##0.00");
+
+    sheet.merge_range(
+        0,
+        0,
+        0,
+        11,
+        &format!("销项发票台账（{} 至 {}，共 {} 张）", from, to, rows.len()),
+        &title,
+    )?;
+    let headers = [
+        "所属月份",
+        "发票代码",
+        "发票号码",
+        "开票日期",
+        "购方名称",
+        "购方税号",
+        "不含税金额",
+        "税额",
+        "价税合计",
+        "已核销金额",
+        "未核销余额",
+        "关联客户",
+    ];
+    for (i, h) in headers.iter().enumerate() {
+        sheet.write_with_format(1, i as u16, *h, &header)?;
+    }
+
+    let mut row_idx = 2u32;
+    let mut i = 0usize;
+    let mut month_totals: Vec<(String, f64, f64, f64, f64)> = Vec::new();
+    while i < rows.len() {
+        let month = rows[i].belong_month.clone();
+        let start = row_idx;
+        let (mut amt, mut tax, mut tot, mut out) = (0.0, 0.0, 0.0, 0.0);
+        while i < rows.len() && rows[i].belong_month == month {
+            let r = &rows[i];
+            let partner: Option<String> = conn
+                .query_row(
+                    "SELECT COALESCE(b.name, i.buyer_name) FROM invoices i \
+                     LEFT JOIN business_partners b ON b.id = i.partner_id WHERE i.id = \
+                     (SELECT id FROM invoices WHERE invoice_number IS ?1 LIMIT 1)",
+                    params![r.invoice_number],
+                    |row| row.get(0),
+                )
+                .unwrap_or_else(|_| r.buyer_name.clone());
+            sheet.write_with_format(row_idx, 0, &r.belong_month, &cell)?;
+            sheet.write_with_format(row_idx, 1, r.invoice_code.as_deref().unwrap_or("-"), &cell)?;
+            sheet.write_with_format(
+                row_idx,
+                2,
+                r.invoice_number.as_deref().unwrap_or("-"),
+                &cell,
+            )?;
+            sheet.write_with_format(row_idx, 3, r.issue_date.as_deref().unwrap_or("-"), &cell)?;
+            sheet.write_with_format(row_idx, 4, r.buyer_name.as_deref().unwrap_or("-"), &cell)?;
+            sheet.write_with_format(row_idx, 5, r.buyer_tax_id.as_deref().unwrap_or("-"), &cell)?;
+            sheet.write_number_with_format(row_idx, 6, r.amount, &money)?;
+            sheet.write_number_with_format(row_idx, 7, r.tax_amount, &money)?;
+            sheet.write_number_with_format(row_idx, 8, r.total_amount, &money)?;
+            sheet.write_number_with_format(row_idx, 9, r.settled, &money)?;
+            sheet.write_number_with_format(row_idx, 10, r.outstanding, &money)?;
+            sheet.write_with_format(row_idx, 11, partner.as_deref().unwrap_or("-"), &cell)?;
+            amt += r.amount;
+            tax += r.tax_amount;
+            tot += r.total_amount;
+            out += r.outstanding;
+            row_idx += 1;
+            i += 1;
+        }
+        // 月度小计行
+        sheet.write_with_format(row_idx, 0, format!("{month} 小计"), &header)?;
+        sheet.write_with_format(row_idx, 6, amt, &subtotal)?;
+        sheet.write_with_format(row_idx, 7, tax, &subtotal)?;
+        sheet.write_with_format(row_idx, 8, tot, &subtotal)?;
+        sheet.write_with_format(row_idx, 10, out, &subtotal)?;
+        month_totals.push((month, amt, tax, tot, out));
+        row_idx += 1;
+        let _ = start;
+    }
+
+    sheet.set_column_width(0, 10)?;
+    sheet.set_column_width(1, 12)?;
+    sheet.set_column_width(2, 16)?;
+    sheet.set_column_width(3, 12)?;
+    sheet.set_column_width(4, 26)?;
+    sheet.set_column_width(5, 18)?;
+    for c in 6..=10u16 {
+        sheet.set_column_width(c, 13)?;
+    }
+    sheet.set_column_width(11, 26)?;
+    workbook.save(path)?;
+    Ok(())
+}
