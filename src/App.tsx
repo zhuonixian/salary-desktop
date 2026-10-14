@@ -64,6 +64,7 @@ import FundAccounts from '@/pages/FundAccounts';
 import FundDocuments from '@/pages/FundDocuments';
 import FundJournals from '@/pages/FundJournals';
 import Advances from '@/pages/Advances';
+import ARReceivables from '@/pages/ARReceivables';
 import NotesInstruments from '@/pages/NotesInstruments';
 import CashCount from '@/pages/CashCount';
 import NotificationSettings from '@/pages/NotificationSettings';
@@ -132,6 +133,7 @@ const menuItems: MenuProps['items'] = [
       { key: '/bank-transactions', label: '银行对账', icon: <TransactionOutlined /> },
       { key: '/fund-journals', label: '资金日记账', icon: <ProfileOutlined /> },
       { key: '/advances', label: '借款备用金', icon: <PayCircleOutlined /> },
+      { key: '/ar-ledger', label: '应收台账', icon: <AuditOutlined /> },
       { key: '/notes-instruments', label: '票据台账', icon: <AuditOutlined /> },
       { key: '/cash-count', label: '现金盘点', icon: <AccountBookOutlined /> },
     ],
@@ -382,6 +384,7 @@ const AppLayout: React.FC = () => {
               <Route path="/fund-documents" element={<FundDocuments />} />
               <Route path="/fund-journals" element={<FundJournals />} />
               <Route path="/advances" element={<Advances />} />
+              <Route path="/ar-ledger" element={<ARReceivables />} />
               <Route path="/notes-instruments" element={<NotesInstruments />} />
               <Route path="/cash-count" element={<CashCount />} />
               <Route path="/accounts" element={<ChartOfAccounts />} />

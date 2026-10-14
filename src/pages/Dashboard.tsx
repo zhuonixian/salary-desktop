@@ -86,20 +86,26 @@ const reminderGroups: { category: ReminderCategory; label: string }[] = [
   { category: 'advance_due', label: '借款到期' },
   { category: 'instrument_due', label: '票据到期' },
   { category: 'payable_stuck', label: '滞留应付' },
+  { category: 'ar_overdue', label: '应收账龄' },
 ];
 
 const reminderRoute: Record<ReminderCategory, string> = {
   advance_due: '/advances',
   instrument_due: '/notes-instruments',
   payable_stuck: '/reimbursements',
+  ar_overdue: '/ar-ledger',
 };
 
-// 借款/票据：逾期红、当天与临近橙；滞留应付：滞留即橙、满 30 天升级红
+// 借款/票据：逾期红、当天与临近橙；滞留应付：滞留即橙、满 30 天升级红；
+// 应收账龄：仅账龄超阈值（>90 天）的销项未核销才提醒，红色
 const reminderBadge = (item: ReminderItem): { color: string; text: string } => {
   if (item.category === 'payable_stuck') {
     return item.days_left >= 30
       ? { color: 'red', text: `滞留 ${item.days_left} 天` }
       : { color: 'gold', text: `滞留 ${item.days_left} 天` };
+  }
+  if (item.category === 'ar_overdue') {
+    return { color: 'red', text: `账龄 ${item.days_left} 天` };
   }
   if (item.days_left < 0) return { color: 'red', text: `逾期 ${-item.days_left} 天` };
   if (item.days_left === 0) return { color: 'gold', text: '今日到期' };

@@ -235,10 +235,14 @@ export interface DashboardSummary {
 
 // ==================== 账期提醒（第八阶段 Task 4）====================
 
-export type ReminderCategory = 'advance_due' | 'instrument_due' | 'payable_stuck';
+export type ReminderCategory =
+  | 'advance_due'
+  | 'instrument_due'
+  | 'payable_stuck'
+  | 'ar_overdue';
 
 export interface ReminderItem {
-  /** 类别：借款到期 / 票据到期 / 滞留应付 */
+  /** 类别：借款到期 / 票据到期 / 滞留应付 / 应收账龄 */
   category: ReminderCategory;
   /** 展示标题 */
   title: string;
@@ -1019,6 +1023,10 @@ export interface Invoice {
   seller_tax_id?: string;
   buyer_name?: string;
   buyer_tax_id?: string;
+  /** 发票方向：input 进项 / output 销项（历史数据缺省按进项口径） */
+  direction?: string | null;
+  /** 关联往来单位（销项=客户 / 进项=供应商，可空） */
+  partner_id?: number | null;
   expense_type_code?: string;
   employee_id?: number;
   belong_month?: string;
@@ -1043,6 +1051,10 @@ export interface InvoiceInput {
   seller_tax_id?: string;
   buyer_name?: string;
   buyer_tax_id?: string;
+  /** 发票方向：input 进项 / output 销项（仅创建生效，更新不可改） */
+  direction?: string;
+  /** 关联往来单位 id（可空） */
+  partner_id?: number | null;
   expense_type_code?: string;
   employee_id?: number;
   belong_month?: string;
@@ -1077,6 +1089,8 @@ export interface InvoiceQuery {
   invoice_type?: string;
   keyword?: string;
   status?: InvoiceStatus;
+  /** 发票方向：input 进项 / output 销项 */
+  direction?: 'input' | 'output';
 }
 
 // ==================== 报销相关 ====================
@@ -1731,6 +1745,103 @@ export const SETTLEMENT_MODE_LABEL: Record<string, string> = {
   reimburse_offset: '报销抵扣',
   salary_deduct: '工资扣回',
   other: '其他核销',
+};
+
+// ==================== 应收台账与回款核销（第十二阶段，spec 4.2/4.3） ====================
+
+/** 应收核销分摊行：已结算收款单 ↔ 销项发票（后端 ArReceiptAllocation） */
+export interface ArReceiptAllocation {
+  id: number;
+  invoice_id: number;
+  receipt_id: number;
+  allocated_amount: number;
+  status: string;
+  remark: string | null;
+  created_by: string | null;
+  created_at: string;
+  cancelled_at: string | null;
+  cancel_reason: string | null;
+  /** 联查：收款单号 / 结算日期 / 摘要 */
+  receipt_document_no: string | null;
+  receipt_settled_at: string | null;
+  receipt_summary: string | null;
+}
+
+/** 应收核销创建入参 */
+export interface ArAllocationInput {
+  receipt_id: number;
+  invoice_id: number;
+  amount: number;
+  remark?: string | null;
+}
+
+/** 取消应收核销入参（原因必填） */
+export interface ArAllocationCancelInput {
+  id: number;
+  reason: string;
+}
+
+/** 应收台账查询条件（后端 ArLedgerQuery） */
+export interface ArLedgerQuery {
+  partner_id?: number;
+  keyword?: string;
+  /** 仅看未核清 */
+  only_outstanding?: boolean;
+  /** 账龄基准日（YYYY-MM-DD，缺省今天） */
+  as_of_date?: string;
+}
+
+/** 应收台账行：销项发票维度聚合核销进度与账龄 */
+export interface ArLedgerRow {
+  invoice_id: number;
+  invoice_code: string | null;
+  invoice_number: string | null;
+  issue_date: string | null;
+  belong_month: string | null;
+  buyer_name: string | null;
+  partner_id: number | null;
+  /** 关联客户名（挂 partner 时回填，否则同 buyer_name） */
+  partner_name: string | null;
+  amount: number;
+  tax_amount: number;
+  total_amount: number;
+  /** active 核销合计 */
+  settled_amount: number;
+  /** 未核销余额（total − settled） */
+  outstanding_amount: number;
+  /** 未核销 / 部分核销 / 已核清 */
+  status: string;
+  /** 开票日（缺省取归属月 1 日）至基准日天数 */
+  aging_days: number;
+  /** 账龄分桶：0-30 / 31-60 / 61-90 / 91-180 / 180+ */
+  aging_bucket: string;
+}
+
+/** 应收账龄汇总（客户 × 分桶矩阵口径） */
+export interface ArAgingSummaryRow {
+  partner_key: string;
+  bucket_0_30: number;
+  bucket_31_60: number;
+  bucket_61_90: number;
+  bucket_91_180: number;
+  bucket_180_plus: number;
+  total_outstanding: number;
+}
+
+/** 账龄分桶展示顺序与标题（汇总卡/表格 Tag 共用） */
+export const AR_AGING_BUCKETS: { key: string; label: string; color: string }[] = [
+  { key: '0-30', label: '0-30天', color: 'green' },
+  { key: '31-60', label: '31-60天', color: 'cyan' },
+  { key: '61-90', label: '61-90天', color: 'gold' },
+  { key: '91-180', label: '91-180天', color: 'orange' },
+  { key: '180+', label: '180天以上', color: 'red' },
+];
+
+/** 应收核销状态 Tag 颜色（状态值为后端中文枚举） */
+export const AR_STATUS_COLOR: Record<string, string> = {
+  未核销: 'default',
+  部分核销: 'processing',
+  已核清: 'success',
 };
 
 export interface FundDocumentQuery {

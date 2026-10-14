@@ -110,6 +110,11 @@ import type {
   AdvanceLedgerRow,
   AdvanceLinkCancelInput,
   AdvanceSettlementLink,
+  ArLedgerQuery,
+  ArLedgerRow,
+  ArReceiptAllocation,
+  ArAllocationInput,
+  ArAllocationCancelInput,
   FundDocumentDetail,
   FundDocumentReverseInput,
   NegotiableInstrument,
@@ -916,6 +921,84 @@ const mockInstrumentEndorsements: InstrumentEndorsement[] = [
     voucher_id: 9001,
     created_by: '张会计',
     created_at: new Date().toISOString(),
+  },
+];
+
+// ==================== 应收台账预览数据（第十二阶段） ====================
+// 三张不同账龄的销项发票（未核销/部分核销/已核清各一）+ 一条历史核销；
+// settled/账龄在 get_ar_ledger 分支里按核销记录与基准日实时重算。
+const mockArInvoices: ArLedgerRow[] = [
+  {
+    invoice_id: 101,
+    invoice_code: null,
+    invoice_number: 'XS2441000051',
+    issue_date: mockMonthDate(0, 8),
+    belong_month: mockCurrentMonth(),
+    buyer_name: '北京宏远科技有限公司',
+    partner_id: 1,
+    partner_name: '北京宏远科技有限公司',
+    amount: 8000,
+    tax_amount: 1040,
+    total_amount: 9040,
+    settled_amount: 0,
+    outstanding_amount: 9040,
+    status: '未核销',
+    aging_days: 0,
+    aging_bucket: '0-30',
+  },
+  {
+    invoice_id: 102,
+    invoice_code: null,
+    invoice_number: 'XS2441000032',
+    issue_date: mockMonthDate(-2, 18),
+    belong_month: mockMonthDate(-2, 1).slice(0, 7),
+    buyer_name: '上海辰光电子有限公司',
+    partner_id: 2,
+    partner_name: '上海辰光电子有限公司',
+    amount: 15000,
+    tax_amount: 1950,
+    total_amount: 16950,
+    settled_amount: 0,
+    outstanding_amount: 16950,
+    status: '未核销',
+    aging_days: 0,
+    aging_bucket: '0-30',
+  },
+  {
+    invoice_id: 103,
+    invoice_code: null,
+    invoice_number: 'XS2441000018',
+    issue_date: mockMonthDate(-4, 10),
+    belong_month: mockMonthDate(-4, 1).slice(0, 7),
+    buyer_name: '深圳市中南建材有限公司',
+    partner_id: null,
+    partner_name: null,
+    amount: 6000,
+    tax_amount: 780,
+    total_amount: 6780,
+    settled_amount: 0,
+    outstanding_amount: 6780,
+    status: '未核销',
+    aging_days: 0,
+    aging_bucket: '0-30',
+  },
+];
+
+const mockArAllocations: ArReceiptAllocation[] = [
+  {
+    id: 1,
+    invoice_id: 102,
+    receipt_id: 3,
+    allocated_amount: 5000,
+    status: 'active',
+    remark: '首期回款',
+    created_by: '张会计',
+    created_at: new Date().toISOString(),
+    cancelled_at: null,
+    cancel_reason: null,
+    receipt_document_no: `SK${mockDocMonth.replace('-', '')}0003`,
+    receipt_settled_at: '2026-01-02T02:00:00Z',
+    receipt_summary: '收到客户样品款',
   },
 ];
 
@@ -2022,6 +2105,111 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
     }
     case 'export_advance_ledger':
       return String(args?.path ?? '');
+    // ==================== 应收台账与回款核销（第十二阶段） ====================
+    // 与后端同口径：按核销记录实时重算已核销/未核销与账龄（锚点=开票日）；
+    // 核销仅限 mock 中已结算的收款单（SK 单 id=3）。
+    case 'get_ar_ledger': {
+      const q = (args?.query ?? {}) as ArLedgerQuery;
+      const asOf = q.as_of_date ? new Date(`${q.as_of_date}T00:00:00Z`) : new Date();
+      let rows: ArLedgerRow[] = mockArInvoices.map((inv) => {
+        const settled = mockArAllocations
+          .filter((a) => a.invoice_id === inv.invoice_id && a.status === 'active')
+          .reduce((s, a) => s + a.allocated_amount, 0);
+        const rawOutstanding = inv.total_amount - settled;
+        const outstanding = Math.abs(rawOutstanding) < 0.005 ? 0 : rawOutstanding;
+        const anchor = new Date(`${inv.issue_date}T00:00:00Z`);
+        const agingDays = Math.max(
+          0,
+          Math.round((asOf.getTime() - anchor.getTime()) / 86400000),
+        );
+        const bucket =
+          agingDays <= 30
+            ? '0-30'
+            : agingDays <= 60
+              ? '31-60'
+              : agingDays <= 90
+                ? '61-90'
+                : agingDays <= 180
+                  ? '91-180'
+                  : '180+';
+        return {
+          ...inv,
+          settled_amount: settled,
+          outstanding_amount: outstanding,
+          status: outstanding <= 0.005 ? '已核清' : settled > 0.005 ? '部分核销' : '未核销',
+          aging_days: agingDays,
+          aging_bucket: bucket,
+        };
+      });
+      if (q.partner_id) rows = rows.filter((r) => r.partner_id === q.partner_id);
+      if (q.keyword?.trim()) {
+        const kw = q.keyword.trim();
+        rows = rows.filter(
+          (r) =>
+            (r.partner_name ?? '').includes(kw) ||
+            (r.buyer_name ?? '').includes(kw) ||
+            (r.invoice_number ?? '').includes(kw) ||
+            (r.invoice_code ?? '').includes(kw),
+        );
+      }
+      if (q.only_outstanding) rows = rows.filter((r) => r.outstanding_amount > 0.005);
+      return rows;
+    }
+    case 'get_ar_allocations': {
+      const invoiceId = args?.invoiceId as number | undefined;
+      const receiptId = args?.receiptId as number | undefined;
+      return mockArAllocations.filter(
+        (a) => (!invoiceId || a.invoice_id === invoiceId) && (!receiptId || a.receipt_id === receiptId),
+      );
+    }
+    case 'create_ar_allocation': {
+      const data = args?.data as ArAllocationInput | undefined;
+      if (!data || !(Number(data.amount) > 0)) throw new Error('核销金额必须大于 0');
+      const invoice = mockArInvoices.find((i) => i.invoice_id === Number(data.invoice_id));
+      if (!invoice) throw new Error(`销项发票ID=${String(data.invoice_id)}未找到`);
+      const receipt = mockFundDocuments.find((d) => d.id === Number(data.receipt_id));
+      if (!receipt || receipt.document_type !== 'receipt' || receipt.status !== 'settled') {
+        throw new Error('仅已结算的收款单可核销（冲正/作废单据不可用）');
+      }
+      const settled = mockArAllocations
+        .filter((a) => a.invoice_id === invoice.invoice_id && a.status === 'active')
+        .reduce((s, a) => s + a.allocated_amount, 0);
+      const remaining = invoice.total_amount - settled;
+      if (Number(data.amount) - remaining > 0.005) {
+        throw new Error(`核销金额 ${Number(data.amount).toFixed(2)} 超过发票未核销余额 ${remaining.toFixed(2)}`);
+      }
+      const alloc: ArReceiptAllocation = {
+        id: mockArAllocations.reduce((max, a) => Math.max(max, a.id), 0) + 1,
+        invoice_id: invoice.invoice_id,
+        receipt_id: receipt.id,
+        allocated_amount: Number(data.amount),
+        status: 'active',
+        remark: data.remark?.trim() || null,
+        created_by: '管理员',
+        created_at: new Date().toISOString(),
+        cancelled_at: null,
+        cancel_reason: null,
+        receipt_document_no: receipt.document_no,
+        receipt_settled_at: receipt.settled_at,
+        receipt_summary: receipt.summary,
+      };
+      mockArAllocations.push(alloc);
+      return alloc;
+    }
+    case 'cancel_ar_allocation': {
+      const data = args?.data as ArAllocationCancelInput | undefined;
+      if (!data?.reason?.trim()) throw new Error('取消原因必填');
+      const alloc = mockArAllocations.find((a) => a.id === Number(data.id ?? 0));
+      if (!alloc) throw new Error(`核销记录ID=${String(data.id)}未找到`);
+      if (alloc.status !== 'active') throw new Error('该核销记录已取消，无需重复取消');
+      alloc.status = 'cancelled';
+      alloc.cancelled_at = new Date().toISOString();
+      alloc.cancel_reason = data.reason.trim();
+      return true;
+    }
+    case 'export_ar_aging_report':
+    case 'export_output_tax_ledger':
+      return String(args?.path ?? '');
     // 预览模式跳过启动密码/锁屏（仅在非 Tauri 环境生效），让业务页面可打开。
     case 'is_security_initialized':
       return true;
@@ -2462,6 +2650,14 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
           days_left: 12,
           amount: 500,
           ref_id: 3,
+        },
+        {
+          category: 'ar_overdue',
+          title: '上海辰光电子有限公司 销项 XS2441000032 账龄 122 天',
+          due_date: dayStr(-122),
+          days_left: 122,
+          amount: 11950,
+          ref_id: 102,
         },
       ];
     }
@@ -4035,6 +4231,43 @@ export async function exportAdvanceLedger(
   path: string,
 ): Promise<string> {
   return invoke<string>('export_advance_ledger', { query, path });
+}
+
+// ==================== 应收台账与回款核销（第十二阶段，spec 4.2/4.3） ====================
+// invoke 参数 key 用 camelCase（Tauri 2 自动映射 snake_case）；金额/月结门禁校验以后端为准。
+
+export async function getArLedger(query: ArLedgerQuery = {}): Promise<ArLedgerRow[]> {
+  return invoke<ArLedgerRow[]>('get_ar_ledger', { query });
+}
+
+export async function getArAllocations(params: {
+  invoiceId?: number;
+  receiptId?: number;
+}): Promise<ArReceiptAllocation[]> {
+  return invoke<ArReceiptAllocation[]>('get_ar_allocations', {
+    invoiceId: params.invoiceId,
+    receiptId: params.receiptId,
+  });
+}
+
+export async function createArAllocation(data: ArAllocationInput): Promise<ArReceiptAllocation> {
+  return invoke<ArReceiptAllocation>('create_ar_allocation', { data });
+}
+
+export async function cancelArAllocation(data: ArAllocationCancelInput): Promise<boolean> {
+  return invoke<boolean>('cancel_ar_allocation', { data });
+}
+
+export async function exportArAgingReport(query: ArLedgerQuery, path: string): Promise<string> {
+  return invoke<string>('export_ar_aging_report', { query, path });
+}
+
+export async function exportOutputTaxLedger(
+  fromMonth: string,
+  toMonth: string,
+  path: string,
+): Promise<string> {
+  return invoke<string>('export_output_tax_ledger', { fromMonth, toMonth, path });
 }
 
 // ==================== 票据台账（第八阶段 Task 3） ====================

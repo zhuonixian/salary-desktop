@@ -58,7 +58,7 @@ npm run lint                             # ESLint
 - [第九阶段通知模块](.claude/memory/stage9-notifications.md) — 通知底座（媒介抽象/SMTP 授权码加密/发送留痕）、工资条邮件三步向导、失败重发；spec 见 `docs/superpowers/specs/2026-09-19-stage9-notifications-design.md`、plan 见 `docs/superpowers/plans/2026-09-19-stage9-notifications.md`
 - [第十阶段上手引导与办税落地](.claude/memory/stage10-onboarding-tax-filing.md) — 首启向导、示例账套 seed/clear、bootstrap_status、申报模板三件、征期日历；spec 见 `docs/superpowers/specs/2026-10-11-stage10-onboarding-tax-filing-design.md`、plan 见 `docs/superpowers/plans/2026-10-11-stage10-onboarding-tax-filing.md`
 - [第十一阶段提醒触达](.claude/memory/stage11-reminder-delivery.md) — reminders.rs 四源聚合、OS 系统通知（每日一次去重）、托盘常驻（badge/菜单/关窗到托盘）；spec 见 `docs/superpowers/specs/2026-10-12-stage11-reminder-delivery-design.md`、plan 见 `docs/superpowers/plans/2026-10-12-stage11-reminder-delivery.md`
-- [第十二阶段收入侧闭环（规划）](.claude/memory/stage12-revenue-cycle.md) — 销项登记（invoices.direction）、应收台账、回款核销、账龄；spec 草案见 `docs/superpowers/specs/2026-10-13-stage12-revenue-cycle-design.md`
+- [第十二阶段收入侧闭环](.claude/memory/stage12-revenue-cycle.md) — 销项登记（invoices.direction+收入确认凭证）、进项门禁回扫、应收核销/台账/账龄、ar_overdue 提醒、月结 warning、两导出；spec 见 `docs/superpowers/specs/2026-10-13-stage12-revenue-cycle-design.md`、progress 见 `docs/superpowers/plans/2026-10-13-stage12-progress.md`
 - [v0.10.0 发版验收清单](docs/superpowers/plans/2026-10-13-v0.10-release-acceptance.md) — 阶段 7-11 Windows/macOS 手工验收汇编，打 tag 前逐项执行
 
 ## 第三阶段开发
@@ -96,6 +96,10 @@ npm run lint                             # ESLint
 ## 第十一阶段开发
 
 第十一阶段以提醒触达为目标（OS 本地通知 + 托盘常驻，零外联原则不变），按 11A 通知聚合（reminders.rs 四源：征期/账期/月结/备份）→ 11B OS 通知（tauri-plugin-notification + 前端 ReminderChecker：启动 +5s/每 30 分钟/托盘事件触发，每日一次去重，单轮 ≤4 条）→ 11C 托盘（tray-icon：菜单打开/立即检查/退出、tooltip 待办数、关窗到托盘）推进。开发前先读 `.claude/memory/stage11-reminder-delivery.md`、`docs/superpowers/plans/2026-10-12-stage11-progress.md` 和 spec；阻断项：通知文本不含金额（stage9 留痕口径）、征期窗口须从上月起算（否则次月 15 日申报期次整月漏报）、空账套零打扰、锁屏/未初始化跳过检查。托盘与 OS 通知手工验收（Windows/macOS）挂账待做。涉及多模块开发时用 subagent 按互不重叠文件范围协作，由主 agent 统一集成、测试、commit、push。
+
+## 第十二阶段开发
+
+第十二阶段以收入侧闭环为目标（销项登记→应收挂账→回款核销→账龄监控，零外联不变），按 12A 销项登记（direction 列+进项门禁回扫+收入确认凭证 借1122/贷6001/贷2221）→ 12B 应收核销（ar_receipt_allocations 多对多部分核销/取消留痕/月结保护）与台账页 → 12C 账龄分桶/ar_overdue 提醒与 OS 通知/月结 warning/两导出推进。开发前先读 `.claude/memory/stage12-revenue-cycle.md`、`docs/superpowers/plans/2026-10-13-stage12-progress.md` 和 spec；阻断项：销项票不得混入报销/进项台账（门禁回扫）、发票方向创建后不可改、核销金额不超未核销余额、月结保护双向（发票月+收款单月）。Windows exe 手工验收（销项录入→凭证→核销→账龄提醒→导出）挂账待做。涉及多模块开发时用 subagent 按互不重叠文件范围协作，由主 agent 统一集成、测试、commit、push。
 
 ## 编码约定
 

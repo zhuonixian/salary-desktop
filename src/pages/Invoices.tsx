@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
   Button, Table, Card, Row, Col, Input, Select, DatePicker, Modal,
-  message, Space, Tag, Form, Drawer, Spin, Alert, Statistic,
+  message, Space, Tag, Form, Drawer, Spin, Alert, Statistic, Tabs,
 } from 'antd';
 import {
   UploadOutlined, ExportOutlined, SettingOutlined,
@@ -12,14 +12,14 @@ import { convertFileSrc } from '@tauri-apps/api/core';
 import {
   getInvoiceExpenseTypes, saveInvoiceExpenseType, deleteInvoiceExpenseType,
   ocrInvoice, saveInvoice, updateInvoice, deleteInvoice, queryInvoices, exportInvoiceList,
-  getEmployees, getDecryptedInvoiceUrl,
+  getEmployees, getDecryptedInvoiceUrl, getCompanyInfo,
 } from '@/api';
 import { SensitiveText } from '@/components/SensitiveText';
 import { SensitiveStatistic } from '@/components/SensitiveStatistic';
 import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
 import type {
   Invoice, InvoiceInput, InvoiceOcrPreview, InvoiceQuery,
-  InvoiceExpenseType, InvoiceExpenseTypeInput, Employee,
+  InvoiceExpenseType, InvoiceExpenseTypeInput, Employee, CompanyInfo,
 } from '@/types';
 
 // 发票原图预览：后端 get_decrypted_invoice_url 统一返回文件系统绝对路径
@@ -57,6 +57,11 @@ const Invoices: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [expenseTypes, setExpenseTypes] = useState<InvoiceExpenseType[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
+  /** 发票方向 Tab：input 进项（默认）/ output 销项（第十二阶段收入侧闭环） */
+  const [direction, setDirection] = useState<'input' | 'output'>('input');
+  const isOutput = direction === 'output';
+  /** 企业信息：销项口径销售方=本公司，自动预填（仍可改） */
+  const [company, setCompany] = useState<CompanyInfo | null>(null);
 
   const { month: filterMonth, setMonth: setFilterMonth } = useBusinessMonth();
   const [filterEmployee, setFilterEmployee] = useState<number | undefined>(undefined);
@@ -70,10 +75,11 @@ const Invoices: React.FC = () => {
     preview: InvoiceOcrPreview | null;
     selectedFilePath: string | null;
     editingId: number | null;
+    direction: 'input' | 'output';
     form: InvoiceInput;
   }>({
     visible: false, ocrLoading: false, preview: null,
-    selectedFilePath: null, editingId: null, form: {},
+    selectedFilePath: null, editingId: null, direction: 'input', form: {},
   });
 
   const [viewDrawer, setViewDrawer] = useState<Invoice | null>(null);
@@ -85,8 +91,10 @@ const Invoices: React.FC = () => {
     try {
       const query: InvoiceQuery = {
         belong_month: filterMonth.format('YYYY-MM'),
-        employee_id: filterEmployee,
-        expense_type_code: filterExpenseType,
+        direction,
+        // 销项不参与报销：报销人/费用类型筛选仅进项口径下发
+        employee_id: isOutput ? undefined : filterEmployee,
+        expense_type_code: isOutput ? undefined : filterExpenseType,
         invoice_type: filterInvoiceType || undefined,
         keyword: filterKeyword || undefined,
       };
@@ -97,7 +105,7 @@ const Invoices: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [filterMonth, filterEmployee, filterExpenseType, filterInvoiceType, filterKeyword]);
+  }, [filterMonth, direction, isOutput, filterEmployee, filterExpenseType, filterInvoiceType, filterKeyword]);
 
   const fetchExpenseTypes = useCallback(async () => {
     try { setExpenseTypes(await getInvoiceExpenseTypes()); } catch { /* ignore */ }
@@ -109,6 +117,10 @@ const Invoices: React.FC = () => {
 
   useEffect(() => { fetchList(); }, [fetchList]);
   useEffect(() => { fetchExpenseTypes(); fetchEmployees(); }, [fetchExpenseTypes, fetchEmployees]);
+  useEffect(() => {
+    // 销项预填本公司抬头：失败不阻断（仍可手工填写）
+    getCompanyInfo().then(setCompany).catch(() => setCompany(null));
+  }, []);
 
   const totalAmount = list.reduce((s, i) => s + (i.total_amount || 0), 0);
   const duplicateCount = 0; // 当前查询结果里的重复数（实际入库的不会是重复，留作未来扩展）
@@ -127,7 +139,7 @@ const Invoices: React.FC = () => {
 
       setUploadModal({
         visible: true, ocrLoading: true, preview: null,
-        selectedFilePath: filePath, editingId: null, form: {},
+        selectedFilePath: filePath, editingId: null, direction, form: {},
       });
 
       try {
@@ -145,8 +157,13 @@ const Invoices: React.FC = () => {
             amount: preview.amount,
             tax_amount: preview.tax_amount,
             total_amount: preview.total_amount,
-            seller_name: preview.seller_name,
-            seller_tax_id: preview.seller_tax_id,
+            // 销项口径：销售方=本公司，OCR 未识别到时用企业信息兜底预填
+            seller_name: direction === 'output'
+              ? preview.seller_name || company?.company_name || undefined
+              : preview.seller_name,
+            seller_tax_id: direction === 'output'
+              ? preview.seller_tax_id || company?.taxpayer_id || undefined
+              : preview.seller_tax_id,
             buyer_name: preview.buyer_name,
             buyer_tax_id: preview.buyer_tax_id,
             belong_month: filterMonth.format('YYYY-MM'),
@@ -159,7 +176,13 @@ const Invoices: React.FC = () => {
         message.error('OCR识别失败: ' + msg + '（可手工录入）');
         setUploadModal(prev => ({
           ...prev, ocrLoading: false, preview: null,
-          form: { belong_month: filterMonth.format('YYYY-MM'), image_path: filePath },
+          form: {
+            belong_month: filterMonth.format('YYYY-MM'),
+            image_path: filePath,
+            // 销项口径：手工兜底也预填本公司抬头
+            seller_name: direction === 'output' ? company?.company_name ?? undefined : undefined,
+            seller_tax_id: direction === 'output' ? company?.taxpayer_id ?? undefined : undefined,
+          },
         }));
       }
     } catch (e: unknown) {
@@ -170,24 +193,37 @@ const Invoices: React.FC = () => {
   const handleManualAdd = () => {
     setUploadModal({
       visible: true, ocrLoading: false, preview: null,
-      selectedFilePath: null, editingId: null,
-      form: { belong_month: filterMonth.format('YYYY-MM') },
+      selectedFilePath: null, editingId: null, direction,
+      form: {
+        belong_month: filterMonth.format('YYYY-MM'),
+        // 销项口径：销售方=本公司自动预填（仍可改）
+        seller_name: direction === 'output' ? company?.company_name ?? undefined : undefined,
+        seller_tax_id: direction === 'output' ? company?.taxpayer_id ?? undefined : undefined,
+      },
     });
   };
 
   const handleSaveInvoice = async () => {
-    const { form, editingId, selectedFilePath } = uploadModal;
+    const { form, editingId, selectedFilePath, direction: modalDirection } = uploadModal;
     if (!form.invoice_number) {
       message.warning('发票号码必填（全电票可无发票代码）');
       return;
     }
-    if (!form.employee_id) {
-      message.warning('请选择报销人');
-      return;
-    }
-    if (!form.expense_type_code) {
-      message.warning('请选择费用类型');
-      return;
+    if (modalDirection === 'output') {
+      // 销项口径：购买方=客户必填；不参与报销，无报销人/费用类型
+      if (!form.buyer_name?.trim()) {
+        message.warning('销项发票请填写购买方（客户名称）');
+        return;
+      }
+    } else {
+      if (!form.employee_id) {
+        message.warning('请选择报销人');
+        return;
+      }
+      if (!form.expense_type_code) {
+        message.warning('请选择费用类型');
+        return;
+      }
     }
     if (uploadModal.preview?.is_duplicate && !editingId) {
       message.error('该发票已存在，禁止保存');
@@ -195,7 +231,12 @@ const Invoices: React.FC = () => {
     }
 
     try {
-      const payload: InvoiceInput = { ...form, image_path: selectedFilePath ?? form.image_path };
+      // direction 仅创建时生效（更新不可改方向）；编辑沿用记录原方向
+      const payload: InvoiceInput = {
+        ...form,
+        image_path: selectedFilePath ?? form.image_path,
+        direction: modalDirection,
+      };
       if (editingId) {
         await updateInvoice(editingId, payload);
         message.success('更新成功');
@@ -217,6 +258,8 @@ const Invoices: React.FC = () => {
       preview: null,
       selectedFilePath: null,
       editingId: record.id,
+      // 编辑沿用记录自身方向（销项票在销项 Tab 编辑，进项同理）
+      direction: record.direction === 'output' ? 'output' : 'input',
       form: {
         invoice_code: record.invoice_code,
         invoice_number: record.invoice_number,
@@ -267,8 +310,9 @@ const Invoices: React.FC = () => {
       if (!savePath) return;
       const query: InvoiceQuery = {
         belong_month: filterMonth.format('YYYY-MM'),
-        employee_id: filterEmployee,
-        expense_type_code: filterExpenseType,
+        direction,
+        employee_id: isOutput ? undefined : filterEmployee,
+        expense_type_code: isOutput ? undefined : filterExpenseType,
         invoice_type: filterInvoiceType || undefined,
         keyword: filterKeyword || undefined,
       };
@@ -329,25 +373,37 @@ const Invoices: React.FC = () => {
     },
     { title: '类型', dataIndex: 'invoice_type', key: 'type', width: 120 },
     { title: '开票日期', dataIndex: 'issue_date', key: 'date', width: 110 },
-    { title: '销售方', dataIndex: 'seller_name', key: 'seller', ellipsis: true },
+    // 进项展示销售方（供应商），销项展示购买方（客户）
     {
-      title: '报销人',
-      key: 'employee',
-      width: 100,
-      render: (_: unknown, r: Invoice) => {
-        const emp = employees.find(e => e.id === r.employee_id);
-        return emp?.name || '-';
-      },
+      title: isOutput ? '购买方' : '销售方',
+      dataIndex: isOutput ? 'buyer_name' : 'seller_name',
+      key: 'counterparty',
+      ellipsis: true,
+      render: (v?: string) => v || '-',
     },
-    {
-      title: '费用类型',
-      key: 'expense',
-      width: 100,
-      render: (_: unknown, r: Invoice) => {
-        const t = expenseTypes.find(e => e.code === r.expense_type_code);
-        return t ? <Tag>{t.name}</Tag> : '-';
-      },
-    },
+    // 报销人/费用类型仅进项口径（销项不参与报销）
+    ...(!isOutput
+      ? [
+          {
+            title: '报销人',
+            key: 'employee',
+            width: 100,
+            render: (_: unknown, r: Invoice) => {
+              const emp = employees.find(e => e.id === r.employee_id);
+              return emp?.name || '-';
+            },
+          },
+          {
+            title: '费用类型',
+            key: 'expense',
+            width: 100,
+            render: (_: unknown, r: Invoice) => {
+              const t = expenseTypes.find(e => e.code === r.expense_type_code);
+              return t ? <Tag>{t.name}</Tag> : '-';
+            },
+          },
+        ]
+      : []),
     {
       title: '价税合计',
       dataIndex: 'total_amount',
@@ -372,8 +428,9 @@ const Invoices: React.FC = () => {
 
   const isSaveDisabled =
     !uploadModal.form.invoice_number ||
-    !uploadModal.form.employee_id ||
-    !uploadModal.form.expense_type_code ||
+    (uploadModal.direction === 'output'
+      ? !uploadModal.form.buyer_name?.trim()
+      : !uploadModal.form.employee_id || !uploadModal.form.expense_type_code) ||
     (!!uploadModal.preview?.is_duplicate && !uploadModal.editingId);
 
   return (
@@ -381,15 +438,28 @@ const Invoices: React.FC = () => {
       <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <span className="page-title">发票管理</span>
         <Space>
-          <Button icon={<PlusOutlined />} onClick={handleManualAdd}>手工录入</Button>
+          <Button icon={<PlusOutlined />} onClick={handleManualAdd}>
+            {isOutput ? '手工录入销项' : '手工录入'}
+          </Button>
           <Button type="primary" icon={<UploadOutlined />} onClick={handleUploadClick}>上传发票识别</Button>
           <Button icon={<ExportOutlined />} onClick={handleExport}>导出清单</Button>
           <Button icon={<SettingOutlined />} onClick={() => setExpenseDrawer(true)}>费用类型</Button>
         </Space>
       </div>
 
+      {/* 方向 Tab：进项（默认）/销项；查询与录入均按方向区分（第十二阶段） */}
+      <Tabs
+        activeKey={direction}
+        onChange={(key) => setDirection(key as 'input' | 'output')}
+        items={[
+          { key: 'input', label: '进项发票' },
+          { key: 'output', label: '销项发票' },
+        ]}
+        style={{ marginBottom: 8 }}
+      />
+
       <Row gutter={16} style={{ marginBottom: 16 }}>
-        <Col span={6}><Card><Statistic title="发票张数" value={list.length} /></Card></Col>
+        <Col span={6}><Card><Statistic title={isOutput ? '销项发票张数' : '发票张数'} value={list.length} /></Card></Col>
         <Col span={6}><Card><SensitiveStatistic title="价税合计" value={totalAmount} /></Card></Col>
         <Col span={6}><Card><Statistic title="本月去重拦截" value={duplicateCount} /></Card></Col>
       </Row>
@@ -402,18 +472,22 @@ const Invoices: React.FC = () => {
             onChange={(value) => value && setFilterMonth(value)}
             placeholder="归属月份"
           />
-          <Select
-            style={{ width: 160 }} allowClear placeholder="报销人"
-            value={filterEmployee}
-            onChange={(v) => setFilterEmployee(v)}
-            options={employees.map(e => ({ value: e.id, label: `${e.name} (${e.employee_no})` }))}
-          />
-          <Select
-            style={{ width: 160 }} allowClear placeholder="费用类型"
-            value={filterExpenseType}
-            onChange={(v) => setFilterExpenseType(v)}
-            options={expenseTypes.filter(t => t.enabled === 1).map(t => ({ value: t.code, label: t.name }))}
-          />
+          {!isOutput && (
+            <Select
+              style={{ width: 160 }} allowClear placeholder="报销人"
+              value={filterEmployee}
+              onChange={(v) => setFilterEmployee(v)}
+              options={employees.map(e => ({ value: e.id, label: `${e.name} (${e.employee_no})` }))}
+            />
+          )}
+          {!isOutput && (
+            <Select
+              style={{ width: 160 }} allowClear placeholder="费用类型"
+              value={filterExpenseType}
+              onChange={(v) => setFilterExpenseType(v)}
+              options={expenseTypes.filter(t => t.enabled === 1).map(t => ({ value: t.code, label: t.name }))}
+            />
+          )}
           <Select
             style={{ width: 160 }} allowClear placeholder="发票类型"
             value={filterInvoiceType}
@@ -449,7 +523,13 @@ const Invoices: React.FC = () => {
 
       {/* 上传/编辑 Modal */}
       <Modal
-        title={uploadModal.editingId ? '编辑发票' : '上传发票'}
+        title={
+          uploadModal.editingId
+            ? '编辑发票'
+            : uploadModal.direction === 'output'
+              ? '录入销项发票'
+              : '上传发票'
+        }
         open={uploadModal.visible}
         onCancel={() => setUploadModal(prev => ({ ...prev, visible: false }))}
         onOk={handleSaveInvoice}
@@ -544,7 +624,11 @@ const Invoices: React.FC = () => {
             </Col>
             <Col span={12}>
               <Form layout="vertical" size="small">
-                <Form.Item label="销售方">
+                <Form.Item
+                  label="销售方"
+                  required={uploadModal.direction === 'output'}
+                  extra={uploadModal.direction === 'output' ? '销项口径：销售方为本公司（已按企业信息预填，可修改）' : undefined}
+                >
                   <Input
                     value={uploadModal.form.seller_name || ''}
                     onChange={(e) => setUploadModal(prev => ({
@@ -560,7 +644,11 @@ const Invoices: React.FC = () => {
                     }))}
                   />
                 </Form.Item>
-                <Form.Item label="购买方">
+                <Form.Item
+                  label="购买方"
+                  required={uploadModal.direction === 'output'}
+                  extra={uploadModal.direction === 'output' ? '销项口径：购买方为客户，必填' : undefined}
+                >
                   <Input
                     value={uploadModal.form.buyer_name || ''}
                     onChange={(e) => setUploadModal(prev => ({
@@ -568,26 +656,31 @@ const Invoices: React.FC = () => {
                     }))}
                   />
                 </Form.Item>
-                <Form.Item label="报销人" required>
-                  <Select
-                    value={uploadModal.form.employee_id}
-                    onChange={(v) => setUploadModal(prev => ({
-                      ...prev, form: { ...prev.form, employee_id: v }
-                    }))}
-                    options={employees.map(e => ({ value: e.id, label: `${e.name} (${e.employee_no})` }))}
-                    placeholder="选择报销人"
-                  />
-                </Form.Item>
-                <Form.Item label="费用类型" required>
-                  <Select
-                    value={uploadModal.form.expense_type_code}
-                    onChange={(v) => setUploadModal(prev => ({
-                      ...prev, form: { ...prev.form, expense_type_code: v }
-                    }))}
-                    options={expenseTypes.filter(t => t.enabled === 1).map(t => ({ value: t.code, label: t.name }))}
-                    placeholder="选择费用类型"
-                  />
-                </Form.Item>
+                {/* 销项不参与报销：报销人/费用类型仅进项口径展示 */}
+                {uploadModal.direction !== 'output' && (
+                  <Form.Item label="报销人" required>
+                    <Select
+                      value={uploadModal.form.employee_id}
+                      onChange={(v) => setUploadModal(prev => ({
+                        ...prev, form: { ...prev.form, employee_id: v }
+                      }))}
+                      options={employees.map(e => ({ value: e.id, label: `${e.name} (${e.employee_no})` }))}
+                      placeholder="选择报销人"
+                    />
+                  </Form.Item>
+                )}
+                {uploadModal.direction !== 'output' && (
+                  <Form.Item label="费用类型" required>
+                    <Select
+                      value={uploadModal.form.expense_type_code}
+                      onChange={(v) => setUploadModal(prev => ({
+                        ...prev, form: { ...prev.form, expense_type_code: v }
+                      }))}
+                      options={expenseTypes.filter(t => t.enabled === 1).map(t => ({ value: t.code, label: t.name }))}
+                      placeholder="选择费用类型"
+                    />
+                  </Form.Item>
+                )}
                 <Form.Item label="归属月份">
                   <Input
                     value={uploadModal.form.belong_month || ''}
@@ -628,6 +721,7 @@ const Invoices: React.FC = () => {
             )}
             <p><b>发票代码：</b>{viewDrawer.invoice_code || '-'}</p>
             <p><b>发票号码：</b>{viewDrawer.invoice_number || '-'}</p>
+            <p><b>方向：</b>{viewDrawer.direction === 'output' ? '销项发票' : '进项发票'}</p>
             <p><b>类型：</b>{viewDrawer.invoice_type || '-'}</p>
             <p><b>开票日期：</b>{viewDrawer.issue_date || '-'}</p>
             <p><b>金额：</b><SensitiveText type="amount" value={viewDrawer.amount || 0} /></p>
