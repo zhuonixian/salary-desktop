@@ -1,5 +1,6 @@
 mod accounting;
 mod ar;
+mod assets;
 mod cash_count;
 mod cashier;
 mod commands;
@@ -443,6 +444,14 @@ pub fn run() {
         commands::export_eit_payer_template,
         commands::export_eit_salary_template,
         commands::export_social_base_declaration,
+        // ===== Assets & Manual Voucher（第十三阶段 记账完整性） =====
+        commands::create_manual_voucher,
+        commands::void_manual_voucher,
+        commands::get_fixed_assets,
+        commands::save_fixed_asset,
+        commands::run_asset_depreciation,
+        commands::dispose_fixed_asset,
+        commands::export_fixed_asset_ledger,
         // ===== AR Receivable（第十二阶段 收入侧闭环） =====
         commands::get_ar_ledger,
         commands::get_ar_allocations,

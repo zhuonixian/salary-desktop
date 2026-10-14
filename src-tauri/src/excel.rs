@@ -4634,3 +4634,110 @@ pub fn export_output_tax_ledger(
     workbook.save(path)?;
     Ok(())
 }
+
+// ==================== Fixed Assets（第十三阶段 固定资产台账导出） ====================
+
+/// 固定资产台账导出：原值/累计折旧/净值/月折旧/剩余月数，汇总行合计。
+pub fn export_fixed_asset_ledger(
+    rows: &[crate::models::FixedAssetLedgerRow],
+    path: &str,
+) -> AppResult<()> {
+    if rows.is_empty() {
+        return Err(AppError::InvalidParam(
+            "无固定资产数据，无法导出台账".into(),
+        ));
+    }
+    let mut workbook = Workbook::new();
+    let sheet = workbook.add_worksheet();
+    sheet.set_name("固定资产台账")?;
+    let title = Format::new().set_bold().set_font_size(14);
+    let header = Format::new()
+        .set_bold()
+        .set_border(rust_xlsxwriter::FormatBorder::Thin);
+    let money = Format::new()
+        .set_border(rust_xlsxwriter::FormatBorder::Thin)
+        .set_num_format("#,##0.00");
+    let cell = Format::new().set_border(rust_xlsxwriter::FormatBorder::Thin);
+
+    sheet.merge_range(
+        0,
+        0,
+        0,
+        13,
+        &format!("固定资产台账（共 {} 项）", rows.len()),
+        &title,
+    )?;
+    let headers = [
+        "资产编号",
+        "名称",
+        "类别",
+        "购置日期",
+        "归属月份",
+        "原值",
+        "残值率(%)",
+        "年限(月)",
+        "费用科目",
+        "累计折旧",
+        "净值",
+        "月折旧",
+        "已提/剩余(月)",
+        "状态",
+    ];
+    for (i, h) in headers.iter().enumerate() {
+        sheet.write_with_format(1, i as u16, *h, &header)?;
+    }
+    let mut row_idx = 2u32;
+    for (i, r) in rows.iter().enumerate() {
+        let no = i as u32 + row_idx;
+        sheet.write_with_format(no, 0, &r.asset_no, &cell)?;
+        sheet.write_with_format(no, 1, &r.name, &cell)?;
+        sheet.write_with_format(no, 2, &r.category_label, &cell)?;
+        sheet.write_with_format(no, 3, &r.purchase_date, &cell)?;
+        sheet.write_with_format(no, 4, &r.belong_month, &cell)?;
+        sheet.write_number_with_format(no, 5, r.original_value, &money)?;
+        sheet.write_number_with_format(no, 6, r.salvage_rate * 100.0, &cell)?;
+        sheet.write_number_with_format(no, 7, r.useful_life_months as f64, &cell)?;
+        sheet.write_with_format(no, 8, &r.expense_account_code, &cell)?;
+        sheet.write_number_with_format(no, 9, r.accumulated_depreciation, &money)?;
+        sheet.write_number_with_format(no, 10, r.net_book_value, &money)?;
+        sheet.write_number_with_format(no, 11, r.monthly_amount, &money)?;
+        sheet.write_with_format(
+            no,
+            12,
+            format!("{}/{}", r.depreciated_months, r.remaining_months),
+            &cell,
+        )?;
+        sheet.write_with_format(
+            no,
+            13,
+            if r.status == "disposed" {
+                "已处置"
+            } else {
+                "在用"
+            },
+            &cell,
+        )?;
+    }
+    // 合计行
+    let total_row = row_idx + rows.len() as u32;
+    sheet.write_with_format(total_row, 0, "合计", &header)?;
+    let sum =
+        |f: fn(&crate::models::FixedAssetLedgerRow) -> f64| -> f64 { rows.iter().map(f).sum() };
+    sheet.write_number_with_format(total_row, 5, sum(|r| r.original_value), &money)?;
+    sheet.write_number_with_format(total_row, 9, sum(|r| r.accumulated_depreciation), &money)?;
+    sheet.write_number_with_format(total_row, 10, sum(|r| r.net_book_value), &money)?;
+    sheet.write_number_with_format(total_row, 11, sum(|r| r.monthly_amount), &money)?;
+
+    sheet.set_column_width(0, 18)?;
+    sheet.set_column_width(1, 20)?;
+    sheet.set_column_width(2, 12)?;
+    sheet.set_column_width(3, 12)?;
+    sheet.set_column_width(4, 10)?;
+    for c in [5u16, 9, 10, 11] {
+        sheet.set_column_width(c, 13)?;
+    }
+    sheet.set_column_width(8, 10)?;
+    sheet.set_column_width(13, 8)?;
+    workbook.save(path)?;
+    Ok(())
+}

@@ -1187,6 +1187,140 @@ pub fn void_invoice_expense_voucher(conn: &Connection, invoice_id: i64) -> AppRe
     Ok(n + m)
 }
 
+/// 手工凭证入参行（前端编辑，映射 VoucherLineDraft）
+#[derive(Debug, Clone)]
+pub struct ManualVoucherLineInput {
+    pub account_code: String,
+    pub debit_amount: f64,
+    pub credit_amount: f64,
+    pub summary: Option<String>,
+    pub fund_account_id: Option<i64>,
+}
+
+/// 手工凭证（第十三阶段 spec 2）：收/付/转三式。
+/// 校验：月份开放；≥2 行且至少一行有金额；借贷平衡（insert_voucher 兜底）；
+/// 收/付凭证必须含资金科目（1001/1002/1012）行且带资金辅助（对齐 bank_manual spec 4.7）；
+/// 转账凭证的资金科目行若存在同样必须带辅助。source_type='manual_voucher'。
+pub fn create_manual_voucher(
+    conn: &Connection,
+    belong_month: &str,
+    voucher_date: &str,
+    voucher_kind: &str,
+    lines: &[ManualVoucherLineInput],
+    remark: Option<&str>,
+) -> AppResult<Voucher> {
+    if belong_month.trim().is_empty() {
+        return Err(AppError::InvalidParam("归属月份必填".into()));
+    }
+    crate::db::ensure_month_open(conn, belong_month)?;
+    if voucher_date.trim().is_empty() {
+        return Err(AppError::InvalidParam("凭证日期必填".into()));
+    }
+    let kind_label = match voucher_kind {
+        "receipt_voucher" => "收款凭证",
+        "payment_voucher" => "付款凭证",
+        "transfer_voucher" => "转账凭证",
+        other => {
+            return Err(AppError::InvalidParam(format!(
+                "凭证种类必须为 receipt_voucher / payment_voucher / transfer_voucher：{other}"
+            )))
+        }
+    };
+    let meaningful: Vec<&ManualVoucherLineInput> = lines
+        .iter()
+        .filter(|l| l.debit_amount > 0.0 || l.credit_amount > 0.0)
+        .collect();
+    if meaningful.len() < 2 {
+        return Err(AppError::InvalidParam(
+            "凭证至少需要两行有效分录（借或贷有金额）".into(),
+        ));
+    }
+    let fund_codes = crate::db::STAGE7_FUND_GL_CODES;
+    let has_fund_line = meaningful
+        .iter()
+        .any(|l| fund_codes.contains(&l.account_code.as_str()));
+    if matches!(voucher_kind, "receipt_voucher" | "payment_voucher") && !has_fund_line {
+        return Err(AppError::InvalidParam(format!(
+            "{kind_label}必须包含资金科目（库存现金/银行存款/其他货币资金）分录"
+        )));
+    }
+    for l in &meaningful {
+        if l.debit_amount > 0.0 && l.credit_amount > 0.0 {
+            return Err(AppError::InvalidParam(
+                "同一分录不能同时有借方和贷方金额".into(),
+            ));
+        }
+        if fund_codes.contains(&l.account_code.as_str()) && l.fund_account_id.is_none() {
+            return Err(AppError::InvalidParam(format!(
+                "资金科目 {} 的分录必须选择资金账户（辅助核算）",
+                l.account_code
+            )));
+        }
+    }
+    let draft_lines: Vec<VoucherLineDraft> = meaningful
+        .iter()
+        .map(|l| VoucherLineDraft {
+            account_code: l.account_code.trim().to_string(),
+            debit_amount: l.debit_amount,
+            credit_amount: l.credit_amount,
+            summary: l.summary.clone(),
+            fund_account_id: l.fund_account_id,
+        })
+        .collect();
+    // source_id：手工凭证无业务源，取 0（vouchers 无唯一 active 索引冲突——索引按
+    // (source_type, source_id) WHERE active，同 source_id=0 的多张手工凭证会撞唯一索引，
+    // 故 source_id 用自增序列：先插一行占位再更新不可行，改为以时间纳秒作 source_id）
+    let source_id = chrono::Utc::now()
+        .timestamp_nanos_opt()
+        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis() as i64);
+    insert_voucher(
+        conn,
+        &VoucherDraft {
+            belong_month: belong_month.to_string(),
+            voucher_date: voucher_date.to_string(),
+            source_type: "manual_voucher".into(),
+            source_id,
+            remark: Some(format!(
+                "手工凭证（{kind_label}）{}",
+                remark
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("")
+            )),
+            lines: draft_lines,
+        },
+    )
+}
+
+/// 作废手工凭证（月结保护）。
+pub fn void_manual_voucher(conn: &Connection, voucher_id: i64) -> AppResult<usize> {
+    let month: String = conn
+        .query_row(
+            "SELECT belong_month FROM vouchers WHERE id = ?1",
+            rusqlite::params![voucher_id],
+            |r| r.get(0),
+        )
+        .map_err(|_| AppError::NotFound(format!("凭证ID={voucher_id}未找到")))?;
+    let source_type: String = conn.query_row(
+        "SELECT source_type FROM vouchers WHERE id = ?1",
+        rusqlite::params![voucher_id],
+        |r| r.get(0),
+    )?;
+    if source_type != "manual_voucher" {
+        return Err(AppError::InvalidParam(format!(
+            "仅手工凭证可经此入口作废（该凭证来源为 {source_type}）"
+        )));
+    }
+    crate::db::ensure_month_open(conn, &month)?;
+    // 手工凭证 source_id 为纳秒时戳（非凭证 id），按 id 直接作废
+    let now = chrono::Utc::now().to_rfc3339();
+    let n = conn.execute(
+        "UPDATE vouchers SET status = 'void', updated_at = ?1 WHERE id = ?2 AND status = 'active'",
+        rusqlite::params![now, voucher_id],
+    )?;
+    Ok(n)
+}
+
 /// 销项发票收入确认凭证（第十二阶段 spec 4.1）：
 /// 借 1122 应收账款（价税合计）/ 贷 6001 主营业务收入（不含税）/ 贷 2221 应交税费（销项税额）。
 /// 金额全部取票面，无需税率配置；与费用口径同门禁：status=normal、金额合计为正、

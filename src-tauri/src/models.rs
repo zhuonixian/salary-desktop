@@ -2443,3 +2443,112 @@ pub struct ArAgingSummaryRow {
     pub bucket_180_plus: f64,
     pub total_outstanding: f64,
 }
+
+// ==================== Fixed Assets & Manual Voucher（第十三阶段 记账完整性） ====================
+
+/// 手工凭证入参（收/付/转三式）
+#[derive(Debug, Clone, Deserialize)]
+pub struct ManualVoucherInput {
+    pub belong_month: String,
+    pub voucher_date: String,
+    /// receipt_voucher / payment_voucher / transfer_voucher
+    pub voucher_kind: String,
+    pub lines: Vec<ManualVoucherLineModel>,
+    pub remark: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ManualVoucherLineModel {
+    pub account_code: String,
+    pub debit_amount: f64,
+    pub credit_amount: f64,
+    pub summary: Option<String>,
+    pub fund_account_id: Option<i64>,
+}
+
+/// 固定资产录入/更新入参
+#[derive(Debug, Clone, Deserialize)]
+pub struct FixedAssetInput {
+    pub id: Option<i64>,
+    pub name: String,
+    /// building / machinery / vehicle / electronics / other
+    pub category: String,
+    pub purchase_date: String,
+    pub belong_month: String,
+    pub original_value: f64,
+    /// 残值率（0~0.5，默认 0.05）
+    pub salvage_rate: f64,
+    pub useful_life_months: i64,
+    /// 折旧费用科目（默认 6602，可选 5101/6601 等）
+    pub expense_account_code: String,
+    /// 购置凭证贷方科目（可空=不生成购置凭证；资金科目须配 counter_fund_account_id）
+    pub counter_account_code: Option<String>,
+    pub counter_fund_account_id: Option<i64>,
+    pub remark: Option<String>,
+}
+
+/// 固定资产记录
+#[derive(Debug, Clone, Serialize)]
+pub struct FixedAssetRecord {
+    pub id: i64,
+    pub asset_no: String,
+    pub name: String,
+    pub category: String,
+    pub category_label: String,
+    pub purchase_date: String,
+    pub belong_month: String,
+    pub original_value: f64,
+    pub salvage_rate: f64,
+    pub useful_life_months: i64,
+    pub expense_account_code: String,
+    pub status: String,
+    pub disposal_date: Option<String>,
+    pub disposal_income: Option<f64>,
+    pub remark: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+/// 资产台账行（联累计折旧）
+#[derive(Debug, Clone, Serialize)]
+pub struct FixedAssetLedgerRow {
+    pub asset_id: i64,
+    pub asset_no: String,
+    pub name: String,
+    pub category_label: String,
+    pub purchase_date: String,
+    pub belong_month: String,
+    pub original_value: f64,
+    pub salvage_rate: f64,
+    pub useful_life_months: i64,
+    pub expense_account_code: String,
+    pub status: String,
+    pub disposal_date: Option<String>,
+    pub disposal_income: Option<f64>,
+    pub accumulated_depreciation: f64,
+    pub net_book_value: f64,
+    /// 在用且未提满时的常规月折旧
+    pub monthly_amount: f64,
+    pub depreciated_months: i64,
+    pub remaining_months: i64,
+}
+
+/// 月度折旧批处理结果
+#[derive(Debug, Clone, Serialize)]
+pub struct FixedDepreciationRunSummary {
+    pub month: String,
+    pub asset_count: usize,
+    pub total_amount: f64,
+    pub voucher_no: Option<String>,
+}
+
+/// 处置入参
+#[derive(Debug, Clone, Deserialize)]
+pub struct FixedAssetDisposalInput {
+    pub id: i64,
+    pub disposal_date: String,
+    pub disposal_income: f64,
+    /// 处置收入收款资金账户（收入>0 时必填）
+    pub income_fund_account_id: Option<i64>,
+    pub remark: Option<String>,
+}

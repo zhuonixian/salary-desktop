@@ -488,6 +488,35 @@ pub fn create_tables(conn: &Connection) -> AppResult<()> {
           ON ar_receipt_allocations(invoice_id) WHERE status='active';
         CREATE INDEX IF NOT EXISTS idx_ar_alloc_receipt
           ON ar_receipt_allocations(receipt_id) WHERE status='active';
+
+        -- 第十三阶段：固定资产与折旧记录
+        CREATE TABLE IF NOT EXISTS fixed_assets (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          asset_no TEXT UNIQUE NOT NULL,
+          name TEXT NOT NULL,
+          category TEXT NOT NULL DEFAULT 'other',
+          purchase_date TEXT NOT NULL,
+          belong_month TEXT NOT NULL,
+          original_value REAL NOT NULL CHECK (original_value > 0),
+          salvage_rate REAL NOT NULL DEFAULT 0.05,
+          useful_life_months INTEGER NOT NULL CHECK (useful_life_months > 0),
+          expense_account_code TEXT NOT NULL DEFAULT '6602' REFERENCES gl_accounts(code),
+          status TEXT NOT NULL DEFAULT 'in_use' CHECK (status IN ('in_use','disposed')),
+          disposal_date TEXT,
+          disposal_income REAL,
+          remark TEXT,
+          created_at TEXT,
+          updated_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS fixed_asset_depreciations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          asset_id INTEGER NOT NULL REFERENCES fixed_assets(id),
+          month TEXT NOT NULL,
+          amount REAL NOT NULL CHECK (amount > 0),
+          voucher_id INTEGER NOT NULL REFERENCES vouchers(id),
+          created_at TEXT NOT NULL,
+          UNIQUE (asset_id, month)
+        );
         ",
     )?;
     migrate_existing_schema(conn)?;
@@ -495,6 +524,7 @@ pub fn create_tables(conn: &Connection) -> AppResult<()> {
     migrate_stage8_schema(conn)?;
     migrate_stage9_schema(conn)?;
     migrate_stage12_schema(conn)?;
+    migrate_stage13_schema(conn)?;
 
     Ok(())
 }
@@ -1461,7 +1491,8 @@ fn rebuild_vouchers_source_type_check_stage8(conn: &Connection) -> AppResult<()>
                 source_type TEXT NOT NULL CHECK (source_type IN (
                     'salary_accrual','salary_payment','reimbursement_accrual',
                     'reimbursement_payment','invoice_expense','bank_manual','period_close',
-                    'fund_document','instrument','instrument_flow','cash_count','sales_invoice')),
+                    'fund_document','instrument','instrument_flow','cash_count','sales_invoice',
+                    'manual_voucher','asset_purchase','asset_depreciation','asset_disposal')),
                 source_id INTEGER NOT NULL,
                 total_amount REAL NOT NULL DEFAULT 0,
                 status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','void')),
@@ -3772,6 +3803,41 @@ pub fn get_month_close_workbench(conn: &Connection, month: &str) -> AppResult<Mo
             format!("存在 {ar_aging_overdue}张开票超 90 天未核销的销项发票，请跟进回款")
         },
         action_route: Some("/ar-ledger".to_string()),
+    });
+    // 固定资产折旧预警（第十三阶段 spec 3.2）：当月存在应折旧资产但无折旧记录 → warning
+    let asset_dep_missing: i64 = {
+        let cutoff = (chrono::Local::now().date_naive() - chrono::Duration::days(0))
+            .format("%Y-%m")
+            .to_string();
+        let _ = cutoff;
+        conn.query_row(
+            "SELECT COUNT(*) FROM fixed_assets a
+             WHERE a.status = 'in_use' AND a.belong_month < ?1
+               AND (SELECT COUNT(*) FROM fixed_asset_depreciations d
+                    WHERE d.asset_id = a.id) < a.useful_life_months
+               AND NOT EXISTS (SELECT 1 FROM fixed_asset_depreciations d2
+                    WHERE d2.asset_id = a.id AND d2.month = ?1)",
+            params![month],
+            |r| r.get(0),
+        )
+        .unwrap_or(0)
+    };
+    checks.push(MonthCloseCheckItem {
+        key: "asset_depreciation_missing".to_string(),
+        title: "固定资产折旧".to_string(),
+        status: if asset_dep_missing == 0 {
+            "ok"
+        } else {
+            "warning"
+        }
+        .to_string(),
+        count: asset_dep_missing as i32,
+        description: if asset_dep_missing == 0 {
+            "本月应折旧资产均已计提（或无可提资产）".to_string()
+        } else {
+            format!("存在 {asset_dep_missing} 项本月应折旧但未计提的资产，请先执行月度折旧")
+        },
+        action_route: Some("/fixed-assets".to_string()),
     });
     checks.push(MonthCloseCheckItem {
         key: "voucher_balance".to_string(),
@@ -8016,7 +8082,8 @@ fn rebuild_vouchers_source_type_check_stage12(conn: &Connection) -> AppResult<()
                 source_type TEXT NOT NULL CHECK (source_type IN (
                     'salary_accrual','salary_payment','reimbursement_accrual',
                     'reimbursement_payment','invoice_expense','bank_manual','period_close',
-                    'fund_document','instrument','instrument_flow','cash_count','sales_invoice')),
+                    'fund_document','instrument','instrument_flow','cash_count','sales_invoice',
+                    'manual_voucher','asset_purchase','asset_depreciation','asset_disposal')),
                 source_id INTEGER NOT NULL,
                 total_amount REAL NOT NULL DEFAULT 0,
                 status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','void')),
@@ -8101,6 +8168,131 @@ pub fn migrate_stage12_schema(conn: &Connection) -> AppResult<()> {
         let fk_errors = count_fk_check_violations(c)?;
         if fk_errors > 0 {
             return Err(fk_gate_error("第十二阶段迁移", fk_errors, c));
+        }
+        Ok(())
+    })
+}
+
+/// vouchers source_type CHECK 扩展（第十三阶段）：加 'manual_voucher'/'asset_purchase'/
+/// 'asset_depreciation'/'asset_disposal'。模式同 stage12：新库 DDL 已含时跳过（幂等）、
+/// 独立事务 + 原序复制 + 列清单防漂移 + foreign_key_check 兜底。
+fn rebuild_vouchers_source_type_check_stage13(conn: &Connection) -> AppResult<()> {
+    let create_sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='vouchers'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(None);
+    let Some(sql) = create_sql else {
+        return Ok(());
+    };
+    if sql.contains("'manual_voucher'") {
+        return Ok(());
+    }
+    let orphan_count = count_fk_check_violations(conn)?;
+    if orphan_count > 0 {
+        return Ok(());
+    }
+    let fk_before: i64 = conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0))?;
+    conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
+    let result = run_migration_in_transaction(conn, |c| {
+        c.execute_batch(
+            "
+            CREATE TABLE vouchers_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                voucher_no TEXT UNIQUE NOT NULL,
+                voucher_date TEXT NOT NULL,
+                belong_month TEXT NOT NULL,
+                source_type TEXT NOT NULL CHECK (source_type IN (
+                    'salary_accrual','salary_payment','reimbursement_accrual',
+                    'reimbursement_payment','invoice_expense','bank_manual','period_close',
+                    'fund_document','instrument','instrument_flow','cash_count','sales_invoice',
+                    'manual_voucher','asset_purchase','asset_depreciation','asset_disposal')),
+                source_id INTEGER NOT NULL,
+                total_amount REAL NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','void')),
+                remark TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            );
+            INSERT INTO vouchers_new
+                (id, voucher_no, voucher_date, belong_month, source_type, source_id,
+                 total_amount, status, remark, created_at, updated_at)
+            SELECT id, voucher_no, voucher_date, belong_month, source_type, source_id,
+                   total_amount, status, remark, created_at, updated_at
+            FROM vouchers ORDER BY id;
+            DROP TABLE vouchers;
+            ALTER TABLE vouchers_new RENAME TO vouchers;
+            CREATE INDEX IF NOT EXISTS idx_vouchers_month ON vouchers(belong_month, status);
+            CREATE INDEX IF NOT EXISTS idx_vouchers_source ON vouchers(source_type, source_id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_vouchers_source_active
+                ON vouchers(source_type, source_id) WHERE status = 'active';
+            ",
+        )?;
+        assert_vouchers_columns(c)?;
+        let fk_errors = count_fk_check_violations(c)?;
+        if fk_errors > 0 {
+            return Err(AppError::General(format!(
+                "vouchers 表重建异常：发现 {fk_errors} 处外键悬空引用"
+            )));
+        }
+        Ok(())
+    });
+    if fk_before == 0 {
+        conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
+    } else {
+        conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+    }
+    result
+}
+
+/// 第十三阶段迁移：固定资产两表 + vouchers source_type 扩展。
+pub fn migrate_stage13_schema(conn: &Connection) -> AppResult<()> {
+    rebuild_vouchers_source_type_check_stage13(conn)?;
+    run_migration_in_transaction(conn, |c| {
+        c.execute_batch(
+            "CREATE TABLE IF NOT EXISTS fixed_assets (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              asset_no TEXT UNIQUE NOT NULL,
+              name TEXT NOT NULL,
+              category TEXT NOT NULL DEFAULT 'other',
+              purchase_date TEXT NOT NULL,
+              belong_month TEXT NOT NULL,
+              original_value REAL NOT NULL CHECK (original_value > 0),
+              salvage_rate REAL NOT NULL DEFAULT 0.05,
+              useful_life_months INTEGER NOT NULL CHECK (useful_life_months > 0),
+              expense_account_code TEXT NOT NULL DEFAULT '6602' REFERENCES gl_accounts(code),
+              status TEXT NOT NULL DEFAULT 'in_use' CHECK (status IN ('in_use','disposed')),
+              disposal_date TEXT,
+              disposal_income REAL,
+              remark TEXT,
+              created_at TEXT,
+              updated_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS fixed_asset_depreciations (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              asset_id INTEGER NOT NULL REFERENCES fixed_assets(id),
+              month TEXT NOT NULL,
+              amount REAL NOT NULL CHECK (amount > 0),
+              voucher_id INTEGER NOT NULL REFERENCES vouchers(id),
+              created_at TEXT NOT NULL,
+              UNIQUE (asset_id, month)
+            );",
+        )?;
+        let exists: i64 = c.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='fixed_assets'",
+            [],
+            |r| r.get(0),
+        )?;
+        if exists == 0 {
+            return Err(AppError::General(
+                "第十三阶段迁移异常：表 fixed_assets 创建失败".into(),
+            ));
+        }
+        let fk_errors = count_fk_check_violations(c)?;
+        if fk_errors > 0 {
+            return Err(fk_gate_error("第十三阶段迁移", fk_errors, c));
         }
         Ok(())
     })

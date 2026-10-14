@@ -4009,6 +4009,141 @@ pub fn undo_tax_filing(
     Ok(removed)
 }
 
+// ==================== Assets & Manual Voucher（第十三阶段 记账完整性） ====================
+
+#[tauri::command]
+pub fn create_manual_voucher(
+    data: crate::models::ManualVoucherInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Voucher, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let lines: Vec<accounting::ManualVoucherLineInput> = data
+        .lines
+        .iter()
+        .map(|l| accounting::ManualVoucherLineInput {
+            account_code: l.account_code.clone(),
+            debit_amount: l.debit_amount,
+            credit_amount: l.credit_amount,
+            summary: l.summary.clone(),
+            fund_account_id: l.fund_account_id,
+        })
+        .collect();
+    let v = accounting::create_manual_voucher(
+        &conn,
+        &data.belong_month,
+        &data.voucher_date,
+        &data.voucher_kind,
+        &lines,
+        data.remark.as_deref(),
+    )?;
+    db::log_operation(
+        &conn,
+        "create_manual_voucher",
+        &format!("手工录入凭证 {}，金额 {:.2}", v.voucher_no, v.total_amount),
+        "system",
+        Some(&format!("voucher_id={}", v.id)),
+    )?;
+    Ok(v)
+}
+
+#[tauri::command]
+pub fn void_manual_voucher(
+    voucher_id: i64,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<bool, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let n = accounting::void_manual_voucher(&conn, voucher_id)?;
+    if n > 0 {
+        db::log_operation(
+            &conn,
+            "void_manual_voucher",
+            &format!("作废手工凭证 #{}", voucher_id),
+            "system",
+            None,
+        )?;
+    }
+    Ok(n > 0)
+}
+
+#[tauri::command]
+pub fn get_fixed_assets(
+    keyword: Option<String>,
+    status: Option<String>,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<Vec<crate::models::FixedAssetLedgerRow>, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(crate::assets::get_fixed_asset_ledger(
+        &conn,
+        keyword.as_deref(),
+        status.as_deref(),
+    )?)
+}
+
+#[tauri::command]
+pub fn save_fixed_asset(
+    data: crate::models::FixedAssetInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<crate::models::FixedAssetRecord, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(crate::assets::save_fixed_asset(
+        &conn,
+        current.inner(),
+        &data,
+    )?)
+}
+
+#[tauri::command]
+pub fn run_asset_depreciation(
+    month: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<crate::models::FixedDepreciationRunSummary, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(crate::assets::run_asset_depreciation(
+        &conn,
+        &month,
+        current.inner(),
+    )?)
+}
+
+#[tauri::command]
+pub fn dispose_fixed_asset(
+    data: crate::models::FixedAssetDisposalInput,
+    state: tauri::State<'_, Mutex<Connection>>,
+    current: tauri::State<'_, cashier::CurrentOperatorState>,
+) -> Result<crate::models::FixedAssetRecord, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(crate::assets::dispose_fixed_asset(
+        &conn,
+        current.inner(),
+        data.id,
+        &data.disposal_date,
+        data.disposal_income,
+        data.income_fund_account_id,
+        data.remark.as_deref(),
+    )?)
+}
+
+#[tauri::command]
+pub fn export_fixed_asset_ledger(
+    keyword: Option<String>,
+    path: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<String, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let rows = crate::assets::get_fixed_asset_ledger(&conn, keyword.as_deref(), None)?;
+    excel::export_fixed_asset_ledger(&rows, &path)?;
+    db::log_operation(
+        &conn,
+        "export_fixed_asset_ledger",
+        &format!("导出固定资产台账到{path}（{} 行）", rows.len()),
+        "system",
+        None,
+    )?;
+    Ok(path)
+}
+
 // ==================== AR Receivable（第十二阶段 收入侧闭环） ====================
 
 #[tauri::command]
