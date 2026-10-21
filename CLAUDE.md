@@ -60,7 +60,7 @@ npm run lint                             # ESLint
 - [第十一阶段提醒触达](.claude/memory/stage11-reminder-delivery.md) — reminders.rs 四源聚合、OS 系统通知（每日一次去重）、托盘常驻（badge/菜单/关窗到托盘）；spec 见 `docs/superpowers/specs/2026-10-12-stage11-reminder-delivery-design.md`、plan 见 `docs/superpowers/plans/2026-10-12-stage11-reminder-delivery.md`
 - [第十二阶段收入侧闭环](.claude/memory/stage12-revenue-cycle.md) — 销项登记（invoices.direction+收入确认凭证）、进项门禁回扫、应收核销/台账/账龄、ar_overdue 提醒、月结 warning、两导出；spec 见 `docs/superpowers/specs/2026-10-13-stage12-revenue-cycle-design.md`、progress 见 `docs/superpowers/plans/2026-10-13-stage12-progress.md`
 - [第十三阶段记账完整性](.claude/memory/stage13-bookkeeping-completeness.md) — 手工凭证（收/付/转+资金辅助）、固定资产登记/折旧/处置三凭证、台账与月结 warning；spec 见 `docs/superpowers/specs/2026-10-14-stage13-bookkeeping-completeness-design.md`、progress 见 `docs/superpowers/plans/2026-10-14-stage13-progress.md`
-- [v0.10.0 发版验收清单](docs/superpowers/plans/2026-10-13-v0.10-release-acceptance.md) — 阶段 7-11 Windows/macOS 手工验收汇编，打 tag 前逐项执行
+- [v0.10.0 发版验收清单](docs/superpowers/plans/2026-10-13-v0.10-release-acceptance.md) — 阶段 7-11 Windows/macOS 手工验收汇编（含 stage12/13 两节），打 tag 前按清单内 A/B/C 分级执行；发版准备两项（版本 bump、全绿验证）已于 e98ef95 完成
 
 ## 第三阶段开发
 

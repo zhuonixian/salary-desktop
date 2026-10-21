@@ -16,8 +16,8 @@ spec：`docs/superpowers/specs/2026-10-13-stage12-revenue-cycle-design.md`
 | 7 | 导出：export_ar_aging_report（客户×分桶矩阵+合计）、export_output_tax_ledger（区间+月度小计） | ✅ |
 | 8 | 命令注册 6 条（get_ar_ledger/get_ar_allocations/create/cancel/export×2） | ✅ |
 | 9 | 后端全量 390 测试通过 + 提交 | ✅ |
-| 10 | 前端：发票页方向 Tab + 应收台账页 + Dashboard 提醒类别（subagent） | 🔄 |
-| 11 | 集成回归 + 文档四件套 + push | ⏳ |
+| 10 | 前端：发票页方向 Tab + 应收台账页 + Dashboard 提醒类别（subagent） | ✅（44ac4f1） |
+| 11 | 集成回归 + 文档四件套 + push | ✅（后端 390 → 全量 397 回归绿；手册第 14 章已补 e98ef95；memory 已回写；已推送 origin/master） |
 
 ## 实现决策与偏差记录
 
@@ -37,6 +37,6 @@ spec：`docs/superpowers/specs/2026-10-13-stage12-revenue-cycle-design.md`
 
 ## 挂账
 
-- Windows exe 手工验收：销项 OCR 录入→凭证核对→收款核销→账龄提醒→两导出全流程（并入 v0.10 验收清单待补一节）
+- Windows exe 手工验收：销项 OCR 录入→凭证核对→收款核销→账龄提醒→两导出全流程（已并入 v0.10 验收清单第八节）
 - 承兑票据与应收台账自动联动核销（spec 明确不做，手工核销入口已可用）
-- 手册补收入侧章节（随发版统一更新）
+- ~~手册补收入侧章节（随发版统一更新）~~ → 已完成：v0.10 手册第 14 章「销项发票与应收管理」（e98ef95）

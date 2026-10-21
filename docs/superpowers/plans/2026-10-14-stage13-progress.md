@@ -12,8 +12,8 @@ spec：`docs/superpowers/specs/2026-10-14-stage13-bookkeeping-completeness-desig
 | 3 | assets.rs：登记（购置凭证）/ 月度折旧批处理（聚合凭证 + 幂等 + 尾差补齐）/ 处置（清理凭证 + 净损益） | ✅（7 单测） |
 | 4 | 台账查询 / 月结 asset_depreciation_missing warning / 资产台账导出 | ✅ |
 | 5 | 命令注册 7 条 + 后端全量 397 测试 + 提交 | ✅ |
-| 6 | 前端：固定资产页 + 凭证页手工凭证入口（subagent） | 🔄 |
-| 7 | 集成回归 + 文档收尾 + push | ⏳ |
+| 6 | 前端：固定资产页 + 凭证页手工凭证入口（subagent） | ✅（d8ad43c） |
+| 7 | 集成回归 + 文档收尾 + push | ✅（全量 397 回归绿 e98ef95 复验；手册第 15 章已补 e98ef95；memory 已回写；已推送 origin/master） |
 
 ## 实现决策与偏差记录
 
@@ -30,6 +30,6 @@ spec：`docs/superpowers/specs/2026-10-14-stage13-bookkeeping-completeness-desig
 
 ## 挂账
 
-- Windows exe 手工验收（并入发版清单）：登记含购置凭证 → 月度折旧幂等 → 处置净损益凭证 → 手工凭证三式与作废
+- Windows exe 手工验收（已并入 v0.10 验收清单第九节）：登记含购置凭证 → 月度折旧幂等 → 处置净损益凭证 → 手工凭证三式与作废
 - 加速折旧法/减值/在建工程转固（spec 不做范围）
 - 找回密码命令补全 + 自动备份（安全债，独立排期）
