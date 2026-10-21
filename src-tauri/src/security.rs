@@ -442,13 +442,13 @@ fn rewrap_dek_for_new_password(
     Ok(())
 }
 
-/// 已登录用户改密:用旧密码派生 KEK → unwrap 验证 → set_dek → rewrap。
-/// 不走 unlock(),避免污染 failed_attempts / lock_until(unlock 是登录态前置)。
-pub fn change_password(
+/// 验证当前启动密码并把 DEK 载入内存（unwrap 成功即证明）。
+/// 改密 / 换绑恢复码 / 修改安全问题的公共前置；失败不污染
+/// failed_attempts / lock_until（那是 unlock 与找回路径的防爆破计数）。
+fn verify_password_and_load_dek(
     conn: &Connection,
     state: &SecurityState,
-    old: &str,
-    new: &str,
+    password: &str,
 ) -> AppResult<()> {
     let row = conn.query_row(
         "SELECT password_kek_salt, wrapped_dek_by_password, wrapped_dek_by_password_nonce
@@ -471,7 +471,7 @@ pub fn change_password(
     };
 
     let salt = hex::decode(&salt_hex).map_err(|e| AppError::General(e.to_string()))?;
-    let kek = derive_kek(old, &salt)?;
+    let kek = derive_kek(password, &salt)?;
     let wrapped = hex::decode(&wrapped_hex).map_err(|e| AppError::General(e.to_string()))?;
     let nonce_bytes = hex::decode(&nonce_hex).map_err(|e| AppError::General(e.to_string()))?;
     if nonce_bytes.len() != 12 {
@@ -483,10 +483,117 @@ pub fn change_password(
     match unwrap_dek(&wrapped, &kek, &nonce) {
         Some(dek) => {
             state.set_dek(dek);
-            rewrap_dek_for_new_password(conn, state, new)
+            Ok(())
         }
         None => Err(AppError::InvalidParam("原密码错误".into())),
     }
+}
+
+/// 已登录用户改密:用旧密码派生 KEK → unwrap 验证 → set_dek → rewrap。
+/// 不走 unlock(),避免污染 failed_attempts / lock_until(unlock 是登录态前置)。
+pub fn change_password(
+    conn: &Connection,
+    state: &SecurityState,
+    old: &str,
+    new: &str,
+) -> AppResult<()> {
+    verify_password_and_load_dek(conn, state, old)?;
+    rewrap_dek_for_new_password(conn, state, new)
+}
+
+/// 恢复码字符表与前端向导（SetupWizard/SetupSecurity 的 generateRecoveryCode）
+/// 完全一致：排除易混字符 O/0/I/1 的 32 字符表。
+const RECOVERY_CODE_CHARS: &[u8] = b"ABCDEFGHIJKLMNPQRSTUVWXYZ23456789";
+
+/// 生成 24 位恢复码，每 4 位以连字符分组（格式与初始化向导一致）。
+pub fn gen_recovery_code() -> String {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    let mut code = String::with_capacity(29);
+    for i in 0..24 {
+        let idx = rng.gen_range(0..RECOVERY_CODE_CHARS.len());
+        code.push(RECOVERY_CODE_CHARS[idx] as char);
+        if (i + 1) % 4 == 0 && i != 23 {
+            code.push('-');
+        }
+    }
+    code
+}
+
+/// 已登录用户换绑恢复码：验证当前密码 → 后端生成新恢复码 → 重包裹 recovery KEK。
+/// 明文新恢复码仅本次返回；密码与安全问题两条 wrap 不动。
+/// 成功后清零 failed_attempts / lock_until（用户已证明密码知识，旧找回路径爆破累计作废）。
+pub fn rotate_recovery_code(
+    conn: &Connection,
+    state: &SecurityState,
+    password: &str,
+) -> AppResult<String> {
+    verify_password_and_load_dek(conn, state, password)?;
+    let dek = state
+        .dek()
+        .ok_or_else(|| AppError::General("DEK 未加载".into()))?;
+    let new_code = gen_recovery_code();
+    let rc_salt = gen_salt();
+    let rc_kek = derive_kek(&new_code, &rc_salt)?;
+    let (wrapped, nonce) = wrap_dek(&dek, &rc_kek)?;
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE security_state
+         SET recovery_kek_salt = ?, wrapped_dek_by_recovery = ?,
+             wrapped_dek_by_recovery_nonce = ?,
+             failed_attempts = 0, lock_until = NULL, updated_at = ?
+         WHERE id = 1",
+        params![
+            hex::encode(rc_salt),
+            hex::encode(&wrapped),
+            hex::encode(nonce),
+            now
+        ],
+    )?;
+    Ok(new_code)
+}
+
+/// 已登录用户修改安全问题：验证当前密码 → 新答案派生 KEK → 重包裹。
+/// 密码与恢复码两条 wrap 不动；security_answer_hash 按既有约定存新 KEK hex。
+pub fn update_security_question(
+    conn: &Connection,
+    state: &SecurityState,
+    password: &str,
+    new_question: &str,
+    new_answer: &str,
+) -> AppResult<()> {
+    let q = new_question.trim();
+    let a = new_answer.trim();
+    if q.is_empty() || a.is_empty() {
+        return Err(AppError::InvalidParam(
+            "安全问题与答案不能为空".into(),
+        ));
+    }
+    verify_password_and_load_dek(conn, state, password)?;
+    let dek = state
+        .dek()
+        .ok_or_else(|| AppError::General("DEK 未加载".into()))?;
+    let q_salt = gen_salt();
+    let q_kek = derive_kek(a, &q_salt)?;
+    let (wrapped, nonce) = wrap_dek(&dek, &q_kek)?;
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE security_state
+         SET security_question = ?, question_kek_salt = ?,
+             wrapped_dek_by_question = ?, wrapped_dek_by_question_nonce = ?,
+             security_answer_hash = ?,
+             failed_attempts = 0, lock_until = NULL, updated_at = ?
+         WHERE id = 1",
+        params![
+            q,
+            hex::encode(q_salt),
+            hex::encode(&wrapped),
+            hex::encode(nonce),
+            hex::encode(q_kek),
+            now
+        ],
+    )?;
+    Ok(())
 }
 
 /// 检查 lock_until 是否处于冷却期:是则返回 Err,否则继续。
@@ -983,5 +1090,160 @@ mod reset_tests {
             )
             .unwrap();
         assert_eq!(attempts, 0, "change_password 失败不应累计 failed_attempts");
+    }
+}
+
+#[cfg(test)]
+mod rotation_tests {
+    use super::*;
+    use crate::db::tests::setup_db;
+    use rusqlite::Connection;
+
+    fn fresh() -> (Connection, SecurityState) {
+        (setup_db(), SecurityState::new())
+    }
+
+    #[test]
+    fn recovery_code_format_matches_wizard() {
+        for _ in 0..50 {
+            let code = gen_recovery_code();
+            assert_eq!(code.len(), 29, "24 位 + 5 个连字符");
+            let groups: Vec<&str> = code.split('-').collect();
+            assert_eq!(groups.len(), 6);
+            for g in &groups {
+                assert_eq!(g.len(), 4);
+                assert!(g.chars().all(|c| RECOVERY_CODE_CHARS.contains(&(c as u8))));
+            }
+        }
+    }
+
+    #[test]
+    fn rotate_recovery_code_new_works_old_invalid() {
+        let (conn, state) = fresh();
+        setup(&conn, &state, "Abcd1234", "RC-OLD1-CODE", "Q", "A").unwrap();
+        let dek_before = state.dek().unwrap();
+
+        let new_code = rotate_recovery_code(&conn, &state, "Abcd1234").unwrap();
+        assert_ne!(new_code, "RC-OLD1-CODE");
+        assert_eq!(*dek_before, *state.dek().unwrap(), "换绑不动 DEK");
+
+        // 旧恢复码失效、新恢复码可找回重置密码
+        lock(&state);
+        assert!(reset_password_by_recovery(&conn, &state, "RC-OLD1-CODE", "Newp9999").is_err());
+        reset_password_by_recovery(&conn, &state, &new_code, "Newp9999").unwrap();
+        assert!(unlock(&conn, &state, "Newp9999").unwrap().unlocked);
+    }
+
+    #[test]
+    fn rotate_recovery_code_keeps_password_and_question() {
+        let (conn, state) = fresh();
+        setup(&conn, &state, "Abcd1234", "RC-OLD1-CODE", "Q1", "Ans1").unwrap();
+        rotate_recovery_code(&conn, &state, "Abcd1234").unwrap();
+        // 密码与安全问题两条 wrap 不受影响
+        lock(&state);
+        assert!(unlock(&conn, &state, "Abcd1234").unwrap().unlocked);
+        lock(&state);
+        reset_password_by_question(&conn, &state, "Ans1", "Newp9999").unwrap();
+        assert!(unlock(&conn, &state, "Newp9999").unwrap().unlocked);
+    }
+
+    #[test]
+    fn rotate_recovery_code_wrong_password_fails() {
+        let (conn, state) = fresh();
+        setup(&conn, &state, "Abcd1234", "RC", "Q", "A").unwrap();
+        assert!(rotate_recovery_code(&conn, &state, "wrong").is_err());
+        // 失败不累计 failed_attempts（与 change_password 同口径）
+        let attempts: u32 = conn
+            .query_row(
+                "SELECT failed_attempts FROM security_state WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(attempts, 0);
+    }
+
+    #[test]
+    fn rotate_recovery_code_clears_lockout() {
+        let (conn, state) = fresh();
+        setup(&conn, &state, "Abcd1234", "RC", "Q", "A").unwrap();
+        // 人为制造找回路径锁定（3 次失败）
+        lock(&state);
+        for _ in 0..3 {
+            let _ = reset_password_by_recovery(&conn, &state, "bad", "Newp9999");
+        }
+        let lock_until: Option<String> = conn
+            .query_row(
+                "SELECT lock_until FROM security_state WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(lock_until.is_some(), "3 次找回失败应写入 lock_until");
+        // 换绑成功清零（用户已证明密码知识）
+        rotate_recovery_code(&conn, &state, "Abcd1234").unwrap();
+        let (attempts, lock_until): (u32, Option<String>) = conn
+            .query_row(
+                "SELECT failed_attempts, lock_until FROM security_state WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(attempts, 0);
+        assert!(lock_until.is_none());
+    }
+
+    #[test]
+    fn rotate_requires_initialization() {
+        let (conn, state) = fresh();
+        // fresh 未执行 setup → 未初始化应报 NotFound 而非 panic
+        let err = rotate_recovery_code(&conn, &state, "whatever");
+        assert!(matches!(err, Err(AppError::NotFound(_))));
+    }
+
+    #[test]
+    fn update_security_question_new_works_old_invalid() {
+        let (conn, state) = fresh();
+        setup(&conn, &state, "Abcd1234", "RC", "旧问题", "旧答案").unwrap();
+        update_security_question(&conn, &state, "Abcd1234", "新问题", " 新答案 ").unwrap();
+
+        lock(&state);
+        assert!(
+            reset_password_by_question(&conn, &state, "旧答案", "Newp9999").is_err(),
+            "旧答案应失效"
+        );
+        // 新答案 trim 后生效
+        reset_password_by_question(&conn, &state, "新答案", "Newp9999").unwrap();
+        assert!(unlock(&conn, &state, "Newp9999").unwrap().unlocked);
+        // 问题文本已更新
+        let q: String = conn
+            .query_row(
+                "SELECT security_question FROM security_state WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(q, "新问题");
+    }
+
+    #[test]
+    fn update_security_question_keeps_password_and_recovery() {
+        let (conn, state) = fresh();
+        setup(&conn, &state, "Abcd1234", "RC-CODE-9999", "Q", "A").unwrap();
+        update_security_question(&conn, &state, "Abcd1234", "Q2", "A2").unwrap();
+        lock(&state);
+        assert!(unlock(&conn, &state, "Abcd1234").unwrap().unlocked);
+        lock(&state);
+        reset_password_by_recovery(&conn, &state, "RC-CODE-9999", "Newp9999").unwrap();
+        assert!(unlock(&conn, &state, "Newp9999").unwrap().unlocked);
+    }
+
+    #[test]
+    fn update_security_question_validations() {
+        let (conn, state) = fresh();
+        setup(&conn, &state, "Abcd1234", "RC", "Q", "A").unwrap();
+        assert!(update_security_question(&conn, &state, "Abcd1234", "", "A2").is_err());
+        assert!(update_security_question(&conn, &state, "Abcd1234", "Q2", "  ").is_err());
+        assert!(update_security_question(&conn, &state, "wrong", "Q2", "A2").is_err());
     }
 }

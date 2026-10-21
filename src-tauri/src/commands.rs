@@ -1769,6 +1769,60 @@ pub fn backup_database(
     Ok(result)
 }
 
+/// 自动备份设置与状态查询（第十四阶段）。
+#[tauri::command]
+pub fn get_auto_backup_settings(
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<AutoBackupSettings, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    Ok(data_safety::get_auto_backup_settings(&conn)?)
+}
+
+/// 更新自动备份设置。keep_count 后端裁剪到 3-20。
+#[tauri::command]
+pub fn update_auto_backup_settings(
+    enabled: bool,
+    keep_count: u32,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<(), AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    data_safety::update_auto_backup_settings(&conn, enabled, keep_count)?;
+    db::log_operation(
+        &conn,
+        "update_auto_backup_settings",
+        &format!("更新自动备份设置（enabled={enabled}, keep_count={keep_count}）"),
+        "system",
+        None,
+    )?;
+    Ok(())
+}
+
+/// 自动备份幂等入口：前端解锁成功后与正式月结成功后 fire-and-forget 调用。
+/// 不满足条件时静默跳过并返回原因；成功留痕（detail 不含敏感）。
+#[tauri::command]
+pub fn run_auto_backup_if_due(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Mutex<Connection>>,
+    sec: tauri::State<'_, crate::security::SecurityState>,
+) -> Result<AutoBackupOutcome, AppError> {
+    let app_data_dir = app_data_dir(&app)?;
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    let outcome = data_safety::run_auto_backup_if_due(&conn, &app_data_dir, sec.inner())?;
+    if outcome.ran {
+        db::log_operation(
+            &conn,
+            "auto_backup_created",
+            "自动备份已创建（加密备份包）",
+            "system",
+            Some(&format!(
+                "{{\"path\":\"{}\"}}",
+                outcome.backup_path.clone().unwrap_or_default()
+            )),
+        )?;
+    }
+    Ok(outcome)
+}
+
 #[tauri::command]
 pub fn restore_database(
     backup_dir: String,

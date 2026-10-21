@@ -11,7 +11,8 @@ use uuid::Uuid;
 use crate::db;
 use crate::errors::{AppError, AppResult};
 use crate::models::{
-    DataBackupResult, DataRestoreResult, DataSafetyCheckResult, DataSafetyStatus, DataTableCount,
+    AutoBackupOutcome, AutoBackupSettings, DataBackupResult, DataRestoreResult,
+    DataSafetyCheckResult, DataSafetyStatus, DataTableCount,
 };
 use crate::security::{self, SecurityState, BACKUP_MAGIC};
 
@@ -132,7 +133,19 @@ pub fn backup_database(
     encrypt: bool,
     sec: &SecurityState,
 ) -> AppResult<DataBackupResult> {
-    let dir_result = create_backup(conn, app_data_dir, target_dir, "salary-backup")?;
+    backup_database_with_prefix(conn, app_data_dir, target_dir, encrypt, sec, "salary-backup")
+}
+
+/// backup_database 的可定制前缀版本：自动备份用 auto-daily- 前缀区分手动产物。
+pub fn backup_database_with_prefix(
+    conn: &Connection,
+    app_data_dir: &Path,
+    target_dir: &Path,
+    encrypt: bool,
+    sec: &SecurityState,
+    prefix: &str,
+) -> AppResult<DataBackupResult> {
+    let dir_result = create_backup(conn, app_data_dir, target_dir, prefix)?;
 
     if !encrypt {
         return Ok(dir_result);
@@ -149,7 +162,7 @@ pub fn backup_database(
     let (cipher, nonce) = security::encrypt_bytes(&payload, &dek)?;
 
     let safe_time = Utc::now().format("%Y%m%d-%H%M%S").to_string();
-    let enc_file_name = format!("salary-backup-{safe_time}-{}.enc", Uuid::new_v4().simple());
+    let enc_file_name = format!("{prefix}-{safe_time}-{}.enc", Uuid::new_v4().simple());
     let enc_path = target_dir.join(&enc_file_name);
 
     let mut buf = Vec::with_capacity(BACKUP_MAGIC.len() + 12 + cipher.len());
@@ -172,6 +185,172 @@ pub fn backup_database(
         database_size: total_size,
         invoice_dir_size: 0,
         created_at,
+    })
+}
+
+// ===== 自动备份（第十四阶段）=====
+
+/// 自动备份产物统一存放在 app_data_dir/backups/（与恢复前保险快照同目录），
+/// 文件名前缀 auto-daily- 区分手动备份（salary-backup-）与恢复快照（auto-before-restore-）。
+const AUTO_BACKUP_PREFIX: &str = "auto-daily";
+const AUTO_BACKUP_DIR: &str = "backups";
+
+const AUTO_BACKUP_ENABLED_KEY: &str = "auto_backup_enabled";
+const AUTO_BACKUP_KEEP_KEY: &str = "auto_backup_keep_count";
+const AUTO_BACKUP_LAST_AT_KEY: &str = "last_auto_backup_at";
+const AUTO_BACKUP_LAST_PATH_KEY: &str = "last_auto_backup_path";
+/// 备份提醒源的静默口径键（reminders.rs collect_backup 读取）。
+const LAST_DATA_BACKUP_AT_KEY: &str = "last_data_backup_at";
+const LAST_DATA_BACKUP_PATH_KEY: &str = "last_data_backup_path";
+
+pub const AUTO_BACKUP_KEEP_MIN: u32 = 3;
+pub const AUTO_BACKUP_KEEP_MAX: u32 = 20;
+pub const AUTO_BACKUP_KEEP_DEFAULT: u32 = 5;
+
+pub fn get_auto_backup_settings(conn: &Connection) -> AppResult<AutoBackupSettings> {
+    // 未配置时默认开启（数据安全优先；空账套与未解锁天然不会执行）
+    let enabled = db::get_setting(conn, AUTO_BACKUP_ENABLED_KEY)?
+        .map(|v| v == "true")
+        .unwrap_or(true);
+    let keep_count = db::get_setting(conn, AUTO_BACKUP_KEEP_KEY)?
+        .and_then(|v| v.parse::<u32>().ok())
+        .map(|v| v.clamp(AUTO_BACKUP_KEEP_MIN, AUTO_BACKUP_KEEP_MAX))
+        .unwrap_or(AUTO_BACKUP_KEEP_DEFAULT);
+    let last_run_at = db::get_setting(conn, AUTO_BACKUP_LAST_AT_KEY)?;
+    let last_run_path = db::get_setting(conn, AUTO_BACKUP_LAST_PATH_KEY)?;
+    Ok(AutoBackupSettings {
+        enabled,
+        keep_count,
+        last_run_at,
+        last_run_path,
+    })
+}
+
+pub fn update_auto_backup_settings(
+    conn: &Connection,
+    enabled: bool,
+    keep_count: u32,
+) -> AppResult<()> {
+    let keep = keep_count.clamp(AUTO_BACKUP_KEEP_MIN, AUTO_BACKUP_KEEP_MAX);
+    db::set_setting(
+        conn,
+        AUTO_BACKUP_ENABLED_KEY,
+        if enabled { "true" } else { "false" },
+    )?;
+    db::set_setting(conn, AUTO_BACKUP_KEEP_KEY, &keep.to_string())?;
+    Ok(())
+}
+
+/// 当日是否已自动备份过（按本地日历日去重，跨日自动重提）。
+fn auto_backup_done_today(conn: &Connection) -> AppResult<bool> {
+    if let Some(ts) = db::get_setting(conn, AUTO_BACKUP_LAST_AT_KEY)? {
+        if let Ok(t) = chrono::DateTime::parse_from_rfc3339(&ts) {
+            return Ok(t.with_timezone(&chrono::Local).date_naive()
+                == chrono::Local::now().date_naive());
+        }
+    }
+    Ok(false)
+}
+
+/// 滚动清理：backups/ 下 auto-daily-*.enc 只保留最新 keep_count 份（按修改时间）。
+/// 返回被删除的文件名（供留痕）；目录不存在或读失败时静默返回空。
+fn prune_auto_backups(backups_dir: &Path, keep_count: u32) -> Vec<String> {
+    let mut files: Vec<PathBuf> = match fs::read_dir(backups_dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_file()
+                    && p.extension().map(|x| x == "enc").unwrap_or(false)
+                    && p.file_name()
+                        .map(|n| n.to_string_lossy().starts_with(AUTO_BACKUP_PREFIX))
+                        .unwrap_or(false)
+            })
+            .collect(),
+        Err(_) => return Vec::new(),
+    };
+    files.sort_by_key(|p| fs::metadata(p).and_then(|m| m.modified()).ok());
+    let mut removed = Vec::new();
+    while files.len() > keep_count as usize {
+        let oldest = files.remove(0);
+        let name = oldest.to_string_lossy().to_string();
+        if fs::remove_file(&oldest).is_ok() {
+            removed.push(name);
+        }
+    }
+    removed
+}
+
+/// 自动备份主入口（幂等）：不满足条件时静默跳过并返回原因，成功产加密备份包。
+/// 前端在解锁成功后与正式月结成功后 fire-and-forget 调用。
+pub fn run_auto_backup_if_due(
+    conn: &Connection,
+    app_data_dir: &Path,
+    sec: &SecurityState,
+) -> AppResult<AutoBackupOutcome> {
+    let settings = get_auto_backup_settings(conn)?;
+    if !settings.enabled {
+        return Ok(AutoBackupOutcome {
+            ran: false,
+            reason: "disabled".into(),
+            backup_path: None,
+        });
+    }
+    if crate::onboarding::is_empty_ledger(conn)? {
+        return Ok(AutoBackupOutcome {
+            ran: false,
+            reason: "empty_ledger".into(),
+            backup_path: None,
+        });
+    }
+    if !sec.is_dek_loaded() {
+        return Ok(AutoBackupOutcome {
+            ran: false,
+            reason: "not_unlocked".into(),
+            backup_path: None,
+        });
+    }
+    if auto_backup_done_today(conn)? {
+        return Ok(AutoBackupOutcome {
+            ran: false,
+            reason: "already_today".into(),
+            backup_path: None,
+        });
+    }
+
+    let backups_dir = app_data_dir.join(AUTO_BACKUP_DIR);
+    fs::create_dir_all(&backups_dir)?;
+    // 加密备份（内存 DEK）；产物 auto-daily-*.enc，恢复走既有加密备份包路径
+    let result = backup_database_with_prefix(
+        conn,
+        app_data_dir,
+        &backups_dir,
+        true,
+        sec,
+        AUTO_BACKUP_PREFIX,
+    )?;
+
+    // 更新当日去重依据与提醒口径（30 天备份提醒随之静默）
+    db::set_setting(conn, AUTO_BACKUP_LAST_AT_KEY, &result.created_at)?;
+    db::set_setting(conn, AUTO_BACKUP_LAST_PATH_KEY, &result.backup_dir)?;
+    db::set_setting(conn, LAST_DATA_BACKUP_AT_KEY, &result.created_at)?;
+    db::set_setting(conn, LAST_DATA_BACKUP_PATH_KEY, &result.backup_dir)?;
+
+    let removed = prune_auto_backups(&backups_dir, settings.keep_count);
+    if !removed.is_empty() {
+        let _ = db::log_operation(
+            conn,
+            "auto_backup_pruned",
+            &format!("滚动清理 {} 份旧自动备份", removed.len()),
+            "system",
+            None,
+        );
+    }
+
+    Ok(AutoBackupOutcome {
+        ran: true,
+        reason: "created".into(),
+        backup_path: Some(result.backup_dir),
     })
 }
 
@@ -1133,5 +1312,126 @@ mod tests {
         let _ = fs::remove_dir_all(src_app);
         let _ = fs::remove_dir_all(backup_parent);
         let _ = fs::remove_dir_all(dst_app);
+    }
+
+    // ===== 自动备份（第十四阶段）=====
+
+    #[test]
+    fn auto_backup_creates_enc_and_updates_settings() {
+        let (app_dir, conn) = seed_app("auto-backup-run");
+        let state = init_security(&conn);
+
+        let outcome = run_auto_backup_if_due(&conn, &app_dir, &state).unwrap();
+        assert!(outcome.ran);
+        assert_eq!(outcome.reason, "created");
+
+        let path = PathBuf::from(outcome.backup_path.unwrap());
+        assert!(path.is_file(), "产物应为单个 .enc 文件");
+        assert!(
+            path.file_name().unwrap().to_string_lossy().starts_with("auto-daily-"),
+            "前缀区分手动备份"
+        );
+        assert!(is_encrypted_backup(&path).unwrap(), "BACKUP_MAGIC 头");
+
+        // 当日去重：第二次调用跳过
+        let again = run_auto_backup_if_due(&conn, &app_dir, &state).unwrap();
+        assert!(!again.ran);
+        assert_eq!(again.reason, "already_today");
+
+        // 设置与提醒口径均已更新
+        let s = get_auto_backup_settings(&conn).unwrap();
+        assert!(s.last_run_at.is_some());
+        assert!(db::get_setting(&conn, "last_data_backup_at")
+            .unwrap()
+            .is_some());
+
+        let _ = fs::remove_dir_all(&app_dir);
+    }
+
+    #[test]
+    fn auto_backup_skip_conditions() {
+        // 空账套：seed_app 但不插员工 → 复制其结构手工构造
+        let app_dir = temp_dir("auto-backup-empty");
+        fs::create_dir_all(&app_dir).unwrap();
+        let conn = db::init_db(&app_dir.to_string_lossy()).unwrap();
+        let state = SecurityState::new();
+        security::setup(&conn, &state, "Abcd1234", "RC", "Q", "A").unwrap();
+        let out = run_auto_backup_if_due(&conn, &app_dir, &state).unwrap();
+        assert!(!out.ran);
+        assert_eq!(out.reason, "empty_ledger");
+        let _ = fs::remove_dir_all(&app_dir);
+
+        // 未解锁（DEK 未加载）：非空账套 + 未 init security（DEK 为空）
+        let (app_dir2, conn2) = seed_app("auto-backup-locked");
+        let state2 = init_security(&conn2);
+        security::lock(&state2);
+        let out2 = run_auto_backup_if_due(&conn2, &app_dir2, &state2).unwrap();
+        assert!(!out2.ran);
+        assert_eq!(out2.reason, "not_unlocked");
+
+        // 已禁用（优先级最高）
+        update_auto_backup_settings(&conn2, false, 5).unwrap();
+        let out3 = run_auto_backup_if_due(&conn2, &app_dir2, &state2).unwrap();
+        assert!(!out3.ran);
+        assert_eq!(out3.reason, "disabled");
+
+        let _ = fs::remove_dir_all(&app_dir2);
+    }
+
+    #[test]
+    fn auto_backup_settings_default_and_clamp() {
+        let (app_dir, conn) = seed_app("auto-backup-settings");
+        // 默认：开 + 5 份
+        let s = get_auto_backup_settings(&conn).unwrap();
+        assert!(s.enabled);
+        assert_eq!(s.keep_count, 5);
+        assert!(s.last_run_at.is_none());
+
+        // keep_count 裁剪到 3-20
+        update_auto_backup_settings(&conn, true, 1).unwrap();
+        assert_eq!(get_auto_backup_settings(&conn).unwrap().keep_count, 3);
+        update_auto_backup_settings(&conn, true, 99).unwrap();
+        assert_eq!(get_auto_backup_settings(&conn).unwrap().keep_count, 20);
+
+        let _ = fs::remove_dir_all(&app_dir);
+    }
+
+    #[test]
+    fn prune_auto_backups_keeps_newest_n() {
+        let dir = temp_dir("auto-backup-prune");
+        fs::create_dir_all(&dir).unwrap();
+        // 造 7 份"自动备份"（旧→新按修改时间），外加 1 份手动与 1 份恢复快照（不应被动）
+        for i in 0..7 {
+            let p = dir.join(format!("auto-daily-2026010{i}-000000-a{i}.enc"));
+            fs::write(&p, "x").unwrap();
+            let t = std::time::SystemTime::now() - std::time::Duration::from_secs(1000 - i * 100);
+            let _ = fs::File::options().write(true).open(&p).and_then(|f| {
+                f.set_modified(t)
+            });
+        }
+        let manual = dir.join("salary-backup-20260101-000000-x.enc");
+        fs::write(&manual, "x").unwrap();
+        let restore_snap = dir.join("auto-before-restore-20260101-000000");
+        fs::create_dir_all(&restore_snap).unwrap();
+
+        let removed = prune_auto_backups(&dir, 3);
+        assert_eq!(removed.len(), 4, "7 份保留 3 份删 4 份");
+        let remain: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        let auto_remain = remain.iter().filter(|n| n.starts_with("auto-daily-")).count();
+        assert_eq!(auto_remain, 3);
+        assert!(remain.iter().any(|n| n.starts_with("salary-backup-")), "手动备份不动");
+        assert!(
+            remain.iter().any(|n| n.starts_with("auto-before-restore")),
+            "恢复快照目录不动"
+        );
+        // 删的是最旧的（按修改时间）
+        assert!(removed.iter().all(|n| n.contains("a0") || n.contains("a1") || n.contains("a2") || n.contains("a3")),
+            "删除应集中在最旧 4 份");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

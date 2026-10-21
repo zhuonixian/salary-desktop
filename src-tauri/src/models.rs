@@ -1241,6 +1241,27 @@ pub struct DataSafetyCheckResult {
     pub messages: Vec<String>,
 }
 
+/// 自动备份设置与状态（第十四阶段）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoBackupSettings {
+    pub enabled: bool,
+    /// 滚动保留份数（3-20，默认 5）
+    pub keep_count: u32,
+    /// 最近一次自动备份时间（rfc3339，从未执行为 None）
+    pub last_run_at: Option<String>,
+    pub last_run_path: Option<String>,
+}
+
+/// 自动备份执行结果：ran=false 时 reason 说明跳过原因
+/// （disabled / empty_ledger / not_unlocked / already_today）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoBackupOutcome {
+    pub ran: bool,
+    pub reason: String,
+    /// ran=true 时的备份产物路径
+    pub backup_path: Option<String>,
+}
+
 // ==================== Security ====================
 
 /// 安全中心状态概览,前端用于渲染 Setup/Lock/Status 等界面。

@@ -189,6 +189,79 @@ pub fn change_password(
     r
 }
 
+/// 换绑恢复码：验证当前密码 → 后端生成新恢复码，明文仅本次返回。
+/// 前端展示一次（大字号 + 复制 + 确认抄写），不再提供"再看一次"。
+#[tauri::command]
+pub fn rotate_recovery_code(
+    password: String,
+    state: State<'_, Mutex<Connection>>,
+    sec: State<'_, SecurityState>,
+) -> AppResult<String> {
+    let conn = lock_conn(&state)?;
+    let r = security::rotate_recovery_code(&conn, &sec, &password);
+    match &r {
+        Ok(_) => {
+            let now = Utc::now().to_rfc3339();
+            let detail = format!("{{\"at\":\"{}\"}}", now);
+            let _ = db::log_operation(
+                &conn,
+                "security_recovery_code_rotated",
+                "换绑恢复码成功",
+                SEC_OP_OPERATOR,
+                Some(&detail),
+            );
+        }
+        Err(e) => {
+            let detail = format!("{{\"error\":\"{}\"}}", json_escape(&e.to_string()));
+            let _ = db::log_operation(
+                &conn,
+                "security_recovery_code_rotated_failed",
+                "换绑恢复码失败",
+                SEC_OP_OPERATOR,
+                Some(&detail),
+            );
+        }
+    }
+    r
+}
+
+/// 修改安全问题与答案：验证当前密码后重包裹。日志不含问题与答案明文。
+#[tauri::command]
+pub fn update_security_question(
+    password: String,
+    new_question: String,
+    new_answer: String,
+    state: State<'_, Mutex<Connection>>,
+    sec: State<'_, SecurityState>,
+) -> AppResult<()> {
+    let conn = lock_conn(&state)?;
+    let r = security::update_security_question(&conn, &sec, &password, &new_question, &new_answer);
+    match &r {
+        Ok(()) => {
+            let now = Utc::now().to_rfc3339();
+            let detail = format!("{{\"at\":\"{}\"}}", now);
+            let _ = db::log_operation(
+                &conn,
+                "security_question_updated",
+                "修改安全问题成功",
+                SEC_OP_OPERATOR,
+                Some(&detail),
+            );
+        }
+        Err(e) => {
+            let detail = format!("{{\"error\":\"{}\"}}", json_escape(&e.to_string()));
+            let _ = db::log_operation(
+                &conn,
+                "security_question_updated_failed",
+                "修改安全问题失败",
+                SEC_OP_OPERATOR,
+                Some(&detail),
+            );
+        }
+    }
+    r
+}
+
 /// 用恢复码重置密码。失败累计 3 次锁定 15 分钟。
 #[tauri::command]
 pub fn reset_password_by_recovery(
