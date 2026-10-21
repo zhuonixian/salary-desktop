@@ -15,7 +15,7 @@ import {
 import { open } from '@tauri-apps/plugin-dialog';
 import dayjs from 'dayjs';
 import { useNavigate } from 'react-router-dom';
-import { closeMonth, exportMonthClosePackage, getMonthCloseWorkbench, reopenMonth } from '@/api';
+import { closeMonth, exportMonthClosePackage, getMonthCloseWorkbench, reopenMonth, runAutoBackupIfDue } from '@/api';
 import { SensitiveStatistic } from '@/components/SensitiveStatistic';
 import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
 import type { MonthCloseCheckItem, MonthCloseWorkbench } from '@/types';
@@ -82,6 +82,10 @@ const MonthClose: React.FC = () => {
       await closeMonth(monthStr, values.remark);
       message.success('正式月结完成');
       closeForm.resetFields();
+      // 月结是数据高点：成功后触发自动备份（幂等，当日已备则跳过；失败不阻塞流程）
+      runAutoBackupIfDue().catch((err) => {
+        console.warn('[MonthClose] 月结后自动备份触发失败:', err);
+      });
       await fetchData();
     } catch (e: unknown) {
       message.error('正式月结失败: ' + (e instanceof Error ? e.message : String(e)));

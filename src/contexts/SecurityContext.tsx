@@ -16,6 +16,7 @@ import {
   resetPasswordByQuestion,
   resetPasswordByRecovery,
   revealSensitiveData,
+  runAutoBackupIfDue,
   setupSecurity,
   unlock as apiUnlock,
   updateIdleSettings,
@@ -119,6 +120,11 @@ export function SecurityProvider({ children }: { children: ReactNode }) {
     if (r.unlocked) {
       setIsLocked(false);
       await refreshStatus();
+      // 每日首次解锁后触发自动备份（幂等，当日已备/空账套/未开启由后端静默跳过；
+      // 失败不阻塞解锁流程，仅留操作日志）。月结成功后另有触发点。
+      runAutoBackupIfDue().catch((err) => {
+        console.warn('[SecurityContext] 自动备份触发失败:', err);
+      });
       return;
     }
     // 失败：刷新前端状态（更新 failed_attempts / lock_until），再抛错给 LockScreen。

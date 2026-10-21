@@ -1226,7 +1226,19 @@
       <li><strong>敏感解锁时长</strong>：1 / 5 / 15 / 30 分钟</li>
       <li><strong>手动锁屏</strong>：临时离开时一键锁定</li>
       <li><strong>状态查看</strong>：失败尝试次数、上次改密时间</li>
+      <li><strong>找回凭据维护</strong>：<span class="tag tag-green">v0.10 新增</span>换绑恢复码 / 修改安全问题（见下）</li>
     </ul>
+  </div>
+
+  <div class="card">
+    <div class="card-title">找回凭据维护<span class="tag tag-green">v0.10 新增</span></div>
+    <p><strong>路径</strong>：菜单「安全中心 → 找回凭据维护」</p>
+    <ul>
+      <li><strong>换绑恢复码</strong>：输入当前启动密码 → 生成新恢复码（<strong>仅显示一次</strong>，大字号展示 + 一键复制，勾选「我已抄写保存」后才能关闭）。换绑后旧恢复码立即失效，密码与安全问题不受影响</li>
+      <li><strong>修改安全问题</strong>：输入当前启动密码 + 新问题 + 新答案。保存后旧答案立即失效，恢复码与密码不受影响</li>
+      <li>适用场景：恢复码抄写遗失或怀疑泄露、安全问题答案遗忘前主动更换。两项操作均写入操作日志（不含密钥与答案明文）</li>
+    </ul>
+    <p>提示：三条找回/登录凭据（密码、恢复码、安全问题答案）彼此独立包裹同一数据密钥，更换任何一条都不影响其余两条，也不影响已加密的发票图片。</p>
   </div>
 </section>
 
@@ -1842,6 +1854,18 @@
   </div>
 
   <div class="card">
+    <div class="card-title">自动备份<span class="tag tag-green">v0.10 新增</span></div>
+    <p><strong>路径</strong>：菜单「输出审计 → 数据安全 → 自动备份」</p>
+    <ul>
+      <li><strong>触发时机</strong>：每日首次解锁成功后、正式月结成功后自动执行（当日只备一次；空账套不执行）</li>
+      <li><strong>产物</strong>：与手动加密备份同格式的单文件备份包（auto-daily- 前缀，存于应用数据目录 <code>backups/</code>），恢复时先解锁应用再走「从备份恢复」</li>
+      <li><strong>滚动保留</strong>：默认保留最近 5 份（可调 3-20），超出自动清理最旧；手动备份与恢复保护备份不受影响</li>
+      <li><strong>设置</strong>：自动备份卡内可开关（默认开启）、调整保留份数；最近一次执行时间与文件路径实时可见</li>
+      <li>成功后 30 天未备份的提醒自动静默；自动备份仍在同一块磁盘上，<strong>异机容灾请继续定期「立即备份」导出并转移 U 盘 / 网盘</strong></li>
+    </ul>
+  </div>
+
+  <div class="card">
     <div class="card-title">数据存储位置</div>
     <table>
       <thead><tr><th>平台</th><th>路径</th></tr></thead>
@@ -1855,7 +1879,7 @@
     <ul>
       <li><code>salary.db</code>：主数据库（员工 / 工资 / 发票 / 报销等所有业务数据）</li>
       <li><code>invoices/{月份}/{时间戳}_{文件名}</code>：发票原图加密归档</li>
-      <li><code>backups/</code>：恢复操作产生的自动保护备份</li>
+      <li><code>backups/</code>：自动备份（auto-daily- 加密包）与恢复操作产生的自动保护备份</li>
     </ul>
   </div>
 
@@ -1865,7 +1889,7 @@
     <p>所有敏感操作自动入日志（不可篡改）：</p>
     <ul>
       <li><strong>业务操作</strong>：save_invoice、calculate_salary、close_month、backup_database、restore_database 等</li>
-      <li><strong>安全事件</strong>：unlock_success / unlock_failed、change_password、reset_by_recovery / question、lock、reveal_sensitive</li>
+      <li><strong>安全事件</strong>：unlock_success / unlock_failed、change_password、reset_by_recovery / question、security_recovery_code_rotated、security_question_updated、auto_backup_created、lock、reveal_sensitive</li>
       <li><strong>不记录</strong>：密码、恢复码、安全问题答案本身</li>
     </ul>
   </div>

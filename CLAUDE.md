@@ -60,6 +60,7 @@ npm run lint                             # ESLint
 - [第十一阶段提醒触达](.claude/memory/stage11-reminder-delivery.md) — reminders.rs 四源聚合、OS 系统通知（每日一次去重）、托盘常驻（badge/菜单/关窗到托盘）；spec 见 `docs/superpowers/specs/2026-10-12-stage11-reminder-delivery-design.md`、plan 见 `docs/superpowers/plans/2026-10-12-stage11-reminder-delivery.md`
 - [第十二阶段收入侧闭环](.claude/memory/stage12-revenue-cycle.md) — 销项登记（invoices.direction+收入确认凭证）、进项门禁回扫、应收核销/台账/账龄、ar_overdue 提醒、月结 warning、两导出；spec 见 `docs/superpowers/specs/2026-10-13-stage12-revenue-cycle-design.md`、progress 见 `docs/superpowers/plans/2026-10-13-stage12-progress.md`
 - [第十三阶段记账完整性](.claude/memory/stage13-bookkeeping-completeness.md) — 手工凭证（收/付/转+资金辅助）、固定资产登记/折旧/处置三凭证、台账与月结 warning；spec 见 `docs/superpowers/specs/2026-10-14-stage13-bookkeeping-completeness-design.md`、progress 见 `docs/superpowers/plans/2026-10-14-stage13-progress.md`
+- [第十四阶段安全债](.claude/memory/stage14-security-debt.md) — 找回凭据换绑（rotate_recovery_code/update_security_question，仅重包裹目标 KEK）、自动备份（解锁/月结后触发、auto-daily 加密包滚动保留）；spec 见 `docs/superpowers/specs/2026-10-21-stage14-security-debt-design.md`、progress 见 `docs/superpowers/plans/2026-10-21-stage14-progress.md`
 - [v0.10.0 发版验收清单](docs/superpowers/plans/2026-10-13-v0.10-release-acceptance.md) — 阶段 7-11 Windows/macOS 手工验收汇编（含 stage12/13 两节），打 tag 前按清单内 A/B/C 分级执行；发版准备两项（版本 bump、全绿验证）已于 e98ef95 完成
 
 ## 第三阶段开发
@@ -100,7 +101,11 @@ npm run lint                             # ESLint
 
 ## 第十二阶段开发
 
-第十二阶段以收入侧闭环为目标（销项登记→应收挂账→回款核销→账龄监控，零外联不变），按 12A 销项登记（direction 列+进项门禁回扫+收入确认凭证 借1122/贷6001/贷2221）→ 12B 应收核销（ar_receipt_allocations 多对多部分核销/取消留痕/月结保护）与台账页 → 12C 账龄分桶/ar_overdue 提醒与 OS 通知/月结 warning/两导出推进。开发前先读 `.claude/memory/stage12-revenue-cycle.md`、`docs/superpowers/plans/2026-10-13-stage12-progress.md` 和 spec；阻断项：销项票不得混入报销/进项台账（门禁回扫）、发票方向创建后不可改、核销金额不超未核销余额、月结保护双向（发票月+收款单月）。Windows exe 手工验收（销项录入→凭证→核销→账龄提醒→导出）挂账待做。涉及多模块开发时用 subagent 按互不重叠文件范围协作，由主 agent 统一集成、测试、commit、push。
+第十二阶段以收入侧闭环为目标（销项登记→应收挂账→回款核销→账龄监控，零外联不变），按 12A 销项登记（direction 列+进项门禁回扫+收入确认凭证 借1122/贷6001/贷2221）→ 12B 应收核销（ar_receipt_allocations 多对多部分核销/取消留痕/月结保护）与台账页 → 12C 账龄分桶/ar_overdue 提醒与 OS 通知/月结 warning/两导出推进。开发前先读 `.claude/memory/stage12-revenue-cycle.md`、`docs/superpowers/plans/2026-10-13-stage12-progress.md` 和 spec；阻断项：销项票不得混入报销/进项台账（门禁回扫）、发票方向创建后不可改、核销金额不超未核销余额、月结保护双向（发票月+收款单月）。Windows exe 手工验收（销项录入→凭证→核销→账龄提醒→导出）挂账。
+
+## 第十四阶段开发
+
+第十四阶段以安全债为目标（找回凭据换绑 + 自动备份，零外联不变），14A 换绑（verify_password_and_load_dek 公共前置 / rotate_recovery_code 明文仅返回一次 / update_security_question，均只重包裹目标 KEK、成功清零防爆破计数）→ 14B 自动备份（run_auto_backup_if_due 幂等：enabled→非空账套→DEK 已加载→当日未备；auto-daily-*.enc 复用手动加密路径；滚动保留 3-20 份默认 5；成功写 last_data_backup_at 静默 30 天提醒）→ 前端（安全中心找回凭据维护卡、数据安全自动备份卡、SecurityContext 解锁与 MonthClose 月结 fire-and-forget 触发）。开发前先读 `.claude/memory/stage14-security-debt.md` 和 spec；阻断项：换绑不得影响其余两条 wrap（测试互斥覆盖）、自动备份失败不阻塞解锁/月结流程、日志不含密钥材料与答案明文。后端 410 测试。Windows exe 手工验收（换绑全流程/两触发点/滚动清理）见 v0.10 验收清单第十节。
 
 ## 编码约定
 

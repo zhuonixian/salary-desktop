@@ -3,9 +3,11 @@ import {
   Alert,
   Button,
   Card,
+  Checkbox,
   Col,
   Form,
   Input,
+  Modal,
   Radio,
   Row,
   Space,
@@ -15,8 +17,9 @@ import {
   Typography,
   message,
 } from 'antd';
-import { LockOutlined, ReloadOutlined } from '@ant-design/icons';
+import { CopyOutlined, KeyOutlined, LockOutlined, ReloadOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
+import { rotateRecoveryCode, updateSecurityQuestion } from '@/api';
 import { useSecurity } from '@/contexts/SecurityContext';
 
 const { Text } = Typography;
@@ -48,14 +51,34 @@ interface ChangePasswordForm {
   confirmPassword: string;
 }
 
+interface RotateForm {
+  password: string;
+}
+
+interface QuestionForm {
+  password: string;
+  question: string;
+  answer: string;
+}
+
 const SecurityCenter: React.FC = () => {
   const sec = useSecurity();
   const [changeForm] = Form.useForm<ChangePasswordForm>();
+  const [rotateForm] = Form.useForm<RotateForm>();
+  const [questionForm] = Form.useForm<QuestionForm>();
   const [changeLoading, setChangeLoading] = useState(false);
   const [idleLoading, setIdleLoading] = useState(false);
   const [revealLoading, setRevealLoading] = useState(false);
   const [lockLoading, setLockLoading] = useState(false);
   const [newPassword, setNewPassword] = useState('');
+  // 换绑恢复码（第十四阶段）
+  const [rotateOpen, setRotateOpen] = useState(false);
+  const [rotateLoading, setRotateLoading] = useState(false);
+  const [rotateResult, setRotateResult] = useState<string | null>(null);
+  const [rotateConfirmed, setRotateConfirmed] = useState(false);
+  // 修改安全问题
+  const [questionOpen, setQuestionOpen] = useState(false);
+  const [questionLoading, setQuestionLoading] = useState(false);
   const [idleEnabled, setIdleEnabled] = useState<boolean>(sec.idleLockEnabled);
   const [idleSeconds, setIdleSeconds] = useState<number>(sec.idleTimeoutSeconds);
   const [revealSeconds, setRevealSeconds] = useState<number>(sec.sensitiveRevealSeconds);
@@ -123,6 +146,55 @@ const SecurityCenter: React.FC = () => {
       message.error(e instanceof Error ? e.message : '锁定失败');
     } finally {
       setLockLoading(false);
+    }
+  };
+
+  // ===== 找回凭据维护（第十四阶段）=====
+
+  const openRotate = () => {
+    rotateForm.resetFields();
+    setRotateResult(null);
+    setRotateConfirmed(false);
+    setRotateOpen(true);
+  };
+
+  const handleRotate = async (values: RotateForm) => {
+    setRotateLoading(true);
+    try {
+      const code = await rotateRecoveryCode(values.password);
+      setRotateResult(code);
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : '换绑恢复码失败');
+    } finally {
+      setRotateLoading(false);
+    }
+  };
+
+  const copyRotateResult = async () => {
+    if (!rotateResult) return;
+    try {
+      await navigator.clipboard.writeText(rotateResult);
+      message.success('已复制到剪贴板');
+    } catch {
+      message.warning('复制失败，请手动选中文本复制');
+    }
+  };
+
+  const openQuestion = () => {
+    questionForm.resetFields();
+    setQuestionOpen(true);
+  };
+
+  const handleQuestion = async (values: QuestionForm) => {
+    setQuestionLoading(true);
+    try {
+      await updateSecurityQuestion(values.password, values.question, values.answer);
+      message.success('安全问题已更新，旧答案即时失效');
+      setQuestionOpen(false);
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : '修改安全问题失败');
+    } finally {
+      setQuestionLoading(false);
     }
   };
 
@@ -282,8 +354,8 @@ const SecurityCenter: React.FC = () => {
           </Form>
         </Card>
 
-        {/* 卡片 3：找回密码配置 */}
-        <Card title="找回密码配置">
+        {/* 卡片 3：找回凭据维护（第十四阶段：换绑恢复码 / 修改安全问题） */}
+        <Card title="找回凭据维护">
           <Space direction="vertical" size="middle" style={{ width: '100%' }}>
             <Alert
               type="info"
@@ -292,18 +364,21 @@ const SecurityCenter: React.FC = () => {
               description={
                 <Space direction="vertical" size={4}>
                   <Text>
-                    忘记启动密码时，可使用初始化时抄写的 <Text strong>恢复码</Text> 或
+                    忘记启动密码时，可使用 <Text strong>恢复码</Text> 或
                     <Text strong> 安全问题答案</Text> 在锁屏页找回访问权限。
                   </Text>
                   <Text type="secondary">
-                    恢复码和安全问题在安全初始化时一次性生成；当前接口暂不支持在本页面查看或重置，如需变更请通过锁屏的找回流程或重新初始化。
+                    恢复码仅生成时显示一次。若抄写遗失或怀疑泄露，可在此换绑新恢复码；安全问题与答案同样可修改。两项均需验证当前启动密码，且不影响彼此与登录密码。
                   </Text>
                 </Space>
               }
             />
-            <Text type="secondary">
-              如怀疑恢复码已泄露，建议尽快完成密码修改；新密码生效后旧密码立即失效。
-            </Text>
+            <Space>
+              <Button icon={<KeyOutlined />} onClick={openRotate}>
+                换绑恢复码
+              </Button>
+              <Button onClick={openQuestion}>修改安全问题</Button>
+            </Space>
           </Space>
         </Card>
 
@@ -372,6 +447,130 @@ const SecurityCenter: React.FC = () => {
           </Space>
         </Card>
       </Space>
+
+      {/* 换绑恢复码 Modal：两阶段——输密码生成 → 一次性展示新码 */}
+      <Modal
+        open={rotateOpen}
+        title="换绑恢复码"
+        onCancel={() => setRotateOpen(false)}
+        footer={
+          rotateResult
+            ? [
+                <Button
+                  key="close"
+                  type="primary"
+                  disabled={!rotateConfirmed}
+                  onClick={() => setRotateOpen(false)}
+                >
+                  我已保存，关闭
+                </Button>,
+              ]
+            : [
+                <Button key="cancel" onClick={() => setRotateOpen(false)}>
+                  取消
+                </Button>,
+                <Button
+                  key="ok"
+                  type="primary"
+                  loading={rotateLoading}
+                  onClick={() => rotateForm.submit()}
+                >
+                  生成新恢复码
+                </Button>,
+              ]
+        }
+      >
+        {!rotateResult ? (
+          <Form<RotateForm> form={rotateForm} layout="vertical" onFinish={handleRotate}>
+            <Alert
+              style={{ marginBottom: 16 }}
+              type="warning"
+              showIcon
+              message="换绑后旧恢复码立即失效；新恢复码仅显示一次，请准备抄写或复制保存。"
+            />
+            <Form.Item
+              label="当前启动密码"
+              name="password"
+              rules={[{ required: true, message: '请输入当前启动密码' }]}
+            >
+              <Input.Password placeholder="请输入当前启动密码" autoComplete="current-password" />
+            </Form.Item>
+          </Form>
+        ) : (
+          <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+            <Text>
+              新恢复码（<Text type="danger">仅本次显示</Text>，请立即抄写或复制保存）：
+            </Text>
+            <div
+              style={{
+                fontFamily: 'ui-monospace, Consolas, monospace',
+                fontSize: 20,
+                fontWeight: 700,
+                letterSpacing: 1,
+                background: '#fafafa',
+                border: '1px solid #d9d9d9',
+                borderRadius: 6,
+                padding: '16px 12px',
+                textAlign: 'center',
+                userSelect: 'all',
+                wordBreak: 'break-all',
+              }}
+            >
+              {rotateResult}
+            </div>
+            <Button icon={<CopyOutlined />} onClick={copyRotateResult}>
+              复制恢复码
+            </Button>
+            <Checkbox
+              checked={rotateConfirmed}
+              onChange={(e) => setRotateConfirmed(e.target.checked)}
+            >
+              我已抄写保存，了解关闭后无法再次查看
+            </Checkbox>
+          </Space>
+        )}
+      </Modal>
+
+      {/* 修改安全问题 Modal */}
+      <Modal
+        open={questionOpen}
+        title="修改安全问题"
+        onCancel={() => setQuestionOpen(false)}
+        onOk={() => questionForm.submit()}
+        confirmLoading={questionLoading}
+        okText="保存"
+        cancelText="取消"
+      >
+        <Form<QuestionForm> form={questionForm} layout="vertical" onFinish={handleQuestion}>
+          <Alert
+            style={{ marginBottom: 16 }}
+            type="warning"
+            showIcon
+            message="保存后旧答案立即失效，请牢记新答案。"
+          />
+          <Form.Item
+            label="当前启动密码"
+            name="password"
+            rules={[{ required: true, message: '请输入当前启动密码' }]}
+          >
+            <Input.Password placeholder="请输入当前启动密码" autoComplete="current-password" />
+          </Form.Item>
+          <Form.Item
+            label="新安全问题"
+            name="question"
+            rules={[{ required: true, message: '请输入新安全问题' }]}
+          >
+            <Input placeholder="例如：你小学班主任姓什么？" />
+          </Form.Item>
+          <Form.Item
+            label="新答案"
+            name="answer"
+            rules={[{ required: true, message: '请输入新答案' }]}
+          >
+            <Input placeholder="答案不区分前后空格" />
+          </Form.Item>
+        </Form>
+      </Modal>
     </div>
   );
 };

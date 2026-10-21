@@ -5,12 +5,14 @@ import {
   Card,
   Col,
   Descriptions,
+  InputNumber,
   List,
   Modal,
   Row,
   Space,
   Spin,
   Statistic,
+  Switch,
   Table,
   Tag,
   Typography,
@@ -23,6 +25,7 @@ import {
   FolderOpenOutlined,
   ReloadOutlined,
   SafetyCertificateOutlined,
+  ScheduleOutlined,
   ToolOutlined,
   UploadOutlined,
 } from '@ant-design/icons';
@@ -31,11 +34,14 @@ import dayjs from 'dayjs';
 import {
   backupDatabase,
   compactDatabase,
+  getAutoBackupSettings,
   getDataSafetyStatus,
   openAppDataDir,
   restoreDatabase,
+  updateAutoBackupSettings,
   verifyDatabase,
 } from '@/api';
+import type { AutoBackupSettings } from '@/api';
 import type { DataSafetyCheckResult, DataSafetyStatus, DataTableCount } from '@/types';
 
 const { Text } = Typography;
@@ -55,6 +61,22 @@ const DataSafety: React.FC = () => {
   const [checkResult, setCheckResult] = useState<DataSafetyCheckResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [action, setAction] = useState<string | null>(null);
+  // 自动备份（第十四阶段）
+  const [autoSettings, setAutoSettings] = useState<AutoBackupSettings | null>(null);
+  const [autoEnabled, setAutoEnabled] = useState(true);
+  const [autoKeep, setAutoKeep] = useState(5);
+  const [autoSaving, setAutoSaving] = useState(false);
+
+  const fetchAutoSettings = useCallback(async () => {
+    try {
+      const s = await getAutoBackupSettings();
+      setAutoSettings(s);
+      setAutoEnabled(s.enabled);
+      setAutoKeep(s.keep_count);
+    } catch (e: unknown) {
+      message.error('获取自动备份设置失败: ' + (e instanceof Error ? e.message : String(e)));
+    }
+  }, []);
 
   const fetchStatus = useCallback(async () => {
     setLoading(true);
@@ -69,7 +91,8 @@ const DataSafety: React.FC = () => {
 
   useEffect(() => {
     fetchStatus();
-  }, [fetchStatus]);
+    fetchAutoSettings();
+  }, [fetchStatus, fetchAutoSettings]);
 
   const tableData = useMemo(() => status?.table_counts ?? [], [status]);
 
@@ -126,6 +149,19 @@ const DataSafety: React.FC = () => {
     await runAction('compact', compactDatabase, () => {
       message.success('数据库压缩整理完成');
     });
+  };
+
+  const handleAutoSave = async () => {
+    setAutoSaving(true);
+    try {
+      await updateAutoBackupSettings(autoEnabled, autoKeep);
+      message.success('自动备份设置已保存');
+      await fetchAutoSettings();
+    } catch (e: unknown) {
+      message.error((e instanceof Error ? e.message : String(e)) || '保存失败');
+    } finally {
+      setAutoSaving(false);
+    }
   };
 
   const countColumns = [
@@ -272,6 +308,58 @@ const DataSafety: React.FC = () => {
                 >
                   压缩整理数据库
                 </Button>
+              </Space>
+            </Card>
+          </Col>
+        </Row>
+
+        {/* 自动备份（第十四阶段）：每日首次解锁后与正式月结后自动产加密备份包 */}
+        <Row gutter={[16, 16]} className="mb-16">
+          <Col span={24}>
+            <Card title="自动备份" extra={<ScheduleOutlined style={{ color: '#1677ff' }} />}>
+              <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                <Alert
+                  type="info"
+                  showIcon
+                  message="开启后，每日首次解锁与正式月结成功时会自动生成加密备份包（与手动备份同一加密格式，恢复时需先解锁应用）"
+                  description="自动备份存放在应用数据目录 backups/ 下（auto-daily- 前缀），按保留份数滚动清理最旧。备份仍在同一块磁盘上，建议定期通过「立即备份」导出加密包并转移至 U 盘 / 网盘等异机介质。"
+                />
+                <Space wrap size="large">
+                  <Space size={8}>
+                    <Switch checked={autoEnabled} onChange={setEnabled => setAutoEnabled(setEnabled)} />
+                    <Text>{autoEnabled ? '已开启' : '已关闭'}</Text>
+                  </Space>
+                  <Space size={8}>
+                    <Text>保留份数</Text>
+                    <InputNumber
+                      min={3}
+                      max={20}
+                      value={autoKeep}
+                      onChange={(v) => setAutoKeep(Number(v) || 5)}
+                      disabled={!autoEnabled}
+                    />
+                    <Text type="secondary">（3-20 份，超出自动清理最旧）</Text>
+                  </Space>
+                  <Button type="primary" loading={autoSaving} onClick={handleAutoSave}>
+                    保存设置
+                  </Button>
+                </Space>
+                <Descriptions column={2} size="small" bordered>
+                  <Descriptions.Item label="最近自动备份">
+                    {autoSettings?.last_run_at
+                      ? fmtTime(autoSettings.last_run_at)
+                      : '尚未执行（等待下次解锁或月结）'}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="备份文件">
+                    {autoSettings?.last_run_path ? (
+                      <Text copyable ellipsis style={{ maxWidth: 420, display: 'inline-block' }}>
+                        {autoSettings.last_run_path}
+                      </Text>
+                    ) : (
+                      '-'
+                    )}
+                  </Descriptions.Item>
+                </Descriptions>
               </Space>
             </Card>
           </Col>

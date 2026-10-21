@@ -3992,6 +3992,51 @@ export async function resetPasswordByQuestion(answer: string, newPassword: strin
   await invoke<void>('reset_password_by_question', { answer, newPassword });
 }
 
+/** 换绑恢复码：验证当前密码，返回仅显示一次的新恢复码明文。 */
+export async function rotateRecoveryCode(password: string): Promise<string> {
+  return invoke<string>('rotate_recovery_code', { password });
+}
+
+/** 修改安全问题与答案（验证当前密码）。 */
+export async function updateSecurityQuestion(
+  password: string,
+  newQuestion: string,
+  newAnswer: string,
+): Promise<void> {
+  await invoke<void>('update_security_question', { password, newQuestion, newAnswer });
+}
+
+// ==================== 自动备份（第十四阶段） ====================
+
+export interface AutoBackupSettings {
+  enabled: boolean;
+  keep_count: number;
+  last_run_at: string | null;
+  last_run_path: string | null;
+}
+
+export interface AutoBackupOutcome {
+  ran: boolean;
+  reason: string;
+  backup_path: string | null;
+}
+
+export async function getAutoBackupSettings(): Promise<AutoBackupSettings> {
+  return invoke<AutoBackupSettings>('get_auto_backup_settings');
+}
+
+export async function updateAutoBackupSettings(
+  enabled: boolean,
+  keepCount: number,
+): Promise<void> {
+  await invoke<void>('update_auto_backup_settings', { enabled, keepCount });
+}
+
+/** 幂等触发自动备份：解锁成功后 / 正式月结成功后 fire-and-forget 调用。 */
+export async function runAutoBackupIfDue(): Promise<AutoBackupOutcome> {
+  return invoke<AutoBackupOutcome>('run_auto_backup_if_due');
+}
+
 export async function updateIdleSettings(enabled: boolean, seconds: number): Promise<void> {
   await invoke<void>('update_idle_settings', { enabled, seconds });
 }
