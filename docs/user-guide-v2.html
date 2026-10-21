@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>工资核算助手 · 使用手册 v0.9.0</title>
+<title>工资核算助手 · 使用手册 v0.10.0</title>
 <style>
   :root {
     --paper: #f7f5ef;
@@ -743,16 +743,16 @@
           <span class="hero-badge">安装包仅 5.8 MB · 零运行时依赖</span>
         </div>
         <div class="hero-download">
-          <a class="hero-dl-btn" href="https://pan.baidu.com/s/1BWY2LAn58bcn9LjpF8tPMA?pwd=a2u2" target="_blank" rel="noopener">下载 v0.9.0 Windows 版（5.8 MB）</a>
-          <a class="hero-dl-btn" href="https://pan.baidu.com/s/1BRs3IKiKDFvJviCNkxV8TA?pwd=94xw" target="_blank" rel="noopener">下载 v0.9.0 macOS 版（8.3 MB）</a>
+          <a class="hero-dl-btn" href="https://pan.baidu.com/s/1BWY2LAn58bcn9LjpF8tPMA?pwd=a2u2" target="_blank" rel="noopener">下载 v0.10.0 Windows 版（网盘）</a>
+          <a class="hero-dl-btn" href="https://pan.baidu.com/s/1BRs3IKiKDFvJviCNkxV8TA?pwd=94xw" target="_blank" rel="noopener">下载 v0.10.0 macOS 版（网盘）</a>
           <div class="hero-dl-meta">
             <div>Windows exe 提取码 <span class="pw">a2u2</span> ｜ macOS dmg 提取码 <span class="pw">94xw</span>（网盘页链接分别为 <a href="https://pan.baidu.com/s/1BWY2LAn58bcn9LjpF8tPMA?pwd=a2u2" target="_blank" rel="noopener">pan…a2u2</a> / <a href="https://pan.baidu.com/s/1BRs3IKiKDFvJviCNkxV8TA?pwd=94xw" target="_blank" rel="noopener">pan…94xw</a>）</div>
             <div class="gh">源码仓库：<a href="https://github.com/zhuonixian/salary-desktop" target="_blank" rel="noopener">github.com/zhuonixian/salary-desktop</a></div>
           </div>
         </div>
         <div class="hero-meta">
-          <span>版本 <b>v0.9.0</b></span>
-          <span>文档日期 <b>2026-09-19</b></span>
+          <span>版本 <b>v0.10.0</b></span>
+          <span>文档日期 <b>2026-10-21</b></span>
           <span>适用平台 <b>Windows 10 / 11（64 位）· macOS（Apple Silicon）</b></span>
           <span>适用对象 <b>出纳 / 财务 / 人事</b></span>
         </div>
@@ -761,8 +761,8 @@
         <div class="seal-mark-inner">
           <div class="seal-title">核准</div>
           <div class="seal-divider"></div>
-          <div class="seal-meta">v0.9.0</div>
-          <div class="seal-meta">2026.09.19</div>
+          <div class="seal-meta">v0.10.0</div>
+          <div class="seal-meta">2026.10.21</div>
         </div>
       </div>
     </div>
@@ -771,7 +771,7 @@
     <div class="stat"><div class="v">5.8<span style="font-size:18px">MB</span></div><div class="l">安装包体积</div></div>
     <div class="stat"><div class="v">0</div><div class="l">运行时依赖</div></div>
     <div class="stat"><div class="v">62</div><div class="l">预置会计科目</div></div>
-    <div class="stat"><div class="v">10</div><div class="l">类业务自动记账</div></div>
+    <div class="stat"><div class="v">16</div><div class="l">类凭证来源</div></div>
     <div class="stat"><div class="v">3</div><div class="l">层密码防护</div></div>
     <div class="stat"><div class="v">0</div><div class="l">云端依赖</div></div>
   </div>
@@ -907,15 +907,18 @@
   <a href="#accounting"><span class="no">10</span>财务管理与报表</a>
   <a href="#data-safety"><span class="no">11</span>数据安全</a>
   <a href="#onboarding-tax"><span class="no">12</span>初始化向导与办税</a>
-  <a href="#faq"><span class="no">13</span>常见问题</a>
-  <a href="#appendix"><span class="no">14</span>附录</a>
+  <a href="#notify-tray"><span class="no">13</span>提醒触达：通知与托盘</a>
+  <a href="#ar-receivable"><span class="no">14</span>销项发票与应收</a>
+  <a href="#assets-manual"><span class="no">15</span>固定资产与手工凭证</a>
+  <a href="#faq"><span class="no">16</span>常见问题</a>
+  <a href="#appendix"><span class="no">17</span>附录</a>
 </nav>
 
 <!-- ==================== 正文（详细指南层） ==================== -->
 <main>
 <div class="guide-divider">
   <span class="guide-divider-line"></span>
-  <span class="guide-divider-text">详 细 指 南 · 十四章</span>
+  <span class="guide-divider-text">详 细 指 南 · 十七章</span>
   <span class="guide-divider-line"></span>
 </div>
 
@@ -1926,10 +1929,129 @@
   </div>
 </section>
 
-<!-- ==================== 13. 常见问题 ==================== -->
-<section id="faq">
+<!-- ==================== 13. 提醒触达：系统通知与托盘 ==================== -->
+<section id="notify-tray">
   <div class="sec-head">
     <div class="sec-stamp sm">壹拾叁</div>
+    <div>
+      <h2>提醒触达：系统通知与托盘<span class="tag tag-green">v0.10 新增</span></h2>
+      <div class="sec-desc">征期、账期、月结、备份四类待办主动提醒，关窗常驻托盘不漏事</div>
+    </div>
+    <div class="sec-right"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">系统通知：四源待办聚合</div>
+    <p>应用会定期聚合四类提醒，通过操作系统通知弹出：<strong>征期提醒</strong>（申报截止临近）、<strong>账期提醒</strong>（票据到期 / 应收账龄逾期）、<strong>月结提醒</strong>（当月尚未正式月结）、<strong>备份提醒</strong>（长期未备份数据）。</p>
+    <ul>
+      <li>启动后约 5 秒首次检查，之后每 30 分钟自动检查一次；托盘菜单也可「立即检查」</li>
+      <li>同一条提醒<strong>每天最多弹一次</strong>，单轮最多 4 条，避免刷屏打扰</li>
+      <li><strong>通知正文不含任何金额</strong>；锁屏或账套未初始化时跳过检查</li>
+      <li>空账套零打扰：无业务数据时不弹出任何通知</li>
+    </ul>
+    <p>首次启动会请求系统通知权限；若拒绝，将静默降级为仅托盘待办角标，可稍后在系统设置中重新允许。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-title">托盘常驻</div>
+    <ul>
+      <li><strong>关窗到托盘</strong>（默认开启）：点窗口关闭按钮时最小化到系统托盘继续常驻，后台提醒不中断</li>
+      <li>托盘图标悬停可看<strong>当前待办数量</strong>；左键单击重新打开主窗口</li>
+      <li>右键菜单：「打开主窗口」「立即检查提醒」「退出」——想真正退出请走托盘菜单</li>
+      <li>不习惯常驻：菜单「系统设置 → 通知设置」关闭「关窗到托盘」后，点关闭按钮即真正退出应用</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="card-title">开关设置</div>
+    <p><strong>路径</strong>：菜单「系统设置 → 通知设置」</p>
+    <p>「本地系统通知」与「关窗到托盘」默认均开启，可独立关闭。关闭系统通知后，仍保留应用内的提醒触达（首页账期 / 征期提醒卡与各台账页的到期标识）。</p>
+  </div>
+</section>
+
+<!-- ==================== 14. 销项发票与应收管理 ==================== -->
+<section id="ar-receivable">
+  <div class="sec-head">
+    <div class="sec-stamp sm">壹拾肆</div>
+    <div>
+      <h2>销项发票与应收管理<span class="tag tag-green">v0.10 新增</span></h2>
+      <div class="sec-desc">开出的票、挂出的账、收回的款——收入侧一条线管到底</div>
+    </div>
+    <div class="sec-right"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">销项发票登记</div>
+    <p><strong>路径</strong>：菜单「票据报销 → 发票管理」，顶部<strong>进项 / 销项</strong>两个 Tab 切换</p>
+    <ul>
+      <li>销项复用进项全部底座：OCR 识别、（代码 + 号码）全局去重、发票原图加密归档；发票方向创建后不可修改</li>
+      <li>销项口径下<strong>销售方自动预填本公司信息</strong>（取「企业信息」配置），购买方必填</li>
+      <li>保存后自动生成<strong>收入确认凭证</strong>：借 应收账款 1122（挂客户辅助）/ 贷 主营业务收入 6001 / 贷 应交税费—应交增值税(销项税额) 2221，金额全部取自票面，无需配置税率</li>
+      <li>作废销项发票自动生成红字凭证冲回</li>
+      <li><strong>门禁</strong>：销项发票不能关联报销单、不进入进项台账与发票费用凭证——保存时自动拦截，杜绝两头混用</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="card-title">应收台账与回款核销</div>
+    <p><strong>路径</strong>：菜单「资金出纳 → 应收台账」</p>
+    <ul>
+      <li>按月份、客户等条件筛选，顶部汇总卡按账龄五档分桶：<strong>0-30 天 / 31-60 天 / 61-90 天 / 91-180 天 / 180 天以上</strong>（仅统计未核清部分）</li>
+      <li><strong>回款核销</strong>：选择已结算收款单对销项发票核销，核销金额默认取「收款单可用额与发票未核销余额的较小值」；支持多张收款单分次部分核销，且不能超过未核销余额</li>
+      <li>行展开可查看每张发票的全部核销记录；<strong>取消核销留痕</strong>（记录不删除），未核销余额自动恢复</li>
+      <li>核销只做台账勾稽、不生成新凭证（收款单入账时已挂应收账款）；发票月与收款单月均已月结时双向受月结保护</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="card-title">账龄提醒与导出</div>
+    <ul>
+      <li>首页提醒卡新增<strong>应收账龄</strong>类别：账龄超过 90 天的应收触发提醒，点击直达台账处理；并接入 OS 系统通知</li>
+      <li>正式月结新增检查项：当月存在逾期应收时给出 warning 提示</li>
+      <li>应收台账页右上角两个导出：<strong>应收账龄表</strong>（按账龄分桶明细）与<strong>销项发票台账</strong>（按起止月份）</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ==================== 15. 固定资产与手工凭证 ==================== -->
+<section id="assets-manual">
+  <div class="sec-head">
+    <div class="sec-stamp sm">壹拾伍</div>
+    <div>
+      <h2>固定资产与手工凭证<span class="tag tag-green">v0.10 新增</span></h2>
+      <div class="sec-desc">折旧按月入账、处置损益自动结转；偶发业务用手工凭证补记</div>
+    </div>
+    <div class="sec-right"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">固定资产台账</div>
+    <p><strong>路径</strong>：菜单「财务管理 → 固定资产」</p>
+    <p>顶部四张汇总卡（原值 / 累计折旧 / 净值 / 本月折旧，金额脱敏），台账表格支持筛选与 Excel 导出。资产业务全程凭证联动、月结保护贯穿：</p>
+    <ul>
+      <li><strong>登记</strong>：录入名称、原值、残值率、折旧年限、折旧费用科目（5/6 开头费用类）与购置贷方科目（应付类或资金科目；选资金科目时须关联资金账户）。保存即自动生成<strong>购置凭证</strong>（借 固定资产 1601 / 贷 指定科目）</li>
+      <li><strong>月度折旧</strong>：直线法（原值 ×（1 − 残值率）÷ 年限），末月尾差补齐；按月一键批量计提，当月全部资产聚合为<strong>一张折旧凭证</strong>（借 按费用科目分组 / 贷 累计折旧 1602），重复计提幂等拦截</li>
+      <li><strong>处置</strong>：录入处置收入（资金行须关联资金账户）后自动生成<strong>清理凭证</strong>，净损失计入 6711 资产处置损失、净收益计入 6301，借贷自动平衡</li>
+      <li>正式月结新增检查项：当月存在应提未提折旧的在用资产时给出 warning</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="card-title">手工凭证（收 / 付 / 转）</div>
+    <p><strong>路径</strong>：菜单「财务管理 → 记账凭证」→「手工录入」按钮</p>
+    <ul>
+      <li>三种凭证种类：<strong>收款凭证 / 付款凭证 / 转账凭证</strong>，分录行逐行编辑，借贷合计实时平衡校验</li>
+      <li><strong>资金辅助校验</strong>（与银行流水手工凭证同一口径）：资金科目行（库存现金 1001 / 银行存款 1002 / 其他货币资金 1012）必须关联资金账户；收 / 付款凭证必须包含资金科目行——保证资金账与日记账可勾稽</li>
+      <li>手工凭证来源单独标识，可作废留痕（红字冲销语义），已月结月份受月结保护</li>
+    </ul>
+    <div class="callout">建议：常规业务优先走业务单据自动记账（工资、报销、资金、票据、资产），手工凭证仅用于补记偶发业务（如往来调账、期末损益调整），保持账实一致。</div>
+  </div>
+</section>
+
+<!-- ==================== 16. 常见问题 ==================== -->
+<section id="faq">
+  <div class="sec-head">
+    <div class="sec-stamp sm">壹拾陆</div>
     <div>
       <h2>常见问题</h2>
       <div class="sec-desc">出纳使用最高频的问题与解答</div>
@@ -1999,7 +2121,8 @@
   <details>
     <summary>凭证能不能手工修改或补录分录？</summary>
     <div class="faq-a">
-      不能。本工具定位为<strong>自动记账</strong>：凭证全部由业务动作自动生成、自动作废，不提供手工凭证入口，避免账实不符。<br><br>
+      <strong>自动凭证</strong>（工资、报销、资金、票据、折旧等）不支持直接修改分录，仍由业务动作自动生成、自动作废，保持账实一致；调整自动凭证的入账科目请走映射维护（见下方）。<br>
+      v0.10 起新增<strong>手工凭证</strong>入口：「财务管理 → 记账凭证 → 手工录入」，支持<strong>收款 / 付款 / 转账</strong>三类；收付款凭证必须包含资金科目行（库存现金 1001 / 银行存款 1002 / 其他货币资金 1012）并关联资金账户；保存时实时校验借贷合计平衡；手工凭证可作废留痕，已月结月份受月结保护。<br><br>
       想调整某笔业务的入账科目：① 费用类 → 在「科目表」维护费用类型映射；② 部门工资 → 维护部门映射；③ 银行流水 → 取消后重新选科目生成。
     </div>
   </details>
@@ -2098,7 +2221,7 @@
         <tr><td>OCR 识别中心</td><td>OCR 设置 / 百度 token 配置</td></tr>
         <tr><td rowspan="2"><strong>薪酬核算</strong></td><td>工资计算</td><td>一键计算 / 单人重算 / 锁定 / 工资条 / 邮件发送 / 个税年度汇总</td></tr>
         <tr><td>社保台账</td><td>按员工×年度基数费率 / 年度调基 / 上下限</td></tr>
-        <tr><td rowspan="8"><strong>资金出纳</strong><span class="tag">v0.7-v0.8</span></td><td>资金账户</td><td>账户 CRUD / 默认账户 / 历史归集 / 严格对账开关</td></tr>
+        <tr><td rowspan="9"><strong>资金出纳</strong><span class="tag">v0.7-v0.8</span><span class="tag tag-green">v0.10</span></td><td>资金账户</td><td>账户 CRUD / 默认账户 / 历史归集 / 严格对账开关</td></tr>
         <tr><td>收付款单</td><td>收款 / 付款 / 转账 / 借款单据审批流 + 时间线 + 冲正</td></tr>
         <tr><td>付款批次</td><td>工资 / 报销 / 通用批次，资金账户必选</td></tr>
         <tr><td>银行对账</td><td>流水导入 / 多对多核销工作台 / 余额调节表</td></tr>
@@ -2106,11 +2229,13 @@
         <tr><td>借款备用金</td><td>借款台账 / 账龄 / 三方式核销 / 导出</td></tr>
         <tr><td>票据台账</td><td>承兑/支票登记 + 背书/贴现/托收凭证联动 + 冲正</td></tr>
         <tr><td>现金盘点</td><td>面额明细 / 差异凭证 / 红字冲正</td></tr>
-        <tr><td rowspan="3"><strong>票据报销</strong></td><td>发票管理</td><td>OCR 上传 / 去重 / 详情</td></tr>
+        <tr><td>应收台账</td><td>销项核销进度 / 账龄分桶 / 回款核销 / 账龄表与销项台账导出</td></tr>
+        <tr><td rowspan="3"><strong>票据报销</strong></td><td>发票管理</td><td>OCR 上传 / 去重 / 进项与销项 Tab</td></tr>
         <tr><td>报销管理</td><td>报销单审批 / 经办复核 / 反审批</td></tr>
         <tr><td>进项台账</td><td>区间查询 / 月度小计 / Excel 导出</td></tr>
-        <tr><td rowspan="3"><strong>财务管理</strong></td><td>科目表</td><td>62 预置科目 / 期初余额 / 映射</td></tr>
-        <tr><td>记账凭证</td><td>自动生成 / 作废联动 / 分录明细</td></tr>
+        <tr><td rowspan="4"><strong>财务管理</strong></td><td>科目表</td><td>62 预置科目 / 期初余额 / 映射</td></tr>
+        <tr><td>记账凭证</td><td>自动生成 / 手工录入（收付转）/ 作废联动 / 分录明细</td></tr>
+        <tr><td>固定资产</td><td>登记购置凭证 / 月度折旧 / 处置 / 台账导出</td></tr>
         <tr><td>财务报表</td><td>三大报表 + 科目余额表 / 同期对比 / Excel</td></tr>
         <tr><td rowspan="3"><strong>输出审计</strong></td><td>导出中心</td><td>工资明细 / 银行代发 / 工资条 / 考勤汇总</td></tr>
         <tr><td>操作日志</td><td>业务 + 安全事件审计</td></tr>
@@ -2127,6 +2252,7 @@
     <table>
       <thead><tr><th>版本</th><th>主要能力</th></tr></thead>
       <tbody>
+        <tr><td><strong>v0.10.0</strong></td><td>记账完整性与收入侧（手工凭证收付转 / 固定资产登记折旧处置 / 销项发票与应收核销账龄 / OS 系统通知与托盘常驻 / 初始化向导与示例账套 / 申报模板三件与征期提醒）</td></tr>
         <tr><td><strong>v0.9.0</strong></td><td>通知模块（SMTP 配置加密 / 通知设置页 / 工资条邮件三步向导 / 失败重发 / 员工邮箱录入；短信接口预留）</td></tr>
         <tr><td><strong>v0.8.0</strong></td><td>票据台账与申报导出（承兑背书/贴现/托收凭证联动 / 账期提醒 / 现金盘点 / 资金日报 / 个税扣缴申报表 / 进项台账）</td></tr>
         <tr><td><strong>v0.7.0</strong></td><td>出纳运营闭环（资金账户 / 收付款单审批留痕 / 通用付款批次 / 多对多银行对账 / 资金日记账 / 余额调节表 / 借款核销 / 报销治理 / 月结资金联动）</td></tr>
@@ -2161,7 +2287,7 @@
 </div>
 
 <footer>
-  <div>工资核算助手 · 产品使用说明书 · <span class="ver">v0.9.0</span></div>
+  <div>工资核算助手 · 产品使用说明书 · <span class="ver">v0.10.0</span></div>
   <div style="margin-top:6px; opacity:.7">本地单机桌面工具 · 安装包 5.8 MB · 零运行时依赖 · 不上云（仅 OCR 与邮件通知可选外联）· 数据完全自主可控</div>
   <div style="margin-top:10px"><a href="https://github.com/zhuonixian/salary-desktop" target="_blank" rel="noopener" style="color:#e8c88f; text-decoration:none; border-bottom:1px solid rgba(232,200,143,.4)">github.com/zhuonixian/salary-desktop</a></div>
 </footer>
