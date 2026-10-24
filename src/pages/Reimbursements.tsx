@@ -361,7 +361,7 @@ const Reimbursements: React.FC = () => {
       key: 'payment_status',
       width: 90,
       render: (status: PaymentStatus) => (
-        <Tooltip title="付款只能通过付款批次完成（资金出纳 → 付款批次）">
+        <Tooltip title="付款只能通过付款批次完成（资金收付 → 付款批次）">
           <Tag color={paymentMap[status]?.color}>{paymentMap[status]?.text ?? status}</Tag>
         </Tooltip>
       ),

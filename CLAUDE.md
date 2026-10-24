@@ -61,6 +61,7 @@ npm run lint                             # ESLint
 - [第十二阶段收入侧闭环](.claude/memory/stage12-revenue-cycle.md) — 销项登记（invoices.direction+收入确认凭证）、进项门禁回扫、应收核销/台账/账龄、ar_overdue 提醒、月结 warning、两导出；spec 见 `docs/superpowers/specs/2026-10-13-stage12-revenue-cycle-design.md`、progress 见 `docs/superpowers/plans/2026-10-13-stage12-progress.md`
 - [第十三阶段记账完整性](.claude/memory/stage13-bookkeeping-completeness.md) — 手工凭证（收/付/转+资金辅助）、固定资产登记/折旧/处置三凭证、台账与月结 warning；spec 见 `docs/superpowers/specs/2026-10-14-stage13-bookkeeping-completeness-design.md`、progress 见 `docs/superpowers/plans/2026-10-14-stage13-progress.md`
 - [第十四阶段安全债](.claude/memory/stage14-security-debt.md) — 找回凭据换绑（rotate_recovery_code/update_security_question，仅重包裹目标 KEK）、自动备份（解锁/月结后触发、auto-daily 加密包滚动保留）；spec 见 `docs/superpowers/specs/2026-10-21-stage14-security-debt-design.md`、progress 见 `docs/superpowers/plans/2026-10-21-stage14-progress.md`
+- [第十五阶段上手体验](.claude/memory/stage15-ux-navigation-tour.md) — 导航收敛（资金出纳 9 项拆为资金收付/资金台账、票据台账入票据与报销，9 组每组 ≤4）与 PageTour 页面引导（银行对账/收付款单/票据台账/记账凭证四页）；spec 见 `docs/superpowers/specs/2026-10-25-stage15-ux-navigation-tour-design.md`；v0.11 迭代路线图见 `docs/superpowers/plans/2026-10-25-roadmap-v0.11-iterations.md`
 - [v0.10.0 发版验收清单](docs/superpowers/plans/2026-10-13-v0.10-release-acceptance.md) — 阶段 7-11 Windows/macOS 手工验收汇编（含 stage12/13 两节），打 tag 前按清单内 A/B/C 分级执行；发版准备两项（版本 bump、全绿验证）已于 e98ef95 完成
 
 ## 第三阶段开发

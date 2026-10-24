@@ -21,7 +21,7 @@ import {
   message,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { DeleteOutlined, EditOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
+import { DeleteOutlined, EditOutlined, PlusOutlined, QuestionCircleOutlined, ReloadOutlined } from '@ant-design/icons';
 import dayjs, { type Dayjs } from 'dayjs';
 import {
   createManualVoucher,
@@ -40,6 +40,8 @@ import type {
 import { MANUAL_VOUCHER_KIND_OPTIONS, VOUCHER_SOURCE_LABEL } from '@/types';
 import { SensitiveText } from '@/components/SensitiveText';
 import { SensitiveStatistic } from '@/components/SensitiveStatistic';
+import PageTour from '@/components/PageTour';
+import { tourTarget } from '@/components/tourTarget';
 import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
 
 const { Text } = Typography;
@@ -86,6 +88,8 @@ interface ManualLineRow {
 
 const Vouchers: React.FC = () => {
   const { month, monthStr, setMonth } = useBusinessMonth();
+  // 页面操作指引（第十五阶段）：递增触发 PageTour 复看
+  const [tourTick, setTourTick] = useState(0);
   const [sourceFilter, setSourceFilter] = useState<string | undefined>(undefined);
   const [statusFilter, setStatusFilter] = useState<string | undefined>(undefined);
   const [vouchers, setVouchers] = useState<Voucher[]>([]);
@@ -461,7 +465,14 @@ const Vouchers: React.FC = () => {
       <div className="page-header">
         <span className="page-title">记账凭证</span>
         <div className="page-header-actions">
+          <Button
+            icon={<QuestionCircleOutlined />}
+            onClick={() => setTourTick((t) => t + 1)}
+          >
+            指引
+          </Button>
           <DatePicker
+            data-tour="voucher-filter"
             picker="month"
             value={month}
             allowClear={false}
@@ -490,11 +501,40 @@ const Vouchers: React.FC = () => {
           <Button icon={<ReloadOutlined />} loading={loading} onClick={fetchData}>
             刷新
           </Button>
-          <Button type="primary" icon={<EditOutlined />} onClick={openManualModal}>
+          <Button type="primary" data-tour="voucher-manual" icon={<EditOutlined />} onClick={openManualModal}>
             手工录入凭证
           </Button>
         </div>
       </div>
+
+      <PageTour
+        storageKey="vouchers"
+        reopenTick={tourTick}
+        steps={[
+          {
+            title: '记账凭证',
+            description:
+              '本工具的凭证由业务自动生成：工资锁定、报销审批、收付款单、票据流转、折旧计提等动作会自动出凭证并自动红冲。这里是全部凭证的查询与追溯入口。',
+          },
+          {
+            title: '按月与来源筛选',
+            description:
+              '选月份 + 凭证来源（工资计提 / 报销 / 资金单据 / 票据 / 折旧 / 手工凭证等 11 类）+ 状态，快速定位目标凭证。',
+            target: tourTarget('[data-tour="voucher-filter"]'),
+          },
+          {
+            title: '手工录入凭证',
+            description:
+              '用于补记无模板业务（摊销、暂估、往来调账等）。收 / 付款凭证必须包含资金科目行（1001/1002/1012）并关联资金账户，保存时实时校验借贷平衡。',
+            target: tourTarget('[data-tour="voucher-manual"]'),
+          },
+          {
+            title: '作废与月结保护',
+            description:
+              '凭证作废生成红字冲销并留痕；自动凭证随业务反向联动（如作废发票自动红冲）。已月结月份的凭证受月结保护，须先反月结。',
+          },
+        ]}
+      />
 
       <Spin spinning={loading}>
         <Row gutter={[16, 16]} className="mb-16">

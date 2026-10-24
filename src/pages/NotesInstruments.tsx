@@ -22,10 +22,12 @@ import {
   message,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { PlusOutlined, ReloadOutlined } from '@ant-design/icons';
+import { PlusOutlined, QuestionCircleOutlined, ReloadOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import type { Dayjs } from 'dayjs';
 import SensitiveText from '@/components/SensitiveText';
+import PageTour from '@/components/PageTour';
+import { tourTarget } from '@/components/tourTarget';
 import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
 import {
   confirmCollection,
@@ -702,7 +704,7 @@ const InstrumentTab: React.FC<{ direction?: string; shared: SharedOptions }> = (
           onChange={(e) => setKeyword(e.target.value)}
           onSearch={fetchInstruments}
         />
-        <Button type="primary" icon={<PlusOutlined />} onClick={openRegister}>
+        <Button type="primary" data-tour="note-register" icon={<PlusOutlined />} onClick={openRegister}>
           登记票据
         </Button>
         <Button icon={<ReloadOutlined />} onClick={fetchInstruments}>
@@ -1344,6 +1346,8 @@ const InstrumentTab: React.FC<{ direction?: string; shared: SharedOptions }> = (
 // ==================== 页面入口 ====================
 
 const NotesInstruments: React.FC = () => {
+  // 页面操作指引（第十五阶段）：递增触发 PageTour 复看
+  const [tourTick, setTourTick] = useState(0);
   const [shared, setShared] = useState<SharedOptions>({
     accounts: [],
     partners: [],
@@ -1380,7 +1384,44 @@ const NotesInstruments: React.FC = () => {
         <Title level={4} style={{ marginTop: 0, marginBottom: 0 }}>
           票据台账
         </Title>
+        <div className="page-header-actions">
+          <Button
+            icon={<QuestionCircleOutlined />}
+            onClick={() => setTourTick((t) => t + 1)}
+          >
+            指引
+          </Button>
+        </div>
       </div>
+
+      <PageTour
+        storageKey="notes-instruments"
+        reopenTick={tourTick}
+        steps={[
+          {
+            title: '票据台账',
+            description:
+              '承兑汇票与支票的登记和全生命周期流转。每一次流转（背书 / 贴现 / 托收 / 兑付）都自动生成借贷平衡的凭证并计入资金日记账。',
+          },
+          {
+            title: '两个方向',
+            description:
+              '「收到票据」是别人付给本公司的（后续背书转出、贴现或托收到账）；「开出票据」是本公司付给别人的（到期兑付）。支票登记即结算，无后续流转。',
+            target: tourTarget('.ant-tabs-nav'),
+          },
+          {
+            title: '登记票据',
+            description:
+              '选票据类型（承兑 / 支票）与方向，填票号、出票 / 到期日、金额与对方。承兑登记后进入持有状态，等待流转；账期提醒卡会按到期日自动预警。',
+            target: tourTarget('[data-tour="note-register"]'),
+          },
+          {
+            title: '流转与纠错',
+            description:
+              '持有中的票据可背书、贴现（自动计贴现息）、托收到账；每步在行操作里执行。「冲正」生成反向凭证（原凭证保留并存），未流转票据可直接作废。',
+          },
+        ]}
+      />
       <Alert
         type="info"
         showIcon

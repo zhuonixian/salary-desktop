@@ -13,12 +13,12 @@ description: 第八阶段（票据台账、账期提醒、现金盘点、资金�
 
 ## 已交付能力
 
-- **票据台账**（`notes.rs` + `NotesInstruments.tsx`，菜单「资金出纳 → 票据台账」）：四表 DDL（negotiable_instruments / instrument_endorsements）+ partial unique（同类型同号唯一，void 除外）；状态机（holding → endorsed_out/discounted/collecting → collected；issued_outstanding → paid；支票登记即终态）；登记/背书/贴现/托收/到账/兑付/作废/红字冲正 10 命令；背书链 Drawer；凭证联动与 `vouchers.source_type='instrument'`
+- **票据台账**（`notes.rs` + `NotesInstruments.tsx`，菜单「票据与报销 → 票据台账」）：四表 DDL（negotiable_instruments / instrument_endorsements）+ partial unique（同类型同号唯一，void 除外）；状态机（holding → endorsed_out/discounted/collecting → collected；issued_outstanding → paid；支票登记即终态）；登记/背书/贴现/托收/到账/兑付/作废/红字冲正 10 命令；背书链 Drawer；凭证联动与 `vouchers.source_type='instrument'`
 - **账期提醒**（`db.rs get_dashboard_reminders` + Dashboard 提醒卡）：借款到期（settled 未清余额扣核销）/ 票据到期（holding/collecting/issued_outstanding）/ 滞留应付（已审批未付款），提前天数 3/7/15/30 可配（`app_settings.reminder_advance_days` 缺省 7），卡片可跳转对应页面
-- **现金盘点**（`cash_count.rs` + `CashCount.tsx`，菜单「资金出纳 → 现金盘点」）：draft/confirmed/void 状态机、快速+面额双模式、盘亏借 1901/贷 1001、盘盈反向、差异≠0 原因必填、confirmed 走红字冲正作废、`vouchers.source_type='cash_count'`
+- **现金盘点**（`cash_count.rs` + `CashCount.tsx`，菜单「资金台账 → 现金盘点」）：draft/confirmed/void 状态机、快速+面额双模式、盘亏借 1901/贷 1001、盘盈反向、差异≠0 原因必填、confirmed 走红字冲正作废、`vouchers.source_type='cash_count'`
 - **资金日报**（`cashier::get_fund_daily_report` + `excel::export_fund_daily_report`）：期初+收−支=期末勾稽、按账户明细、两 sheet Excel；入口「资金日记账 → 导出日报」（敏感门禁与日记账导出一致）
 - **个税扣缴申报表**（`excel::export_tax_withholding_declaration`）：仅锁定月份可导出（后端门禁）、三险拆列（台账份额优先，全局规则键兜底，比例≠100% 退回合并展示留备注）、列头对齐电子税务局措辞；入口「工资计算 → 扣缴申报表」+ 导出中心
-- **进项台账**（`db::get_input_tax_ledger` + `excel::export_input_tax_ledger` + `InputTaxLedger.tsx`，菜单「票据报销 → 进项台账」）：区间查询、月度小计、报销单反查、void 排除、导出 `进项台账_YYYYMM-YYYYMM.xlsx`
+- **进项台账**（`db::get_input_tax_ledger` + `excel::export_input_tax_ledger` + `InputTaxLedger.tsx`，菜单「票据与报销 → 进项台账」）：区间查询、月度小计、报销单反查、void 排除、导出 `进项台账_YYYYMM-YYYYMM.xlsx`
 - **Minor 12 项 + 收口**：stage7 审查留档 12 项全部消化（冲正跨月口径显式化、附件统计单遍聚合、预算费用类型下拉、报销报错中文化、mock 状态机 default 不恒 true 等）；Task 9 挂账收口补社保三险个人份额端到端（social_insurance_profiles 三列 + salary_rules 三键 `upsert_salary_rule_key` 命令 + SocialInsurance/SalaryRules 入口）
 
 ## 关键口径（阻断级）

@@ -29,6 +29,7 @@ import {
   FileAddOutlined,
   FileDoneOutlined,
   ImportOutlined,
+  QuestionCircleOutlined,
   ReloadOutlined,
   SearchOutlined,
   StopOutlined,
@@ -56,6 +57,8 @@ import {
 } from '@/api';
 import SensitiveText from '@/components/SensitiveText';
 import { SensitiveStatistic } from '@/components/SensitiveStatistic';
+import PageTour from '@/components/PageTour';
+import { tourTarget } from '@/components/tourTarget';
 import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
 import { useSecurity } from '@/contexts/SecurityContext';
 import type {
@@ -355,7 +358,7 @@ const ReconciliationWorkbench: React.FC<{
             addonBefore="置信线"
             style={{ width: 150 }}
           />
-          <Button loading={autoRunning} onClick={handleAutoMatch}>
+          <Button data-tour="bank-auto-match" loading={autoRunning} onClick={handleAutoMatch}>
             自动匹配（高置信全额）
           </Button>
           <Button loading={migrationLoading} onClick={handleRunMigration}>
@@ -856,6 +859,8 @@ const ReconciliationPeriodsPanel: React.FC<{
 
 const BankTransactions: React.FC = () => {
   const { month, setMonth } = useBusinessMonth();
+  // 页面操作指引（第十五阶段）：递增触发 PageTour 复看
+  const [tourTick, setTourTick] = useState(0);
   const [activeTab, setActiveTab] = useState('list');
   const [statusFilter, setStatusFilter] = useState<BankTransactionStatus | undefined>(undefined);
   const [accountFilter, setAccountFilter] = useState<number | undefined>(undefined);
@@ -1231,7 +1236,14 @@ const BankTransactions: React.FC = () => {
       <div className="page-header">
         <span className="page-title">银行对账</span>
         <div className="page-header-actions">
+          <Button
+            icon={<QuestionCircleOutlined />}
+            onClick={() => setTourTick((t) => t + 1)}
+          >
+            指引
+          </Button>
           <DatePicker
+            data-tour="bank-month"
             picker="month"
             value={month}
             allowClear={false}
@@ -1240,6 +1252,36 @@ const BankTransactions: React.FC = () => {
           />
         </div>
       </div>
+
+      <PageTour
+        storageKey="bank-transactions"
+        reopenTick={tourTick}
+        steps={[
+          {
+            title: '银行对账',
+            description:
+              '本页把银行流水与账内资金记录逐笔勾稽。流程：① 导入流水 → ② 匹配核销 → ③ 生成余额调节表。首次使用建议按指引走一遍。',
+          },
+          {
+            title: '第一步：选月份',
+            description:
+              '对账按月进行。先选业务月份，再在下方选择资金账户（银行 / 第三方支付账户）。',
+            target: tourTarget('[data-tour="bank-month"]'),
+          },
+          {
+            title: '三个工作区',
+            description:
+              '「银行流水」导入与查看状态；「对账工作台」左右双栏手工核销；「余额调节表」按期生成调节表并确认。',
+            target: tourTarget('.ant-tabs-nav'),
+          },
+          {
+            title: '自动匹配',
+            description:
+              '「自动匹配」先消化高置信全额匹配（置信线可调）；剩余流水进对账工作台逐笔双栏核销，支持一条流水对多条分录的部分核销。',
+            target: tourTarget('[data-tour="bank-auto-match"]'),
+          },
+        ]}
+      />
 
       <Tabs
         activeKey={activeTab}

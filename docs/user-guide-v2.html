@@ -1129,8 +1129,8 @@
       <div class="step"><strong>计算工资</strong>：菜单「工资计算」→ 选择月份 → 点「一键计算」</div>
       <div class="step"><strong>审核与调整</strong>：核对计算结果，必要时点「单人重算」或手工调整</div>
       <div class="step"><strong>锁定工资</strong>：核对无误后点「锁定」，防止误改</div>
-      <div class="step"><strong>建立资金账户</strong>：菜单「资金出纳 → 资金账户」→ 新建银行账户并挂接科目；老用户升级后用「历史归集」向导归集旧数据<span class="tag">v0.7</span></div>
-      <div class="step"><strong>生成付款批次</strong>：菜单「资金出纳 → 付款批次」→ 生成工资批次（选择付款资金账户）→ 导出银行代发 Excel</div>
+      <div class="step"><strong>建立资金账户</strong>：菜单「资金收付 → 资金账户」→ 新建银行账户并挂接科目；老用户升级后用「历史归集」向导归集旧数据<span class="tag">v0.7</span></div>
+      <div class="step"><strong>生成付款批次</strong>：菜单「资金收付 → 付款批次」→ 生成工资批次（选择付款资金账户）→ 导出银行代发 Excel</div>
       <div class="step"><strong>月度关账</strong>：菜单「月结工作台」→ 体检 → 正式月结 → 导出月结包</div>
     </div>
   </div>
@@ -1390,7 +1390,7 @@
 
   <div class="card">
     <div class="card-title">发票管理</div>
-    <p><strong>路径</strong>：菜单「票据报销 → 发票管理」</p>
+    <p><strong>路径</strong>：菜单「票据与报销 → 发票管理」</p>
     <div class="steps">
       <div class="step"><strong>上传发票</strong>：点「上传发票」→ 选择 PDF / JPG / PNG 文件 → 自动调用百度 vat_invoice OCR</div>
       <div class="step"><strong>字段预览</strong>：OCR 识别后展示发票代码、号码、价税合计、销售方、购买方等字段</div>
@@ -1407,7 +1407,7 @@
 
   <div class="card">
     <div class="card-title">报销管理</div>
-    <p><strong>路径</strong>：菜单「票据报销 → 报销管理」</p>
+    <p><strong>路径</strong>：菜单「票据与报销 → 报销管理」</p>
     <div class="steps">
       <div class="step"><strong>新建报销单</strong>：填写报销人、报销事由、报销金额</div>
       <div class="step"><strong>关联发票</strong>：从发票库勾选多张发票纳入本次报销</div>
@@ -1419,7 +1419,7 @@
 
   <div class="card">
     <div class="card-title">增值税进项台账<span class="tag">v0.8 新增</span></div>
-    <p><strong>路径</strong>：菜单「票据报销 → 进项台账」</p>
+    <p><strong>路径</strong>：菜单「票据与报销 → 进项台账」</p>
     <div class="steps">
       <div class="step"><strong>区间查询</strong>：选起止月份，展示每张发票的不含税金额/税额/价税合计/销方与税号/费用类型/关联报销单</div>
       <div class="step"><strong>月度小计与合计</strong>：当期进项税额合计供申报参考（发票登记 ≠ 进项认证，认证以税务系统为准）</div>
@@ -1441,7 +1441,7 @@
 
   <div class="card">
     <div class="card-title">资金账户<span class="tag">v0.7 新增</span></div>
-    <p><strong>路径</strong>：菜单「资金出纳 → 资金账户」</p>
+    <p><strong>路径</strong>：菜单「资金收付 → 资金账户」</p>
     <div class="steps">
       <div class="step"><strong>新建账户</strong>：填账户编码 / 名称，选类型（银行 / 第三方支付 / 现金）与挂接资金科目（1001 库存现金 / 1002 银行存款 / 1012 其他货币资金），期初余额非负</div>
       <div class="step"><strong>默认账户</strong>：同类账户可设一个默认，付款单默认带出；默认账户须先把其他同类型账户设为默认后才能停用</div>
@@ -1452,7 +1452,7 @@
 
   <div class="card">
     <div class="card-title">收付款单<span class="tag">v0.7 新增</span></div>
-    <p><strong>路径</strong>：菜单「资金出纳 → 收付款单」</p>
+    <p><strong>路径</strong>：菜单「资金收付 → 收付款单」</p>
     <div class="steps">
       <div class="step"><strong>新建单据</strong>：支持收款 / 付款 / 内部转账 / 员工借款 / 借款核销，按类型选择方向匹配的资金账户与往来单位</div>
       <div class="step"><strong>审批留痕</strong>：单据走 草稿 → 提交 → 审批（或驳回 / 撤回）→ 结算，每一步记审批时间线（谁、何时、意见），结算自动生成资金凭证</div>
@@ -1463,7 +1463,7 @@
 
   <div class="card">
     <div class="card-title">银行对账（多对多核销）<span class="tag">v0.7 新增</span></div>
-    <p><strong>路径</strong>：菜单「资金出纳 → 银行对账」</p>
+    <p><strong>路径</strong>：菜单「资金收付 → 银行对账」</p>
     <div class="steps">
       <div class="step"><strong>导入流水</strong>：先选资金账户再导入 CSV / Excel 流水，导入前可预览字段与归属，旧流水可在资金账户页用归集向导补账户</div>
       <div class="step"><strong>对账工作台</strong>：左栏银行流水、右栏账面资金分录双栏核销；一笔流水可拆分核销到多张分录，反之亦可（核销金额守恒、不跨账户）</div>
@@ -1474,7 +1474,7 @@
 
   <div class="card">
     <div class="card-title">资金日记账<span class="tag">v0.7 新增</span></div>
-    <p><strong>路径</strong>：菜单「资金出纳 → 资金日记账」</p>
+    <p><strong>路径</strong>：菜单「资金台账 → 资金日记账」</p>
     <div class="steps">
       <div class="step"><strong>按账户查日记账</strong>：选账户与月份，展示每笔收支、余额滚动与对应凭证号，数据直接来自凭证资金分录（账账一致，无第二套账）</div>
       <div class="step"><strong>跨月滚动</strong>：期初余额自动取上月期末，支持连续翻月追溯</div>
@@ -1484,7 +1484,7 @@
 
   <div class="card">
     <div class="card-title">票据台账<span class="tag">v0.8 新增</span></div>
-    <p><strong>路径</strong>：菜单「资金出纳 → 票据台账」</p>
+    <p><strong>路径</strong>：菜单「票据与报销 → 票据台账」</p>
     <div class="steps">
       <div class="step"><strong>登记票据</strong>：银行/商业承兑（收到→持有、开出→待兑付）与支票（登记即结算）；票据号同类型唯一</div>
       <div class="step"><strong>状态流转</strong>：持有 → 背书转出 / 贴现（贴现息自动计财务费用）/ 托收到账；开出承兑到期兑付——全程自动生成借贷凭证（应收票据 1121 / 应付票据科目）</div>
@@ -1495,7 +1495,7 @@
 
   <div class="card">
     <div class="card-title">现金盘点<span class="tag">v0.8 新增</span></div>
-    <p><strong>路径</strong>：菜单「资金出纳 → 现金盘点」</p>
+    <p><strong>路径</strong>：菜单「资金台账 → 现金盘点」</p>
     <div class="steps">
       <div class="step"><strong>录实存</strong>：快速模式直接填总额，或面额明细模式（100/50/20/10/5/1/0.5/0.1 元张数自动合计）；账面余额自动快照、差异自动算</div>
       <div class="step"><strong>确认生成凭证</strong>：盘亏借 1901 待处理财产损溢/贷 库存现金，盘盈反向；差异为 0 仅留盘点记录；差异≠0 须填原因</div>
@@ -1505,7 +1505,7 @@
 
   <div class="card">
     <div class="card-title">借款备用金<span class="tag">v0.7 新增</span></div>
-    <p><strong>路径</strong>：菜单「资金出纳 → 借款备用金」</p>
+    <p><strong>路径</strong>：菜单「资金台账 → 借款备用金」</p>
     <div class="steps">
       <div class="step"><strong>借款台账</strong>：按员工汇总未清余额、逾期天数与账龄分布（0-30 / 31-60 / 61-90 / 90+ 天），逾期借款在月结体检中提醒</div>
       <div class="step"><strong>新增借款</strong>：填员工、金额、借款日期与预计归还日期，审批结算后资金从账户付出并挂账其他应收款</div>
@@ -1516,7 +1516,7 @@
 
   <div class="card">
     <div class="card-title">付款批次</div>
-    <p><strong>路径</strong>：菜单「资金出纳 → 付款批次」</p>
+    <p><strong>路径</strong>：菜单「资金收付 → 付款批次」</p>
     <p>统一管理工资代发 + 报销付款 + 通用付款三种场景：</p>
     <div class="feature-grid">
       <div class="feature">
@@ -1575,7 +1575,7 @@
 
   <div class="card">
     <div class="card-title">银行流水</div>
-    <p><strong>路径</strong>：菜单「资金出纳 → 银行对账」（v0.7 起流水匹配升级为多对多核销，详见第 7 章「银行对账」）</p>
+    <p><strong>路径</strong>：菜单「资金收付 → 银行对账」（v0.7 起流水匹配升级为多对多核销，详见第 7 章「银行对账」）</p>
     <div class="steps">
       <div class="step"><strong>导出银行流水</strong>：从企业网银导出 CSV 或 Excel 流水（含日期、摘要、对方户名、账号、收入、支出、余额）</div>
       <div class="step"><strong>导入流水</strong>：点「导入流水」→ 先选资金账户 → 选择文件 → 预览确认后入库</div>
@@ -2006,7 +2006,7 @@
 
   <div class="card">
     <div class="card-title">销项发票登记</div>
-    <p><strong>路径</strong>：菜单「票据报销 → 发票管理」，顶部<strong>进项 / 销项</strong>两个 Tab 切换</p>
+    <p><strong>路径</strong>：菜单「票据与报销 → 发票管理」，顶部<strong>进项 / 销项</strong>两个 Tab 切换</p>
     <ul>
       <li>销项复用进项全部底座：OCR 识别、（代码 + 号码）全局去重、发票原图加密归档；发票方向创建后不可修改</li>
       <li>销项口径下<strong>销售方自动预填本公司信息</strong>（取「企业信息」配置），购买方必填</li>
@@ -2018,7 +2018,7 @@
 
   <div class="card">
     <div class="card-title">应收台账与回款核销</div>
-    <p><strong>路径</strong>：菜单「资金出纳 → 应收台账」</p>
+    <p><strong>路径</strong>：菜单「资金台账 → 应收台账」</p>
     <ul>
       <li>按月份、客户等条件筛选，顶部汇总卡按账龄五档分桶：<strong>0-30 天 / 31-60 天 / 61-90 天 / 91-180 天 / 180 天以上</strong>（仅统计未核清部分）</li>
       <li><strong>回款核销</strong>：选择已结算收款单对销项发票核销，核销金额默认取「收款单可用额与发票未核销余额的较小值」；支持多张收款单分次部分核销，且不能超过未核销余额</li>
@@ -2245,18 +2245,18 @@
         <tr><td>OCR 识别中心</td><td>OCR 设置 / 百度 token 配置</td></tr>
         <tr><td rowspan="2"><strong>薪酬核算</strong></td><td>工资计算</td><td>一键计算 / 单人重算 / 锁定 / 工资条 / 邮件发送 / 个税年度汇总</td></tr>
         <tr><td>社保台账</td><td>按员工×年度基数费率 / 年度调基 / 上下限</td></tr>
-        <tr><td rowspan="9"><strong>资金出纳</strong><span class="tag">v0.7-v0.8</span><span class="tag tag-green">v0.10</span></td><td>资金账户</td><td>账户 CRUD / 默认账户 / 历史归集 / 严格对账开关</td></tr>
+        <tr><td rowspan="4"><strong>票据与报销</strong></td><td>发票管理</td><td>OCR 上传 / 去重 / 进项与销项 Tab</td></tr>
+        <tr><td>报销管理</td><td>报销单审批 / 经办复核 / 反审批</td></tr>
+        <tr><td>进项台账</td><td>区间查询 / 月度小计 / Excel 导出</td></tr>
+        <tr><td>票据台账</td><td>承兑/支票登记 + 背书/贴现/托收凭证联动 + 冲正</td></tr>
+        <tr><td rowspan="4"><strong>资金收付</strong><span class="tag">v0.7 起</span></td><td>资金账户</td><td>账户 CRUD / 默认账户 / 历史归集 / 严格对账开关</td></tr>
         <tr><td>收付款单</td><td>收款 / 付款 / 转账 / 借款单据审批流 + 时间线 + 冲正</td></tr>
         <tr><td>付款批次</td><td>工资 / 报销 / 通用批次，资金账户必选</td></tr>
         <tr><td>银行对账</td><td>流水导入 / 多对多核销工作台 / 余额调节表</td></tr>
-        <tr><td>资金日记账</td><td>按账户收支明细 + 滚动余额 + Excel / 日报导出</td></tr>
-        <tr><td>借款备用金</td><td>借款台账 / 账龄 / 三方式核销 / 导出</td></tr>
-        <tr><td>票据台账</td><td>承兑/支票登记 + 背书/贴现/托收凭证联动 + 冲正</td></tr>
-        <tr><td>现金盘点</td><td>面额明细 / 差异凭证 / 红字冲正</td></tr>
+        <tr><td rowspan="4"><strong>资金台账</strong><span class="tag">v0.7-v0.8</span></td><td>资金日记账</td><td>按账户收支明细 + 滚动余额 + Excel / 日报导出</td></tr>
         <tr><td>应收台账</td><td>销项核销进度 / 账龄分桶 / 回款核销 / 账龄表与销项台账导出</td></tr>
-        <tr><td rowspan="3"><strong>票据报销</strong></td><td>发票管理</td><td>OCR 上传 / 去重 / 进项与销项 Tab</td></tr>
-        <tr><td>报销管理</td><td>报销单审批 / 经办复核 / 反审批</td></tr>
-        <tr><td>进项台账</td><td>区间查询 / 月度小计 / Excel 导出</td></tr>
+        <tr><td>借款备用金</td><td>借款台账 / 账龄 / 三方式核销 / 导出</td></tr>
+        <tr><td>现金盘点</td><td>面额明细 / 差异凭证 / 红字冲正</td></tr>
         <tr><td rowspan="4"><strong>财务管理</strong></td><td>科目表</td><td>62 预置科目 / 期初余额 / 映射</td></tr>
         <tr><td>记账凭证</td><td>自动生成 / 手工录入（收付转）/ 作废联动 / 分录明细</td></tr>
         <tr><td>固定资产</td><td>登记购置凭证 / 月度折旧 / 处置 / 台账导出</td></tr>

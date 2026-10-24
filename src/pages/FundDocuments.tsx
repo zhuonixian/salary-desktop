@@ -27,12 +27,14 @@ import {
   message,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { PlusOutlined, ReloadOutlined, SettingOutlined, UploadOutlined } from '@ant-design/icons';
+import { PlusOutlined, QuestionCircleOutlined, ReloadOutlined, SettingOutlined, UploadOutlined } from '@ant-design/icons';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import dayjs from 'dayjs';
 import type { Dayjs } from 'dayjs';
 import SensitiveText from '@/components/SensitiveText';
+import PageTour from '@/components/PageTour';
+import { tourTarget } from '@/components/tourTarget';
 import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
 import { useOperator } from '@/contexts/OperatorContext';
 import {
@@ -804,7 +806,7 @@ const DocumentTab: React.FC<{ docType?: string; shared: SharedOptions; makerChec
           onChange={(e) => setKeyword(e.target.value)}
           onSearch={fetchDocs}
         />
-        <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
+        <Button type="primary" data-tour="doc-create" icon={<PlusOutlined />} onClick={openCreate}>
           新建单据
         </Button>
         <Button icon={<ReloadOutlined />} onClick={fetchDocs}>
@@ -1349,6 +1351,8 @@ const DocumentTab: React.FC<{ docType?: string; shared: SharedOptions; makerChec
 // ==================== 页面入口 ====================
 
 const FundDocuments: React.FC = () => {
+  // 页面操作指引（第十五阶段）：递增触发 PageTour 复看
+  const [tourTick, setTourTick] = useState(0);
   const [shared, setShared] = useState<SharedOptions>({
     partners: [],
     employees: [],
@@ -1408,10 +1412,53 @@ const FundDocuments: React.FC = () => {
         <Title level={4} style={{ marginTop: 0, marginBottom: 0 }}>
           收付款单
         </Title>
-        <Button icon={<SettingOutlined />} onClick={() => setSettingOpen(true)}>
-          审批设置
-        </Button>
+        <div className="page-header-actions">
+          <Button
+            icon={<QuestionCircleOutlined />}
+            onClick={() => setTourTick((t) => t + 1)}
+          >
+            指引
+          </Button>
+          <Button data-tour="doc-setting" icon={<SettingOutlined />} onClick={() => setSettingOpen(true)}>
+            审批设置
+          </Button>
+        </div>
       </div>
+
+      <PageTour
+        storageKey="fund-documents"
+        reopenTick={tourTick}
+        steps={[
+          {
+            title: '收付款单',
+            description:
+              '除工资代发与报销外的一切资金进出都在这里立单：收款、付款、内部转账。单据是自动记账的源头——状态每前进一步，凭证与日记账自动联动。',
+          },
+          {
+            title: '四类视图',
+            description:
+              '「收款单 / 付款单 / 内部转账」分类视图加「全部单据」汇总；列表上方可按单号 / 往来单位搜索。',
+            target: tourTarget('.ant-tabs-nav'),
+          },
+          {
+            title: '新建单据',
+            description:
+              '填账户、往来单位、金额与业务类别保存即出草稿；附件可选加密归档。草稿提交后才进入审批与结算流转。',
+            target: tourTarget('[data-tour="doc-create"]'),
+          },
+          {
+            title: '状态机与纠错',
+            description:
+              '流程：草稿 → 提交 → 审批 → 结算 / 进付款批次，每步留审批轨迹与操作日志。已结算单据不能改，只能冲正（红字凭证反向冲回）。',
+          },
+          {
+            title: '经办复核',
+            description:
+              '「审批设置」开启后，审批人必须与提交人是不同操作人（本地署名双签语义），适合内部牵制。',
+            target: tourTarget('[data-tour="doc-setting"]'),
+          },
+        ]}
+      />
       <Alert
         type="info"
         showIcon
