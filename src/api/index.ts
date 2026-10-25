@@ -2663,6 +2663,7 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
         month: String(args?.month ?? ''),
         rows: [],
         net_increase: 0,
+        net_increase_ytd: 0,
         unclassified: [],
       };
     case 'export_financial_report':

@@ -2093,6 +2093,12 @@ pub fn build_cash_flow_statement(conn: &Connection, month: &str) -> AppResult<Ca
     )?;
     let cfc_map = cash_flow_categories(conn)?;
     let (cash, unclassified) = sum_cash_flow(&vouchers, &cfc_map);
+    // 本年累计（第十八阶段）：本年 1 月~所选月区间凭证，与上月同期同一 range 口径
+    //（sum_cash_flow 内排除 period_close；启用月之前自然无数据）
+    let ytd_sums = {
+        let ytd_vouchers = get_vouchers_range(conn, &format!("{}-01", &month[..4]), month)?;
+        sum_cash_flow(&ytd_vouchers, &cfc_map).0
+    };
     // 上年同期：上年 1 月~上年同月区间凭证（排除 period_close）；同期不重复提示未分类明细
     let prior_month = prior_year_month(month, month.get(5..).unwrap_or("01"));
     let prior_sums = match &prior_month {
@@ -2112,49 +2118,49 @@ pub fn build_cash_flow_statement(conn: &Connection, month: &str) -> AppResult<Ca
             key: "operating_inflow".into(),
             label: "经营活动现金流入".into(),
             current: cash.operating_in,
-            comparative: 0.0,
+            comparative: ytd_sums.operating_in,
             prior_year: prior_sums.operating_in,
         },
         ReportRow {
             key: "operating_outflow".into(),
             label: "经营活动现金流出".into(),
             current: cash.operating_out,
-            comparative: 0.0,
+            comparative: ytd_sums.operating_out,
             prior_year: prior_sums.operating_out,
         },
         ReportRow {
             key: "investing_inflow".into(),
             label: "投资活动现金流入".into(),
             current: cash.investing_in,
-            comparative: 0.0,
+            comparative: ytd_sums.investing_in,
             prior_year: prior_sums.investing_in,
         },
         ReportRow {
             key: "investing_outflow".into(),
             label: "投资活动现金流出".into(),
             current: cash.investing_out,
-            comparative: 0.0,
+            comparative: ytd_sums.investing_out,
             prior_year: prior_sums.investing_out,
         },
         ReportRow {
             key: "financing_inflow".into(),
             label: "筹资活动现金流入".into(),
             current: cash.financing_in,
-            comparative: 0.0,
+            comparative: ytd_sums.financing_in,
             prior_year: prior_sums.financing_in,
         },
         ReportRow {
             key: "financing_outflow".into(),
             label: "筹资活动现金流出".into(),
             current: cash.financing_out,
-            comparative: 0.0,
+            comparative: ytd_sums.financing_out,
             prior_year: prior_sums.financing_out,
         },
         ReportRow {
             key: "other".into(),
             label: "其他（未分类）".into(),
             current: cash.other,
-            comparative: 0.0,
+            comparative: ytd_sums.other,
             prior_year: prior_sums.other,
         },
     ];
@@ -2162,10 +2168,19 @@ pub fn build_cash_flow_statement(conn: &Connection, month: &str) -> AppResult<Ca
         - cash.operating_out
         - cash.investing_out
         - cash.financing_out;
+    // 本年累计净增加额（第十八阶段）：与当月同一净额公式，取 YTD 区间
+    let net_increase_ytd = ytd_sums.operating_in
+        + ytd_sums.investing_in
+        + ytd_sums.financing_in
+        + ytd_sums.other
+        - ytd_sums.operating_out
+        - ytd_sums.investing_out
+        - ytd_sums.financing_out;
     Ok(CashFlowStatement {
         month: month.to_string(),
         rows,
         net_increase,
+        net_increase_ytd,
         unclassified,
         has_prior_year,
     })
@@ -4579,6 +4594,128 @@ mod tests {
         approx(row_value(&cf.rows, "operating_inflow").current, 0.0);
         approx(cf.net_increase, -1000.0);
         assert!(cf.unclassified.is_empty());
+    }
+
+    /// 本年累计（第十八阶段）：1 月报表 YTD=当月；2 月报表 YTD=1+2 月累计，当月列不受影响。
+    #[test]
+    fn test_cash_flow_year_to_date_accumulates() {
+        let conn = setup();
+        save_opening_balances(
+            &conn,
+            "2026-01",
+            &[
+                OpeningBalanceRow {
+                    account_code: "1002".into(),
+                    debit_amount: 50000.0,
+                    credit_amount: 0.0,
+                },
+                OpeningBalanceRow {
+                    account_code: "3001".into(),
+                    debit_amount: 0.0,
+                    credit_amount: 50000.0,
+                },
+            ],
+        )
+        .unwrap();
+        // 1 月：销售收款 借 1002 6000 / 贷 6001（经营流入 6000）
+        insert_voucher(
+            &conn,
+            &VoucherDraft {
+                belong_month: "2026-01".into(),
+                voucher_date: "2026-01-31".into(),
+                source_type: "sales_invoice".into(),
+                source_id: 1,
+                remark: None,
+                lines: vec![
+                    VoucherLineDraft {
+                        account_code: "1002".into(),
+                        debit_amount: 6000.0,
+                        credit_amount: 0.0,
+                        summary: None,
+                        fund_account_id: None,
+                    },
+                    VoucherLineDraft {
+                        account_code: "6001".into(),
+                        debit_amount: 0.0,
+                        credit_amount: 6000.0,
+                        summary: None,
+                        fund_account_id: None,
+                    },
+                ],
+            },
+        )
+        .unwrap();
+        // 2 月：销售收款 4000 + 管理费用支出 500（借 6602 / 贷 1002）
+        insert_voucher(
+            &conn,
+            &VoucherDraft {
+                belong_month: "2026-02".into(),
+                voucher_date: "2026-02-28".into(),
+                source_type: "sales_invoice".into(),
+                source_id: 2,
+                remark: None,
+                lines: vec![
+                    VoucherLineDraft {
+                        account_code: "1002".into(),
+                        debit_amount: 4000.0,
+                        credit_amount: 0.0,
+                        summary: None,
+                        fund_account_id: None,
+                    },
+                    VoucherLineDraft {
+                        account_code: "6001".into(),
+                        debit_amount: 0.0,
+                        credit_amount: 4000.0,
+                        summary: None,
+                        fund_account_id: None,
+                    },
+                ],
+            },
+        )
+        .unwrap();
+        insert_voucher(
+            &conn,
+            &VoucherDraft {
+                belong_month: "2026-02".into(),
+                voucher_date: "2026-02-28".into(),
+                source_type: "manual_voucher".into(),
+                source_id: 3,
+                remark: None,
+                lines: vec![
+                    VoucherLineDraft {
+                        account_code: "6602".into(),
+                        debit_amount: 500.0,
+                        credit_amount: 0.0,
+                        summary: None,
+                        fund_account_id: None,
+                    },
+                    VoucherLineDraft {
+                        account_code: "1002".into(),
+                        debit_amount: 0.0,
+                        credit_amount: 500.0,
+                        summary: None,
+                        fund_account_id: None,
+                    },
+                ],
+            },
+        )
+        .unwrap();
+
+        // 1 月：当月 = 本年累计（启用月即 1 月）
+        let cf1 = build_cash_flow_statement(&conn, "2026-01").unwrap();
+        approx(row_value(&cf1.rows, "operating_inflow").current, 6000.0);
+        approx(row_value(&cf1.rows, "operating_inflow").comparative, 6000.0);
+        approx(cf1.net_increase, 6000.0);
+        approx(cf1.net_increase_ytd, 6000.0);
+
+        // 2 月：当月仅 2 月数据，本年累计 = 1+2 月
+        let cf2 = build_cash_flow_statement(&conn, "2026-02").unwrap();
+        approx(row_value(&cf2.rows, "operating_inflow").current, 4000.0);
+        approx(row_value(&cf2.rows, "operating_inflow").comparative, 10000.0);
+        approx(row_value(&cf2.rows, "operating_outflow").current, 500.0);
+        approx(row_value(&cf2.rows, "operating_outflow").comparative, 500.0);
+        approx(cf2.net_increase, 3500.0);
+        approx(cf2.net_increase_ytd, 9500.0);
     }
 
     #[test]

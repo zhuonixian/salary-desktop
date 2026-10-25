@@ -1363,6 +1363,8 @@ export interface CashFlowStatement {
   month: string;
   rows: ReportRow[];
   net_increase: number;
+  /** 本年累计净增加额（第十八阶段） */
+  net_increase_ytd: number;
   unclassified: UnclassifiedCashItem[];
   has_prior_year: boolean;
 }

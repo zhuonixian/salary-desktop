@@ -216,7 +216,7 @@ const FinancialReports: React.FC = () => {
   ];
 
   // 表尾合计行（Table.Summary）：资产负债表两条总计 + 现金流量表净增加额
-  const renderSummaryRow = (label: string, value: number) => (
+  const renderSummaryRow = (label: string, value: number, ytd?: number) => (
     <Table.Summary.Row>
       <Table.Summary.Cell index={0}>
         <strong>{label}</strong>
@@ -225,7 +225,11 @@ const FinancialReports: React.FC = () => {
         <strong>{renderAmount(value)}</strong>
       </Table.Summary.Cell>
       <Table.Summary.Cell index={2} align="right">
-        <span style={{ color: '#999' }}>—</span>
+        {ytd !== undefined ? (
+          <strong>{renderAmount(ytd)}</strong>
+        ) : (
+          <span style={{ color: '#999' }}>—</span>
+        )}
       </Table.Summary.Cell>
       <Table.Summary.Cell index={3} align="right">
         <span style={{ color: '#999' }}>—</span>
@@ -420,16 +424,28 @@ const FinancialReports: React.FC = () => {
                         />
                       </Card>
                     </Col>
+                    <Col xs={24} sm={12}>
+                      <Card className="stat-card">
+                        <SensitiveStatistic
+                          title="现金净增加额（本年累计）"
+                          value={cashFlowStatement?.net_increase_ytd ?? 0}
+                        />
+                      </Card>
+                    </Col>
                   </Row>
                   <Card>
                     <Table<ReportRow>
                       rowKey="key"
-                      columns={reportColumns('本期金额', '对比金额', '上年同期', cashFlowStatement?.has_prior_year ?? false)}
+                      columns={reportColumns('本期金额', '本年累计', '上年同期', cashFlowStatement?.has_prior_year ?? false)}
                       dataSource={cashFlowStatement?.rows ?? []}
                       pagination={false}
                       summary={() =>
                         cashFlowStatement ? (
-                          renderSummaryRow('现金净增加额', cashFlowStatement.net_increase)
+                          renderSummaryRow(
+                            '现金净增加额',
+                            cashFlowStatement.net_increase,
+                            cashFlowStatement.net_increase_ytd,
+                          )
                         ) : undefined
                       }
                     />

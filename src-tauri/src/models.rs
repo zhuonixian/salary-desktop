@@ -1540,6 +1540,8 @@ pub struct CashFlowStatement {
     pub month: String,
     pub rows: Vec<ReportRow>,
     pub net_increase: f64,
+    /// 本年累计净增加额（第十八阶段：本年 1 月~所选月区间净额）
+    pub net_increase_ytd: f64,
     pub unclassified: Vec<UnclassifiedCashItem>,
     /// 上年同期列是否有效（上年同月不早于启用月）
     pub has_prior_year: bool,

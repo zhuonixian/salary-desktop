@@ -2002,7 +2002,7 @@ pub fn export_cash_flow_statement(report: &CashFlowStatement, path: &str) -> App
         &report.rows,
         "现金净增加额",
         report.net_increase,
-        report.rows.iter().map(|r| r.comparative).sum(),
+        report.net_increase_ytd,
         report.rows.iter().map(|r| r.prior_year).sum(),
     )?;
     set_report_columns(worksheet, 4)?;
@@ -3813,6 +3813,7 @@ mod tests {
                 },
             ],
             net_increase: -3000.0,
+            net_increase_ytd: -5000.0,
             unclassified: vec![UnclassifiedCashItem {
                 voucher_no: "JZ-202602-001".into(),
                 summary: Some("未分类支出".into()),
