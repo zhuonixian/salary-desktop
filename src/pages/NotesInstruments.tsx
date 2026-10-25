@@ -1,13 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { ReactNode } from 'react';
 import {
   Alert,
   Button,
   Card,
   DatePicker,
   Descriptions,
-  Drawer,
-  Empty,
   Form,
   Input,
   InputNumber,
@@ -17,17 +14,37 @@ import {
   Table,
   Tabs,
   Tag,
-  Timeline,
   Typography,
   message,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { PlusOutlined, QuestionCircleOutlined, ReloadOutlined } from '@ant-design/icons';
-import dayjs from 'dayjs';
-import type { Dayjs } from 'dayjs';
 import SensitiveText from '@/components/SensitiveText';
 import PageTour from '@/components/PageTour';
 import { tourTarget } from '@/components/tourTarget';
+import InstrumentDetailDrawer from '@/components/InstrumentDetailDrawer';
+import InstrumentRegisterModal from '@/components/InstrumentRegisterModal';
+import {
+  REVERSABLE_STATUSES,
+  STATUS_OPTIONS,
+  TYPE_OPTIONS,
+  accountName,
+  accountSelectOptions,
+  directionTag,
+  errText,
+  fmtAmount,
+  monthDate,
+  reverseTargetLabel,
+  statusTag,
+} from '@/components/instrumentsShared';
+import type {
+  DiscountFormValues,
+  EndorseFormValues,
+  OperateFormValues,
+  RegisterFormValues,
+  ReverseFormValues,
+  SharedOptions,
+} from '@/components/instrumentsShared';
 import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
 import {
   confirmCollection,
@@ -46,133 +63,18 @@ import {
   startCollection,
   voidInstrument,
 } from '@/api';
-import {
-  APPROVAL_ACTION_LABEL,
-  INSTRUMENT_ACTION_LABEL,
-  INSTRUMENT_DIRECTION_LABEL,
-  INSTRUMENT_STATUS_LABEL,
-  INSTRUMENT_TYPE_LABEL,
-} from '@/types';
+import { INSTRUMENT_TYPE_LABEL } from '@/types';
 import type {
   ApprovalEvent,
-  BusinessPartner,
-  FundAccount,
   GlAccount,
   InstrumentDetail,
-  InstrumentEndorsement,
   NegotiableInstrument,
-  OperatorProfile,
 } from '@/types';
 
-const { Title, Text } = Typography;
+// 模块常量、SharedOptions 与各表单值类型已下沉至 @/components/instrumentsShared
+
+const { Title } = Typography;
 const { TextArea } = Input;
-
-const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
-
-const fmtAmount = (value: number): string =>
-  (Number(value) || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-
-// 状态颜色（与后端 notes.rs status_label 中文一致）
-const STATUS_COLOR: Record<string, string> = {
-  holding: 'processing',
-  endorsed_out: 'purple',
-  discounted: 'geekblue',
-  collecting: 'gold',
-  collected: 'success',
-  issued_outstanding: 'warning',
-  paid: 'success',
-  void: '#999999',
-};
-
-const STATUS_OPTIONS = Object.entries(INSTRUMENT_STATUS_LABEL).map(([value, label]) => ({
-  value,
-  label,
-}));
-
-const TYPE_OPTIONS = Object.entries(INSTRUMENT_TYPE_LABEL).map(([value, label]) => ({
-  value,
-  label,
-}));
-
-// 方向标签（全部 Tab 表格列展示用）
-const directionTag = (direction: string): ReactNode => (
-  <Tag color={direction === 'received' ? 'blue' : 'orange'}>
-    {INSTRUMENT_DIRECTION_LABEL[direction] ?? direction}
-  </Tag>
-);
-
-const statusTag = (status: string): ReactNode => (
-  <Tag color={STATUS_COLOR[status] ?? 'default'}>{INSTRUMENT_STATUS_LABEL[status] ?? status}</Tag>
-);
-
-// 可红字冲正的流转后状态（撤销最后一次流转；作废为纯终态不可冲正）
-const REVERSABLE_STATUSES = ['endorsed_out', 'discounted', 'collected', 'paid'];
-
-// 冲正恢复态说明（与后端 reverse_instrument_flow 恢复口径一致）
-const reverseTargetLabel = (inst: NegotiableInstrument): string => {
-  if (inst.instrument_type === 'check') return '已作废（登记即终态的纠错，同号可重新登记）';
-  if (inst.status === 'paid') return '已开出未兑付（可重新兑付或作废）';
-  return '持有（可改道背书/贴现/托收或作废）';
-};
-
-interface SharedOptions {
-  accounts: FundAccount[];
-  partners: BusinessPartner[];
-  glOptions: { value: string; label: string }[];
-  operators: OperatorProfile[];
-}
-
-// ==================== 日期/账户公共小件 ====================
-
-// 业务月份内的缺省操作日期（与收付款单页同模式，操作月须未月结由后端强校验）
-const monthDate = (month: Dayjs): Dayjs => month.date(Math.min(dayjs().date(), month.daysInMonth()));
-
-const accountSelectOptions = (accounts: FundAccount[]) =>
-  accounts
-    .filter((a) => a.is_active)
-    .map((a) => ({ value: a.id, label: `${a.name}（${a.account_code}）` }));
-
-const accountName = (accounts: FundAccount[], id: number | null): string =>
-  id === null ? '-' : accounts.find((a) => a.id === id)?.name ?? `账户ID=${id}`;
-
-interface RegisterFormValues {
-  instrument_type: string;
-  direction: string;
-  instrument_no: string;
-  face_amount?: number;
-  issue_date: Dayjs;
-  due_date: Dayjs;
-  drawer?: string;
-  acceptor?: string;
-  payee?: string;
-  partner_id?: number;
-  fund_account_id?: number;
-  counter_account_code?: string;
-  remark?: string;
-}
-
-interface EndorseFormValues {
-  endorsee: string;
-  endorse_date: Dayjs;
-  purpose?: string;
-  counter_account_code?: string;
-}
-
-interface DiscountFormValues {
-  discount_date: Dayjs;
-  proceeds?: number;
-  fund_account_id?: number;
-}
-
-interface OperateFormValues {
-  operate_date: Dayjs;
-  fund_account_id?: number;
-}
-
-interface ReverseFormValues {
-  reverse_date: Dayjs;
-  reason: string;
-}
 
 // ==================== 票据 Tab ====================
 
@@ -190,11 +92,9 @@ const InstrumentTab: React.FC<{ direction?: string; shared: SharedOptions }> = (
 
   const [registerOpen, setRegisterOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  // 登记表单实例留在本层（openRegister 预填 + handleRegisterOk 校验提交）；
+  // watch 及派生布尔已随弹窗 JSX 移入 InstrumentRegisterModal
   const [registerForm] = Form.useForm<RegisterFormValues>();
-  const watchRegType = Form.useWatch('instrument_type', registerForm);
-  const watchRegDir = Form.useWatch('direction', registerForm);
-  const regIsCheck = watchRegType === 'check';
-  const regIsAcceptance = watchRegType === 'bank_acceptance' || watchRegType === 'commercial_acceptance';
 
   const [endorseInst, setEndorseInst] = useState<NegotiableInstrument | null>(null);
   const [endorseSaving, setEndorseSaving] = useState(false);
@@ -723,166 +623,14 @@ const InstrumentTab: React.FC<{ direction?: string; shared: SharedOptions }> = (
       />
 
       {/* 登记弹窗：按类型+方向动态约束（承兑类收方向免账户、支票必选账户） */}
-      <Modal
-        title="登记票据"
+      <InstrumentRegisterModal
         open={registerOpen}
+        saving={saving}
+        form={registerForm}
+        shared={shared}
         onOk={handleRegisterOk}
-        confirmLoading={saving}
-        okText="登记"
         onCancel={() => setRegisterOpen(false)}
-        width={680}
-        destroyOnHidden
-      >
-        <Form form={registerForm} layout="vertical">
-          <Space size="middle" style={{ display: 'flex' }}>
-            <Form.Item
-              name="instrument_type"
-              label="票据类型"
-              rules={[{ required: true, message: '请选择票据类型' }]}
-              extra="支票登记即结算（收到→已到账 / 开出→已兑付）"
-            >
-              <Select
-                style={{ width: 160 }}
-                options={TYPE_OPTIONS}
-                onChange={() => {
-                  // 切类型/方向时清空动态字段；支票到期日默认=出票日
-                  registerForm.setFieldsValue({ fund_account_id: undefined, acceptor: undefined });
-                  if (registerForm.getFieldValue('instrument_type') === 'check') {
-                    const issue = registerForm.getFieldValue('issue_date') as Dayjs | undefined;
-                    if (issue) registerForm.setFieldsValue({ due_date: issue });
-                  }
-                }}
-              />
-            </Form.Item>
-            <Form.Item
-              name="direction"
-              label="方向"
-              rules={[{ required: true, message: '请选择方向' }]}
-              extra="收到＝我方持有票据；开出＝我方对外承兑/付款"
-            >
-              <Select
-                style={{ width: 120 }}
-                options={Object.entries(INSTRUMENT_DIRECTION_LABEL).map(([value, label]) => ({
-                  value,
-                  label,
-                }))}
-              />
-            </Form.Item>
-            <Form.Item
-              name="instrument_no"
-              label="票据号码"
-              rules={[{ required: true, message: '请输入票据号码' }]}
-            >
-              <Input style={{ width: 180 }} maxLength={50} placeholder="同类型同号唯一" />
-            </Form.Item>
-          </Space>
-          <Space size="middle" style={{ display: 'flex' }}>
-            <Form.Item
-              name="face_amount"
-              label="票面金额"
-              rules={[
-                { required: true, message: '请输入票面金额' },
-                { type: 'number', min: 0.01, message: '票面金额必须为正数' },
-              ]}
-            >
-              <InputNumber min={0.01} step={0.01} style={{ width: 160 }} precision={2} />
-            </Form.Item>
-            <Form.Item
-              name="issue_date"
-              label="出票日"
-              rules={[{ required: true, message: '请选择出票日' }]}
-              extra="登记月＝出票日所在月，月结后禁止补录"
-            >
-              <DatePicker
-                style={{ width: 140 }}
-                onChange={(value) => {
-                  // 支票到期日默认随出票日
-                  if (value && registerForm.getFieldValue('instrument_type') === 'check') {
-                    registerForm.setFieldsValue({ due_date: value });
-                  }
-                }}
-              />
-            </Form.Item>
-            <Form.Item
-              name="due_date"
-              label="到期日"
-              rules={[
-                { required: true, message: '请选择到期日' },
-                ({ getFieldValue }) => ({
-                  validator: (_, value: Dayjs | undefined) =>
-                    value && getFieldValue('issue_date') && value.isBefore(getFieldValue('issue_date'), 'day')
-                      ? Promise.reject(new Error('到期日不能早于出票日'))
-                      : Promise.resolve(),
-                }),
-              ]}
-            >
-              <DatePicker style={{ width: 140 }} />
-            </Form.Item>
-          </Space>
-          <Space size="middle" style={{ display: 'flex' }}>
-            <Form.Item name="drawer" label="出票人">
-              <Input style={{ width: 160 }} maxLength={50} />
-            </Form.Item>
-            {regIsAcceptance && (
-              <Form.Item name="acceptor" label="承兑人">
-                <Input style={{ width: 160 }} maxLength={50} placeholder="承兑汇票必填" />
-              </Form.Item>
-            )}
-            <Form.Item name="payee" label="收款人">
-              <Input style={{ width: 160 }} maxLength={50} />
-            </Form.Item>
-          </Space>
-          <Space size="middle" style={{ display: 'flex' }}>
-            <Form.Item
-              name="fund_account_id"
-              label={
-                regIsCheck
-                  ? watchRegDir === 'issued'
-                    ? '出账资金账户'
-                    : '入账资金账户'
-                  : '挂接资金账户'
-              }
-              rules={regIsCheck ? [{ required: true, message: '支票登记即结算，必须选择资金账户' }] : undefined}
-              extra={
-                regIsCheck
-                  ? undefined
-                  : '可选；作为后续托收/贴现/兑付的缺省账户'
-              }
-            >
-              <Select style={{ width: 240 }} allowClear showSearch optionFilterProp="label" options={accOptions} />
-            </Form.Item>
-            <Form.Item
-              name="partner_id"
-              label="关联往来单位"
-            >
-              <Select
-                style={{ width: 220 }}
-                allowClear
-                showSearch
-                optionFilterProp="label"
-                options={shared.partners.map((p) => ({ value: p.id, label: p.name }))}
-              />
-            </Form.Item>
-            <Form.Item
-              name="counter_account_code"
-              label="对方科目"
-              extra="缺省按类型与方向推导（收到 1122 应收账款 / 开出 2202 应付账款）"
-            >
-              <Select
-                style={{ width: 220 }}
-                allowClear
-                showSearch
-                optionFilterProp="label"
-                placeholder="从科目表选择"
-                options={shared.glOptions}
-              />
-            </Form.Item>
-          </Space>
-          <Form.Item name="remark" label="备注">
-            <TextArea rows={2} placeholder="备注（可选）" maxLength={200} />
-          </Form.Item>
-        </Form>
-      </Modal>
+      />
 
       {/* 背书弹窗：本期全额背书，金额自动等于票面 */}
       <Modal
@@ -1191,154 +939,14 @@ const InstrumentTab: React.FC<{ direction?: string; shared: SharedOptions }> = (
       </Modal>
 
       {/* 详情抽屉：票面信息 + 背书链时间线 + 状态轨迹（含关联凭证号） */}
-      <Drawer
-        title={detail ? `票据详情 ${detail.instrument.instrument_no}` : '票据详情'}
+      <InstrumentDetailDrawer
         open={detailOpen}
-        width={680}
+        loading={detailLoading}
+        detail={detail}
+        events={events}
+        shared={shared}
         onClose={() => setDetailOpen(false)}
-        destroyOnHidden
-      >
-        {detail === null ? (
-          <Empty description={detailLoading ? '加载中…' : '暂无数据'} />
-        ) : (
-          <>
-            <Descriptions
-              size="small"
-              column={2}
-              bordered
-              items={[
-                { key: 'no', label: '票据号码', children: detail.instrument.instrument_no },
-                {
-                  key: 'type',
-                  label: '类型',
-                  children:
-                    INSTRUMENT_TYPE_LABEL[detail.instrument.instrument_type] ??
-                    detail.instrument.instrument_type,
-                },
-                {
-                  key: 'direction',
-                  label: '方向',
-                  children: directionTag(detail.instrument.direction),
-                },
-                { key: 'status', label: '状态', children: statusTag(detail.instrument.status) },
-                {
-                  key: 'amount',
-                  label: '票面金额',
-                  children: (
-                    <SensitiveText type="amount" value={fmtAmount(detail.instrument.face_amount)} />
-                  ),
-                },
-                { key: 'voucher', label: '登记凭证号', children: detail.instrument.voucher_id ?? '-' },
-                { key: 'issue', label: '出票日', children: detail.instrument.issue_date },
-                { key: 'due', label: '到期日', children: detail.instrument.due_date },
-                { key: 'drawer', label: '出票人', children: detail.instrument.drawer ?? '-' },
-                { key: 'acceptor', label: '承兑人', children: detail.instrument.acceptor ?? '-' },
-                { key: 'payee', label: '收款人', children: detail.instrument.payee ?? '-' },
-                {
-                  key: 'account',
-                  label: '挂接账户',
-                  children: accountName(shared.accounts, detail.instrument.fund_account_id),
-                },
-                {
-                  key: 'partner',
-                  label: '往来单位',
-                  children:
-                    shared.partners.find((p) => p.id === detail.instrument.partner_id)?.name ??
-                    (detail.instrument.partner_id !== null
-                      ? `往来单位ID=${detail.instrument.partner_id}`
-                      : '-'),
-                },
-                {
-                  key: 'counter',
-                  label: '对方科目',
-                  children: detail.instrument.counter_account_code ?? '-',
-                },
-                {
-                  key: 'creator',
-                  label: '登记人',
-                  span: 2,
-                  children:
-                    detail.instrument.created_by
-                      ? `${detail.instrument.created_by} · ${dayjs(detail.instrument.created_at).format('YYYY-MM-DD HH:mm')}`
-                      : '-',
-                },
-                { key: 'remark', label: '备注', children: detail.instrument.remark ?? '-', span: 2 },
-              ]}
-            />
-
-            <Title level={5} style={{ marginTop: 24 }}>
-              背书链
-            </Title>
-            {detail.endorsements.length === 0 ? (
-              <Text type="secondary">尚无背书记录</Text>
-            ) : (
-              <Timeline
-                items={detail.endorsements.map((e: InstrumentEndorsement) => ({
-                  color: 'blue',
-                  content: (
-                    <div key={e.id}>
-                      <div>
-                        <Text strong>
-                          第 {e.endorse_order} 手 → 被背书人 {e.endorsee}
-                        </Text>
-                        <Text type="secondary">
-                          {' '}
-                          <SensitiveText type="amount" value={fmtAmount(e.amount)} />
-                        </Text>
-                      </div>
-                      <Text type="secondary">
-                        {e.endorse_date}
-                        {e.purpose ? ` · 事由：${e.purpose}` : ''} · 凭证号 {e.voucher_id} ·{' '}
-                        {e.created_by ?? '-'}
-                      </Text>
-                    </div>
-                  ),
-                }))}
-              />
-            )}
-
-            <Title level={5} style={{ marginTop: 24 }}>
-              状态轨迹
-            </Title>
-            {events.length === 0 ? (
-              <Text type="secondary">尚无流转记录（登记后未发生背书/贴现/托收/兑付等操作）</Text>
-            ) : (
-              <Timeline
-                items={events.map((e: ApprovalEvent) => ({
-                  color: e.action === 'void' || e.action === 'reverse' ? 'red' : 'green',
-                  content: (
-                    <div key={e.id}>
-                      <div>
-                        <Text strong>
-                          {INSTRUMENT_ACTION_LABEL[e.action] ??
-                            APPROVAL_ACTION_LABEL[e.action] ??
-                            e.action}
-                        </Text>
-                        {(e.from_status || e.to_status) && (
-                          <Text type="secondary">
-                            {' '}
-                            {e.from_status
-                              ? INSTRUMENT_STATUS_LABEL[e.from_status] ?? e.from_status
-                              : '—'}{' '}
-                            →{' '}
-                            {e.to_status ? INSTRUMENT_STATUS_LABEL[e.to_status] ?? e.to_status : '—'}
-                          </Text>
-                        )}
-                      </div>
-                      <Text type="secondary">
-                        {shared.operators.find((o) => o.id === e.operator_id)?.name ??
-                          `操作人ID=${e.operator_id ?? '-'}`}{' '}
-                        · {dayjs(e.created_at).format('YYYY-MM-DD HH:mm')}
-                      </Text>
-                      {e.comment && <div>意见：{e.comment}</div>}
-                    </div>
-                  ),
-                }))}
-              />
-            )}
-          </>
-        )}
-      </Drawer>
+      />
     </>
   );
 };

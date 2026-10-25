@@ -1,18 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { ReactNode } from 'react';
 import {
   Alert,
   Button,
   Card,
   DatePicker,
   Descriptions,
-  Drawer,
-  Empty,
   Form,
-  Image,
   Input,
-  InputNumber,
-  List,
   Modal,
   Popconfirm,
   Select,
@@ -21,29 +15,38 @@ import {
   Table,
   Tabs,
   Tag,
-  Timeline,
   Tooltip,
   Typography,
   message,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { PlusOutlined, QuestionCircleOutlined, ReloadOutlined, SettingOutlined, UploadOutlined } from '@ant-design/icons';
-import { convertFileSrc } from '@tauri-apps/api/core';
+import { PlusOutlined, QuestionCircleOutlined, ReloadOutlined, SettingOutlined } from '@ant-design/icons';
 import { open } from '@tauri-apps/plugin-dialog';
 import dayjs from 'dayjs';
 import type { Dayjs } from 'dayjs';
 import SensitiveText from '@/components/SensitiveText';
 import PageTour from '@/components/PageTour';
 import { tourTarget } from '@/components/tourTarget';
+import FundDocumentDetailDrawer from '@/components/FundDocumentDetailDrawer';
+import FundDocumentFormModal from '@/components/FundDocumentFormModal';
+import {
+  BATCHABLE_TYPES,
+  COMMENT_META,
+  CREATABLE_TYPE_OPTIONS,
+  STATUS_OPTIONS,
+  TYPE_OPTIONS,
+  errText,
+  fmtAmount,
+  statusTag,
+} from '@/components/fundDocumentsShared';
+import type { CommentAction, FundDocFormValues, SharedOptions } from '@/components/fundDocumentsShared';
 import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
 import { useOperator } from '@/contexts/OperatorContext';
 import {
   addBusinessAttachment,
   approveFundDocument,
-  createFundDocument,
   deleteBusinessAttachment,
   getBusinessPartners,
-  getDecryptedAttachmentUrl,
   getEmployees,
   getFundAccounts,
   getFundDocumentDetail,
@@ -57,176 +60,27 @@ import {
   settleFundDocument,
   setMakerCheckerEnabled,
   submitFundDocument,
-  updateFundDocument,
   voidFundDocument,
   withdrawFundDocument,
 } from '@/api';
-import {
-  APPROVAL_ACTION_LABEL,
-  FUND_DOCUMENT_STATUS_LABEL,
-  FUND_DOCUMENT_TYPE_LABEL,
-  SETTLEMENT_MODE_LABEL,
-} from '@/types';
+import { FUND_DOCUMENT_TYPE_LABEL } from '@/types';
 import type {
-  ApprovalEvent,
   BusinessAttachment,
-  BusinessPartner,
-  Employee,
-  FundAccount,
   FundDocument,
   FundDocumentDetail,
-  FundDocumentInput,
   GlAccount,
-  OperatorProfile,
 } from '@/types';
 
 const { Title, Text } = Typography;
 const { TextArea } = Input;
 
-const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
-
-const fmtAmount = (value: number): string =>
-  (Number(value) || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-
-// 状态颜色（与后端 cashier.rs fund_status_label 中文一致）
-const STATUS_COLOR: Record<string, string> = {
-  draft: 'default',
-  submitted: 'processing',
-  approved: 'success',
-  rejected: 'warning',
-  batched: 'gold',
-  settled: 'geekblue',
-  void: '#999999',
-  reversed: 'purple',
-};
-
-// 本页可手工创建的单据类型（员工借款/借款核销/冲正分别在借款页与冲正入口产生）
-const CREATABLE_TYPE_OPTIONS = [
-  { value: 'receipt', label: '收款单' },
-  { value: 'payment', label: '付款单' },
-  { value: 'transfer', label: '内部转账单' },
-];
-
-const STATUS_OPTIONS = Object.entries(FUND_DOCUMENT_STATUS_LABEL).map(([value, label]) => ({
-  value,
-  label,
-}));
-
-const TYPE_OPTIONS = Object.entries(FUND_DOCUMENT_TYPE_LABEL).map(([value, label]) => ({
-  value,
-  label,
-}));
-
-// 付款/借款单审批后须经付款批次（spec 5.1）；其余类型可直接结算
-const BATCHABLE_TYPES = ['payment', 'advance'];
-// 附件可变更状态（与后端 FUND_DOCUMENT_ATTACHMENT_EDITABLE_STATUSES 一致）
-const ATTACHMENT_EDITABLE_STATUSES = ['draft', 'rejected', 'void'];
-
-interface SharedOptions {
-  partners: BusinessPartner[];
-  employees: Employee[];
-  accounts: FundAccount[];
-  glOptions: { value: string; label: string }[];
-  operators: OperatorProfile[];
-}
-
-const statusTag = (status: string): ReactNode => (
-  <Tag color={STATUS_COLOR[status] ?? 'default'}>
-    {FUND_DOCUMENT_STATUS_LABEL[status] ?? status}
-  </Tag>
-);
-
-// ==================== 附件预览 ====================
-
-const AttachmentPreviewModal: React.FC<{
-  attachment: BusinessAttachment | null;
-  onClose: () => void;
-}> = ({ attachment, onClose }) => {
-  const [url, setUrl] = useState('');
-  const [note, setNote] = useState('');
-
-  useEffect(() => {
-    let cancelled = false;
-    setUrl('');
-    setNote('');
-    if (!attachment) return undefined;
-    getDecryptedAttachmentUrl(attachment.id)
-      .then((path) => {
-        if (cancelled) return;
-        if (path) {
-          setUrl(convertFileSrc(path));
-        } else {
-          setNote('当前环境暂不支持附件预览（浏览器预览模式或文件缺失）');
-        }
-      })
-      .catch((e: unknown) => {
-        if (!cancelled) setNote('预览加载失败: ' + errText(e));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [attachment]);
-
-  return (
-    <Modal
-      title={`附件预览：${attachment?.file_name ?? ''}`}
-      open={Boolean(attachment)}
-      onCancel={onClose}
-      footer={null}
-      width={720}
-      destroyOnHidden
-    >
-      {note ? (
-        <Empty description={note} />
-      ) : !url ? (
-        <Empty description="加载中…" />
-      ) : url.toLowerCase().endsWith('.pdf') ? (
-        <iframe src={url} style={{ width: '100%', height: 480 }} title="附件预览" />
-      ) : (
-        <Image src={url} alt={attachment?.file_name ?? '附件'} style={{ width: '100%' }} />
-      )}
-    </Modal>
-  );
-};
+// 模块常量（errText/fmtAmount/statusTag/STATUS_COLOR/CREATABLE_TYPE_OPTIONS/STATUS_OPTIONS/
+// TYPE_OPTIONS/BATCHABLE_TYPES/ATTACHMENT_EDITABLE_STATUSES/COMMENT_META）、
+// SharedOptions/FundDocFormValues 等类型已下沉至 @/components/fundDocumentsShared
+// （含 JSX 的 statusTag 亦居于此 .tsx 共享文件）；附件预览弹窗随
+// @/components/FundDocumentDetailDrawer 迁出，页面表格列复用同一 statusTag。
 
 // ==================== 单据列表 Tab ====================
-
-interface FundDocFormValues {
-  document_type: string;
-  belong_month: Dayjs;
-  document_date: Dayjs;
-  amount?: number;
-  summary: string;
-  department?: string;
-  expense_type?: string;
-  counterparty_kind: 'partner' | 'employee';
-  partner_id?: number;
-  employee_id?: number;
-  source_account_id?: number;
-  target_account_id?: number;
-  counter_account_code?: string;
-  remark?: string;
-}
-
-type CommentAction = 'approve' | 'reject' | 'void';
-
-const COMMENT_META: Record<CommentAction, { title: string; placeholder: string; okText: string }> = {
-  approve: {
-    title: '审批通过',
-    placeholder: '请输入审批意见（必填）',
-    okText: '通过',
-  },
-  reject: {
-    title: '驳回',
-    placeholder: '请填写驳回意见（必填），提交人可按意见修改后重新提交',
-    okText: '驳回',
-  },
-  void: {
-    title: '作废单据',
-    placeholder: '请填写作废原因（必填）',
-    okText: '作废',
-  },
-};
 
 const DocumentTab: React.FC<{ docType?: string; shared: SharedOptions; makerChecker: boolean }> = ({
   docType,
@@ -246,12 +100,9 @@ const DocumentTab: React.FC<{ docType?: string; shared: SharedOptions; makerChec
   const [keyword, setKeyword] = useState('');
 
   const [formOpen, setFormOpen] = useState(false);
-  const [saving, setSaving] = useState(false);
   const [editing, setEditing] = useState<FundDocument | null>(null);
+  // 表单实例留在页面：openCreate/openEdit 预填初值；useWatch 随表单 JSX 在 FundDocumentFormModal 内订阅
   const [form] = Form.useForm<FundDocFormValues>();
-  const watchBelongMonth = Form.useWatch('belong_month', form);
-  const watchDocType = Form.useWatch('document_type', form);
-  const watchCounterpartyKind = Form.useWatch('counterparty_kind', form);
 
   const [commentAction, setCommentAction] = useState<{
     action: CommentAction;
@@ -272,7 +123,6 @@ const DocumentTab: React.FC<{ docType?: string; shared: SharedOptions; makerChec
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [attachments, setAttachments] = useState<BusinessAttachment[]>([]);
-  const [previewAtt, setPreviewAtt] = useState<BusinessAttachment | null>(null);
 
   const accountName = useCallback(
     (id: number | null): string =>
@@ -397,55 +247,6 @@ const DocumentTab: React.FC<{ docType?: string; shared: SharedOptions; makerChec
     setFormOpen(true);
   };
 
-  const needsCounterparty = watchDocType === 'receipt' || watchDocType === 'payment';
-
-  const handleFormSave = async () => {
-    let values: FundDocFormValues;
-    try {
-      values = await form.validateFields();
-    } catch {
-      return; // 校验失败信息由表单展示
-    }
-    setSaving(true);
-    try {
-      const isTransfer = values.document_type === 'transfer';
-      const data: FundDocumentInput = {
-        id: editing?.id,
-        document_type: values.document_type,
-        belong_month: values.belong_month.format('YYYY-MM'),
-        document_date: values.document_date.format('YYYY-MM-DD'),
-        amount: values.amount ?? 0,
-        summary: values.summary.trim(),
-        department: values.department?.trim() ?? '',
-        expense_type: values.expense_type?.trim() ?? '',
-        partner_id: needsCounterparty && values.counterparty_kind === 'partner' ? values.partner_id ?? null : null,
-        employee_id: needsCounterparty && values.counterparty_kind === 'employee' ? values.employee_id ?? null : null,
-        source_account_id: isTransfer || values.document_type === 'payment' ? values.source_account_id ?? null : null,
-        target_account_id: isTransfer || values.document_type === 'receipt' ? values.target_account_id ?? null : null,
-        counter_account_code: values.counter_account_code ?? '',
-        remark: values.remark?.trim() ?? '',
-        // 本表单不编辑借款/核销专属字段：编辑草稿时透传原值，避免后端把
-        // settlement_mode 抹成缺省 cash_return、或借款单因缺预计归还日校验失败
-        // （stage7 Minor：核销草稿编辑透传 settlement_mode/due_date）
-        settlement_mode: editing?.settlement_mode ?? null,
-        due_date: editing?.due_date ?? null,
-      };
-      if (editing) {
-        await updateFundDocument(data);
-        message.success('单据已保存');
-      } else {
-        await createFundDocument(data);
-        message.success('单据已创建（草稿）');
-      }
-      setFormOpen(false);
-      fetchDocs();
-    } catch (e: unknown) {
-      message.error('保存失败: ' + errText(e));
-    } finally {
-      setSaving(false);
-    }
-  };
-
   // ---------- 状态机操作 ----------
 
   const runAction = async (fn: () => Promise<FundDocument>, success: string, docId?: number) => {
@@ -513,9 +314,6 @@ const DocumentTab: React.FC<{ docType?: string; shared: SharedOptions; makerChec
   };
 
   // ---------- 附件 ----------
-
-  const detailEditable =
-    detail !== null && ATTACHMENT_EDITABLE_STATUSES.includes(detail.document.status);
 
   const handleUploadAttachment = async () => {
     if (!detail) return;
@@ -824,204 +622,18 @@ const DocumentTab: React.FC<{ docType?: string; shared: SharedOptions; makerChec
         pagination={{ pageSize: 20, showTotal: (t) => `共 ${t} 条` }}
       />
 
-      {/* 新建/编辑弹窗：表单不含状态字段，状态完全由状态机命令流转 */}
-      <Modal
-        title={editing ? `编辑单据 ${editing.document_no}` : '新建资金单据'}
+      {/* 新建/编辑弹窗：表单不含状态字段，状态完全由状态机命令流转；useWatch 与保存逻辑随组件迁出 */}
+      <FundDocumentFormModal
+        form={form}
         open={formOpen}
-        onOk={handleFormSave}
-        confirmLoading={saving}
-        onCancel={() => setFormOpen(false)}
-        width={640}
-        destroyOnHidden
-      >
-        <Form form={form} layout="vertical">
-          <Space size="middle" style={{ display: 'flex' }}>
-            <Form.Item
-              name="document_type"
-              label="单据类型"
-              rules={[{ required: true, message: '请选择单据类型' }]}
-              extra="员工借款/借款核销单在「借款备用金」页维护；冲正单由已结算单据的冲正入口产生"
-            >
-              <Select
-                style={{ width: 150 }}
-                options={CREATABLE_TYPE_OPTIONS}
-                disabled={Boolean(editing)}
-                onChange={() => {
-                  // 切换类型时清空方向相关字段，避免残留非法组合
-                  form.setFieldsValue({
-                    source_account_id: undefined,
-                    target_account_id: undefined,
-                    partner_id: undefined,
-                    employee_id: undefined,
-                    counter_account_code: undefined,
-                  });
-                }}
-              />
-            </Form.Item>
-            <Form.Item
-              name="belong_month"
-              label="归属月份"
-              rules={[{ required: true, message: '请选择归属月份' }]}
-            >
-              <DatePicker
-                picker="month"
-                style={{ width: 130 }}
-                onChange={(value) => {
-                  // 单据日期必须落在归属月份内（后端强校验），切月时联动修正
-                  if (value) {
-                    form.setFieldsValue({
-                      document_date: value.date(Math.min(dayjs().date(), value.daysInMonth())),
-                    });
-                  }
-                }}
-              />
-            </Form.Item>
-            <Form.Item
-              name="document_date"
-              label="单据日期"
-              rules={[{ required: true, message: '请选择单据日期' }]}
-            >
-              <DatePicker
-                style={{ width: 140 }}
-                disabledDate={(d) =>
-                  watchBelongMonth ? d.format('YYYY-MM') !== watchBelongMonth.format('YYYY-MM') : false
-                }
-              />
-            </Form.Item>
-          </Space>
-          <Space size="middle" style={{ display: 'flex' }}>
-            <Form.Item
-              name="amount"
-              label="金额"
-              rules={[
-                { required: true, message: '请输入金额' },
-                { type: 'number', min: 0.01, message: '金额必须为正数' },
-              ]}
-            >
-              <InputNumber min={0.01} step={0.01} style={{ width: 160 }} precision={2} />
-            </Form.Item>
-            <Form.Item
-              name="summary"
-              label="摘要"
-              rules={[{ required: true, message: '请输入摘要' }]}
-            >
-              <Input placeholder="如 支付XX供应商货款" style={{ width: 320 }} maxLength={100} />
-            </Form.Item>
-          </Space>
-
-          {needsCounterparty && (
-            <Space size="middle" style={{ display: 'flex' }}>
-              <Form.Item name="counterparty_kind" label="往来对象类型">
-                <Select
-                  style={{ width: 130 }}
-                  options={[
-                    { value: 'partner', label: '往来单位' },
-                    { value: 'employee', label: '员工' },
-                  ]}
-                  onChange={() => {
-                    form.setFieldsValue({ partner_id: undefined, employee_id: undefined });
-                  }}
-                />
-              </Form.Item>
-              {watchDocType && (
-                <Form.Item
-                  name={watchCounterpartyKind === 'employee' ? 'employee_id' : 'partner_id'}
-                  label="往来对象"
-                  rules={[{ required: true, message: '请选择往来对象' }]}
-                  preserve={false}
-                >
-                  <Select
-                    style={{ width: 240 }}
-                    showSearch
-                    optionFilterProp="label"
-                    options={
-                      watchCounterpartyKind === 'employee'
-                        ? shared.employees.map((e) => ({
-                            value: e.id,
-                            label: `${e.name}（${e.employee_no}）`,
-                          }))
-                        : shared.partners.map((p) => ({ value: p.id, label: p.name }))
-                    }
-                  />
-                </Form.Item>
-              )}
-            </Space>
-          )}
-
-          <Space size="middle" style={{ display: 'flex' }}>
-            {(watchDocType === 'payment' || watchDocType === 'transfer') && (
-              <Form.Item
-                name="source_account_id"
-                label="来源账户（资金流出）"
-                rules={[{ required: true, message: '请选择来源账户' }]}
-                preserve={false}
-              >
-                <Select style={{ width: 220 }} showSearch optionFilterProp="label" options={accountFilterOptions} />
-              </Form.Item>
-            )}
-            {(watchDocType === 'receipt' || watchDocType === 'transfer') && (
-              <Form.Item
-                name="target_account_id"
-                label="目标账户（资金流入）"
-                rules={[
-                  { required: true, message: '请选择目标账户' },
-                  ({ getFieldValue }) => ({
-                    validator: (_, value) =>
-                      watchDocType === 'transfer' &&
-                      value &&
-                      getFieldValue('source_account_id') === value
-                        ? Promise.reject(new Error('内部转账的来源账户与目标账户不能相同'))
-                        : Promise.resolve(),
-                  }),
-                ]}
-                preserve={false}
-              >
-                <Select style={{ width: 220 }} showSearch optionFilterProp="label" options={accountFilterOptions} />
-              </Form.Item>
-            )}
-          </Space>
-
-          <Space size="middle" style={{ display: 'flex' }}>
-            <Form.Item
-              name="counter_account_code"
-              label="对方科目"
-              rules={
-                watchDocType === 'receipt' || watchDocType === 'payment'
-                  ? [{ required: true, message: '收款/付款单必须选择对方科目' }]
-                  : undefined
-              }
-              extra={
-                watchDocType === 'transfer'
-                  ? '内部转账可选；两账户挂接科目相同时无需填写'
-                  : '资金科目以外的总账科目（结算生成凭证的借贷对方）'
-              }
-            >
-              <Select
-                style={{ width: 260 }}
-                allowClear
-                showSearch
-                optionFilterProp="label"
-                placeholder="从科目表选择"
-                options={shared.glOptions}
-              />
-            </Form.Item>
-            {needsCounterparty && (
-              <>
-                <Form.Item name="department" label="部门">
-                  <Input style={{ width: 140 }} maxLength={32} />
-                </Form.Item>
-                <Form.Item name="expense_type" label="费用类型">
-                  <Input style={{ width: 140 }} maxLength={32} />
-                </Form.Item>
-              </>
-            )}
-          </Space>
-
-          <Form.Item name="remark" label="备注">
-            <TextArea rows={2} placeholder="备注（可选）" maxLength={200} />
-          </Form.Item>
-        </Form>
-      </Modal>
+        editing={editing}
+        shared={shared}
+        accountOptions={accountFilterOptions}
+        onClose={() => setFormOpen(false)}
+        onSaved={() => {
+          fetchDocs();
+        }}
+      />
 
       {/* 审批/驳回/作废意见弹窗（意见必填由后端强校验） */}
       <Modal
@@ -1138,212 +750,19 @@ const DocumentTab: React.FC<{ docType?: string; shared: SharedOptions; makerChec
         )}
       </Modal>
 
-      {/* 详情抽屉：单据信息 + 审批时间线 + 附件；凭证链接在凭证联动上线后展示 */}
-      <Drawer
-        title={detail ? `单据详情 ${detail.document.document_no}` : '单据详情'}
+      {/* 详情抽屉：单据信息 + 审批时间线 + 附件；凭证链接在凭证联动上线后展示（已抽为组件，含附件预览弹窗） */}
+      <FundDocumentDetailDrawer
         open={detailOpen}
-        width={640}
+        detail={detail}
+        detailLoading={detailLoading}
+        attachments={attachments}
         onClose={() => setDetailOpen(false)}
-        destroyOnHidden
-      >
-        {detail === null ? (
-          <Empty description={detailLoading ? '加载中…' : '暂无数据'} />
-        ) : (
-          <>
-            <Descriptions
-              size="small"
-              column={2}
-              bordered
-              items={[
-                { key: 'no', label: '单号', children: detail.document.document_no },
-                {
-                  key: 'type',
-                  label: '类型',
-                  children: FUND_DOCUMENT_TYPE_LABEL[detail.document.document_type] ?? detail.document.document_type,
-                },
-                { key: 'status', label: '状态', children: statusTag(detail.document.status) },
-                {
-                  key: 'amount',
-                  label: '金额',
-                  children: <SensitiveText type="amount" value={fmtAmount(detail.document.amount)} />,
-                },
-                { key: 'date', label: '单据日期', children: detail.document.document_date },
-                { key: 'month', label: '归属月份', children: detail.document.belong_month },
-                { key: 'partner', label: '往来对象', children: counterpartyLabel(detail.document) },
-                {
-                  key: 'accounts',
-                  label: '账户',
-                  children:
-                    [
-                      detail.document.source_account_id !== null
-                        ? `来源：${accountName(detail.document.source_account_id)}`
-                        : null,
-                      detail.document.target_account_id !== null
-                        ? `目标：${accountName(detail.document.target_account_id)}`
-                        : null,
-                    ]
-                      .filter(Boolean)
-                      .join('；') || '-',
-                },
-                {
-                  key: 'counter',
-                  label: '对方科目',
-                  children: detail.document.counter_account_code ?? '-',
-                },
-                {
-                  key: 'voucher',
-                  label: '关联凭证',
-                  children: '结算/付款后自动生成（凭证联动上线后可跳转）',
-                },
-                {
-                  key: 'department',
-                  label: '部门/费用',
-                  children:
-                    [detail.document.department, detail.document.expense_type]
-                      .filter(Boolean)
-                      .join(' / ') || '-',
-                },
-                ...(detail.document.document_type === 'advance_settlement'
-                  ? [
-                      {
-                        key: 'settlement_mode',
-                        label: '核销方式',
-                        children: detail.document.settlement_mode
-                          ? SETTLEMENT_MODE_LABEL[detail.document.settlement_mode] ??
-                            detail.document.settlement_mode
-                          : '-',
-                      },
-                    ]
-                  : []),
-                ...(detail.document.document_type === 'advance'
-                  ? [{ key: 'due_date', label: '预计归还日', children: detail.document.due_date ?? '-' }]
-                  : []),
-                {
-                  key: 'submit',
-                  label: '提交',
-                  children: detail.document.submitted_at
-                    ? `${operatorName(detail.document.submitted_by)} ${dayjs(detail.document.submitted_at).format('YYYY-MM-DD HH:mm')}`
-                    : '-',
-                },
-                {
-                  key: 'approve',
-                  label: '审批',
-                  children: detail.document.approved_at
-                    ? `${operatorName(detail.document.approved_by)} ${dayjs(detail.document.approved_at).format('YYYY-MM-DD HH:mm')}`
-                    : '-',
-                },
-                {
-                  key: 'settle',
-                  label: '结算',
-                  children: detail.document.settled_at
-                    ? `${operatorName(detail.document.settled_by)} ${dayjs(detail.document.settled_at).format('YYYY-MM-DD HH:mm')}`
-                    : '-',
-                },
-                { key: 'remark', label: '备注', children: detail.document.remark ?? '-', span: 2 },
-              ]}
-            />
-
-            <Title level={5} style={{ marginTop: 24 }}>
-              审批轨迹
-            </Title>
-            {detail.events.length === 0 ? (
-              <Text type="secondary">尚无审批记录（草稿未提交）</Text>
-            ) : (
-              <Timeline
-                items={detail.events.map((e: ApprovalEvent) => ({
-                  color:
-                    e.action === 'reject' || e.action === 'void'
-                      ? 'red'
-                      : e.action === 'approve' || e.action === 'settle'
-                        ? 'green'
-                        : 'blue',
-                  content: (
-                    <div key={e.id}>
-                      <div>
-                        <Text strong>{APPROVAL_ACTION_LABEL[e.action] ?? e.action}</Text>
-                        {(e.from_status || e.to_status) && (
-                          <Text type="secondary">
-                            {' '}
-                            {e.from_status
-                              ? `${FUND_DOCUMENT_STATUS_LABEL[e.from_status] ?? e.from_status}`
-                              : '—'}{' '}
-                            → {e.to_status ? FUND_DOCUMENT_STATUS_LABEL[e.to_status] ?? e.to_status : '—'}
-                          </Text>
-                        )}
-                      </div>
-                      <Text type="secondary">
-                        {operatorName(e.operator_id)} · {dayjs(e.created_at).format('YYYY-MM-DD HH:mm')}
-                      </Text>
-                      {e.comment && <div>意见：{e.comment}</div>}
-                    </div>
-                  ),
-                }))}
-              />
-            )}
-
-            <Title level={5} style={{ marginTop: 24 }}>
-              附件
-            </Title>
-            {detailEditable ? (
-              <Button
-                size="small"
-                icon={<UploadOutlined />}
-                style={{ marginBottom: 12 }}
-                onClick={handleUploadAttachment}
-              >
-                上传附件
-              </Button>
-            ) : (
-              <Alert
-                type="info"
-                showIcon
-                style={{ marginBottom: 12 }}
-                message="仅草稿/已驳回/已作废单据可上传或删除附件；已提交单据须先撤回或驳回。"
-              />
-            )}
-            <List
-              size="small"
-              dataSource={attachments}
-              locale={{ emptyText: '暂无附件' }}
-              renderItem={(att) => (
-                <List.Item
-                  actions={
-                    detailEditable
-                      ? [
-                          <Button key="preview" type="link" size="small" onClick={() => setPreviewAtt(att)}>
-                            预览
-                          </Button>,
-                          <Popconfirm
-                            key="delete"
-                            title="确认删除该附件？"
-                            onConfirm={() => void handleDeleteAttachment(att)}
-                          >
-                            <Button type="link" size="small" danger>
-                              删除
-                            </Button>
-                          </Popconfirm>,
-                        ]
-                      : [
-                          <Button key="preview" type="link" size="small" onClick={() => setPreviewAtt(att)}>
-                            预览
-                          </Button>,
-                        ]
-                  }
-                >
-                  <List.Item.Meta
-                    title={att.file_name}
-                    description={`${att.encrypted ? '已加密' : '未加密'} · ${
-                      att.file_size ? `${(att.file_size / 1024).toFixed(1)} KB` : '大小未知'
-                    } · ${att.uploaded_by ?? '-'} 上传于 ${dayjs(att.created_at).format('YYYY-MM-DD HH:mm')}`}
-                  />
-                </List.Item>
-              )}
-            />
-          </>
-        )}
-      </Drawer>
-
-      <AttachmentPreviewModal attachment={previewAtt} onClose={() => setPreviewAtt(null)} />
+        counterpartyLabel={counterpartyLabel}
+        accountName={accountName}
+        operatorName={operatorName}
+        onUploadAttachment={handleUploadAttachment}
+        onDeleteAttachment={handleDeleteAttachment}
+      />
     </>
   );
 };
