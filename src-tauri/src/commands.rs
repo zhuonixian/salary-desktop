@@ -1112,24 +1112,36 @@ pub fn update_payment_batch_remark(
 pub fn preview_bank_transaction_import(
     path: String,
     fund_account_id: i64,
+    column_mapping: Option<BankColumnMapping>,
     state: tauri::State<'_, Mutex<Connection>>,
 ) -> Result<BankImportPreview, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
-    db::preview_bank_transaction_import(&conn, &path, fund_account_id)
+    db::preview_bank_transaction_import_with_mapping(
+        &conn,
+        &path,
+        fund_account_id,
+        column_mapping.as_ref(),
+    )
 }
 
 /// 银行流水导入：必须指定 bank/third_party 资金账户（spec 4.8）。
 /// 前端应先 preview 确认，本命令按行落库（重复行跳过、月结行拦截进 errors）。
+/// column_mapping 与预览共用（第十七阶段），避免"预览一套、入库另一套"。
 #[tauri::command]
 pub fn import_bank_transactions_file(
     path: String,
     fund_account_id: i64,
+    column_mapping: Option<BankColumnMapping>,
     state: tauri::State<'_, Mutex<Connection>>,
 ) -> Result<ImportResult, AppError> {
     let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
     // 账户前置校验（现金/停用直接失败，不进入逐行循环）
     let account = db::ensure_bank_import_account(&conn, fund_account_id)?;
-    let mut transactions = excel::read_bank_transactions_file(&path)?;
+    let mut transactions = excel::read_bank_transactions_file_content_with_mapping(
+        &path,
+        column_mapping.as_ref(),
+    )?
+    .transactions;
     for tx in &mut transactions {
         tx.fund_account_id = Some(fund_account_id);
     }

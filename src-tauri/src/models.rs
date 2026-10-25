@@ -830,6 +830,8 @@ pub struct BankImportPreview {
     pub file_path: String,
     /// 识别到的表头列（字段识别）
     pub headers: Vec<String>,
+    /// 八个标准字段的列识别结果（第十七阶段）
+    pub column_hints: Vec<BankColumnHint>,
     pub total_rows: i32,
     pub ok_rows: i32,
     pub duplicate_rows: i32,
@@ -838,6 +840,30 @@ pub struct BankImportPreview {
     pub income_total: f64,
     pub expense_total: f64,
     pub rows: Vec<BankImportPreviewRow>,
+}
+
+/// 银行流水列识别提示（第十七阶段）：source ∈ auto / manual / manual_missing / missing。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BankColumnHint {
+    /// 标准字段名：date / summary / income / expense / single_amount /
+    /// counterparty_name / counterparty_account / balance
+    pub field: String,
+    /// 命中的表头列名（None = 未识别）
+    pub column: Option<String>,
+    pub source: String,
+}
+
+/// 银行流水手工列映射（第十七阶段）：标准字段 → 表头列名，优先于别名识别。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BankColumnMapping {
+    pub date: Option<String>,
+    pub summary: Option<String>,
+    pub income: Option<String>,
+    pub expense: Option<String>,
+    pub single_amount: Option<String>,
+    pub counterparty_name: Option<String>,
+    pub counterparty_account: Option<String>,
+    pub balance: Option<String>,
 }
 
 // ==================== Financial Analysis ====================

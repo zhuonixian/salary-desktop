@@ -5746,8 +5746,21 @@ pub fn preview_bank_transaction_import(
     path: &str,
     fund_account_id: i64,
 ) -> AppResult<BankImportPreview> {
+    preview_bank_transaction_import_with_mapping(conn, path, fund_account_id, None)
+}
+
+/// 带手工列映射的导入预览（第十七阶段）：与确认导入共用同一映射解析口径。
+pub fn preview_bank_transaction_import_with_mapping(
+    conn: &Connection,
+    path: &str,
+    fund_account_id: i64,
+    column_mapping: Option<&crate::models::BankColumnMapping>,
+) -> AppResult<BankImportPreview> {
     let account = ensure_bank_import_account(conn, fund_account_id)?;
-    let content = crate::excel::read_bank_transactions_file_content(path)?;
+    let content = crate::excel::read_bank_transactions_file_content_with_mapping(
+        path,
+        column_mapping,
+    )?;
 
     let mut rows: Vec<BankImportPreviewRow> = Vec::new();
     let mut ok_rows = 0i32;
@@ -5882,6 +5895,7 @@ pub fn preview_bank_transaction_import(
         fund_account_name: account.name,
         file_path: path.to_string(),
         headers: content.headers,
+        column_hints: content.column_hints,
         total_rows: rows.len() as i32,
         ok_rows,
         duplicate_rows,

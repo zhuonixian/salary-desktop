@@ -66,6 +66,7 @@ import type {
   BankAllocationCandidate,
   BankAllocationInput,
   BankAutoMatchPreviewItem,
+  BankColumnMapping,
   BankImportPreview,
   BankImportPreviewRow,
   BankReconciliationAllocation,
@@ -89,6 +90,27 @@ const previewStatusMeta: Record<string, { text: string; color: string }> = {
   warning: { text: '余额存疑', color: 'orange' },
   error: { text: '异常', color: 'red' },
 };
+
+// 列识别提示（第十七阶段）：标准字段中文名
+const BANK_FIELD_LABELS: Record<string, string> = {
+  date: '交易日期',
+  summary: '摘要',
+  income: '收入列',
+  expense: '支出列',
+  single_amount: '单列金额',
+  counterparty_name: '对方户名',
+  counterparty_account: '对方账号',
+  balance: '余额',
+};
+
+// 关键字段：日期缺失，或收入/支出/单列金额全缺 → 无法解析出行，必须手工映射
+function bankCriticalMissing(hints: BankImportPreview['column_hints']) {
+  const get = (f: string) => hints.find((h) => h.field === f);
+  const dateMissing = !get('date')?.column;
+  const amountMissing =
+    !get('income')?.column && !get('expense')?.column && !get('single_amount')?.column;
+  return { dateMissing, amountMissing, any: dateMissing || amountMissing };
+}
 
 const AMOUNT_TOLERANCE = 0.005;
 
@@ -922,25 +944,31 @@ const BankTransactions: React.FC = () => {
   }), [transactions]);
 
   // 导入流水三步（spec 4.8）：必选 bank/third_party 账户 → 文件解析预览（不落库）→ 确认导入
+  // 第十七阶段：列识别诊断 + 手工映射（关键字段未识别时可指定列重析）
+  const [columnMapping, setColumnMapping] = useState<BankColumnMapping>({});
   const openImportModal = () => {
     setImportAccountId(undefined);
     setImportFile(null);
     setImportPreview(null);
+    setColumnMapping({});
     setImportOpen(true);
   };
 
-  const runImportPreview = useCallback(async (filePath: string, accountId: number) => {
-    setPreviewLoading(true);
-    try {
-      const preview = await previewBankTransactionImport(filePath, accountId);
-      setImportPreview(preview);
-    } catch (e: unknown) {
-      setImportPreview(null);
-      message.error('解析流水文件失败: ' + (e instanceof Error ? e.message : String(e)));
-    } finally {
-      setPreviewLoading(false);
-    }
-  }, []);
+  const runImportPreview = useCallback(
+    async (filePath: string, accountId: number, mapping?: BankColumnMapping) => {
+      setPreviewLoading(true);
+      try {
+        const preview = await previewBankTransactionImport(filePath, accountId, mapping);
+        setImportPreview(preview);
+      } catch (e: unknown) {
+        setImportPreview(null);
+        message.error('解析流水文件失败: ' + (e instanceof Error ? e.message : String(e)));
+      } finally {
+        setPreviewLoading(false);
+      }
+    },
+    [],
+  );
 
   const handleSelectImportFile = async () => {
     if (!importAccountId) {
@@ -954,6 +982,7 @@ const BankTransactions: React.FC = () => {
     if (!selected) return;
     const filePath = String(selected);
     setImportFile(filePath);
+    setColumnMapping({});
     await runImportPreview(filePath, importAccountId);
   };
 
@@ -977,7 +1006,7 @@ const BankTransactions: React.FC = () => {
     }
     setAction('import');
     try {
-      const result = await importBankTransactionsFile(importFile, importAccountId);
+      const result = await importBankTransactionsFile(importFile, importAccountId, columnMapping);
       if (result.errors.length > 0) {
         message.warning(`导入完成：成功 ${result.imported} 条，跳过 ${result.failed} 条（重复或异常）`);
       } else {
@@ -1479,7 +1508,8 @@ const BankTransactions: React.FC = () => {
         okText="确认导入"
         cancelText="取消"
         okButtonProps={{
-          disabled: !importPreview || importPreview.error_rows > 0,
+          disabled:
+            !importPreview || importPreview.error_rows > 0 || importPreview.total_rows === 0,
           icon: <FileAddOutlined />,
         }}
         confirmLoading={action === 'import'}
@@ -1522,6 +1552,66 @@ const BankTransactions: React.FC = () => {
                 message={`共 ${importPreview.total_rows} 行：可导入 ${importPreview.ok_rows}、重复 ${importPreview.duplicate_rows}（导入时跳过）、余额存疑 ${importPreview.warning_rows}、异常 ${importPreview.error_rows}${importPreview.error_rows > 0 ? '（处理后才能导入）' : ''}`}
                 description={`收入合计 ¥${fmtMoney(importPreview.income_total)}，支出合计 ¥${fmtMoney(importPreview.expense_total)}，归属账户：${importPreview.fund_account_name}。确认后才会写入数据库。`}
               />
+              {/* 列识别诊断（第十七阶段） */}
+              <Space wrap size={6}>
+                {importPreview.column_hints.map((h) => {
+                  const label = BANK_FIELD_LABELS[h.field] ?? h.field;
+                  const critical =
+                    h.field === 'date' ||
+                    ['income', 'expense', 'single_amount'].includes(h.field);
+                  const color = h.column
+                    ? h.source === 'manual'
+                      ? 'blue'
+                      : 'green'
+                    : h.source === 'manual_missing'
+                      ? 'orange'
+                      : critical
+                        ? 'red'
+                        : 'default';
+                  return (
+                    <Tag key={h.field} color={color}>
+                      {label}：
+                      {h.column ?? (h.source === 'manual_missing' ? '映射列不存在' : '未识别')}
+                    </Tag>
+                  );
+                })}
+              </Space>
+              {bankCriticalMissing(importPreview.column_hints).any && (
+                <Alert
+                  type="warning"
+                  showIcon
+                  message="关键字段未识别，请为缺失字段指定文件列后重新解析"
+                  description={
+                    <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                      <Space wrap>
+                        {(['date', 'income', 'expense', 'single_amount'] as const)
+                          .filter((f) => !importPreview.column_hints.find((h) => h.field === f)?.column)
+                          .map((f) => (
+                            <Select
+                              key={f}
+                              allowClear
+                              placeholder={`映射「${BANK_FIELD_LABELS[f]}」到文件列`}
+                              value={(columnMapping as Record<string, string | undefined>)[f]}
+                              onChange={(v) => setColumnMapping((m) => ({ ...m, [f]: v }))}
+                              style={{ width: 230 }}
+                              options={importPreview.headers.map((h) => ({ value: h, label: h }))}
+                            />
+                          ))}
+                        <Button
+                          loading={previewLoading}
+                          disabled={!importFile || !importAccountId}
+                          onClick={() => void runImportPreview(importFile!, importAccountId!, columnMapping)}
+                        >
+                          重新解析
+                        </Button>
+                      </Space>
+                      <span style={{ color: '#8c8c8c', fontSize: 12 }}>
+                        单列金额：银行导出仅一列「交易金额」（正=收入 / 负=支出）时映射到该列；有收入 / 支出双列时无需填写。
+                      </span>
+                    </Space>
+                  }
+                />
+              )}
               <Table
                 size="small"
                 rowKey="row_no"

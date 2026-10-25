@@ -871,11 +871,31 @@ export interface BankImportPreviewRow {
   message?: string;
 }
 
+/** 银行流水列识别提示（第十七阶段）：source ∈ auto / manual / manual_missing / missing */
+export interface BankColumnHint {
+  field: string;
+  column: string | null;
+  source: string;
+}
+
+/** 银行流水手工列映射（第十七阶段）：标准字段 → 表头列名，优先于别名识别 */
+export interface BankColumnMapping {
+  date?: string;
+  summary?: string;
+  income?: string;
+  expense?: string;
+  single_amount?: string;
+  counterparty_name?: string;
+  counterparty_account?: string;
+  balance?: string;
+}
+
 export interface BankImportPreview {
   fund_account_id: number;
   fund_account_name: string;
   file_path: string;
   headers: string[];
+  column_hints: BankColumnHint[];
   total_rows: number;
   ok_rows: number;
   duplicate_rows: number;

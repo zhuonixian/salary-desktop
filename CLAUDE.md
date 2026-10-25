@@ -63,6 +63,7 @@ npm run lint                             # ESLint
 - [第十四阶段安全债](.claude/memory/stage14-security-debt.md) — 找回凭据换绑（rotate_recovery_code/update_security_question，仅重包裹目标 KEK）、自动备份（解锁/月结后触发、auto-daily 加密包滚动保留）；spec 见 `docs/superpowers/specs/2026-10-21-stage14-security-debt-design.md`、progress 见 `docs/superpowers/plans/2026-10-21-stage14-progress.md`
 - [第十五阶段上手体验](.claude/memory/stage15-ux-navigation-tour.md) — 导航收敛（资金出纳 9 项拆为资金收付/资金台账、票据台账入票据与报销，9 组每组 ≤4）与 PageTour 页面引导（银行对账/收付款单/票据台账/记账凭证四页）；spec 见 `docs/superpowers/specs/2026-10-25-stage15-ux-navigation-tour-design.md`；v0.11 迭代路线图见 `docs/superpowers/plans/2026-10-25-roadmap-v0.11-iterations.md`
 - [第十六阶段增值税申报辅助](.claude/memory/stage16-vat-quarterly-report.md) — 小规模纳税人季度申报辅助表（销项按征收率分组 1%/3%/5%/免税、附加税费法定口径参考、2221 净贷方勾稽、未月结提示，导出中心第 4 卡）；spec 见 `docs/superpowers/specs/2026-10-25-stage16-vat-quarterly-report-design.md`、progress 见 `docs/superpowers/plans/2026-10-25-stage16-progress.md`
+- [第十七阶段银行流水导入增强](.claude/memory/stage17-bank-import-mapping.md) — 列识别诊断（BankColumnHint 四态）+ 手工映射全链路（preview/import 同一映射）+ 单列金额兜底 + 别名扩充（贷方发生额/交易时间等）；旧签名 None 委托零破坏；spec 见 `docs/superpowers/specs/2026-10-25-stage17-bank-import-mapping-design.md`、progress 见 `docs/superpowers/plans/2026-10-25-stage17-progress.md`
 - [v0.10.0 发版验收清单](docs/superpowers/plans/2026-10-13-v0.10-release-acceptance.md) — 阶段 7-11 Windows/macOS 手工验收汇编（含 stage12/13 两节），打 tag 前按清单内 A/B/C 分级执行；发版准备两项（版本 bump、全绿验证）已于 e98ef95 完成
 
 ## 第三阶段开发

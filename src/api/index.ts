@@ -38,6 +38,7 @@ import type {
   BankAllocationBatchResult,
   BankAllocationInput,
   BankAllocationQuery,
+  BankColumnMapping,
   BankImportPreview,
   BankReconciliationAllocation,
   BankTransaction,
@@ -3285,20 +3286,24 @@ export async function updatePaymentBatchRemark(data: PaymentBatchRemarkInput): P
 export async function previewBankTransactionImport(
   filePath: string,
   fundAccountId: number,
+  columnMapping?: BankColumnMapping,
 ): Promise<BankImportPreview> {
   return invoke<BankImportPreview>('preview_bank_transaction_import', {
     path: filePath,
     fundAccountId,
+    columnMapping: columnMapping ?? null,
   });
 }
 
 export async function importBankTransactionsFile(
   filePath: string,
   fundAccountId: number,
+  columnMapping?: BankColumnMapping,
 ): Promise<ImportResult> {
   const result = await invoke<ImportResult & { skipped?: number }>('import_bank_transactions_file', {
     path: filePath,
     fundAccountId,
+    columnMapping: columnMapping ?? null,
   });
   return normalizeImportResult(result);
 }

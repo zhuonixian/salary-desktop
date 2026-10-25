@@ -243,10 +243,122 @@ pub fn read_attendance_excel(path: &str, month: &str) -> AppResult<Vec<Attendanc
 
 // ==================== Bank Transaction Import ====================
 
-/// 银行流水文件解析结果：表头（字段识别展示）+ 解析出的流水行
+/// 银行流水文件解析结果：表头（字段识别展示）+ 解析出的流水行 + 列识别提示（第十七阶段）
 pub struct BankTransactionFileContent {
     pub headers: Vec<String>,
     pub transactions: Vec<BankTransaction>,
+    /// 八个标准字段的列识别结果（auto/manual/manual_missing/missing）
+    pub column_hints: Vec<BankColumnHint>,
+}
+
+// ===== 列识别别名表（第十七阶段扩充） =====
+pub const BANK_ALIASES_DATE: [&str; 6] =
+    ["交易日期", "记账日期", "日期", "交易时间", "transaction_date", "date"];
+pub const BANK_ALIASES_SUMMARY: [&str; 5] = ["摘要", "用途", "备注", "summary", "remark"];
+pub const BANK_ALIASES_INCOME: [&str; 6] = ["收入", "贷方金额", "收入金额", "贷方发生额", "income", "credit"];
+pub const BANK_ALIASES_EXPENSE: [&str; 7] =
+    ["支出", "借方金额", "支出金额", "借方发生额", "付款金额", "expense", "debit"];
+/// 单列金额（正=收入 / 负=支出），仅在收入与支出列均未识别时启用
+pub const BANK_ALIASES_SINGLE_AMOUNT: [&str; 5] = ["交易金额", "发生额", "金额", "交易额", "收支金额"];
+pub const BANK_ALIASES_COUNTERPARTY_NAME: [&str; 4] =
+    ["对方户名", "对方名称", "收付款方", "counterparty_name"];
+pub const BANK_ALIASES_COUNTERPARTY_ACCOUNT: [&str; 3] = ["对方账号", "对方账户", "counterparty_account"];
+pub const BANK_ALIASES_BALANCE: [&str; 3] = ["余额", "账户余额", "balance"];
+
+/// 单字段解析结果：(列下标, 识别提示)
+fn resolve_bank_column(
+    field: &str,
+    aliases: &[&str],
+    manual: Option<&String>,
+    headers: &[String],
+) -> (Option<usize>, BankColumnHint) {
+    let find = |name: &str| headers.iter().position(|h| h == name);
+    if let Some(manual_name) = manual {
+        if let Some(idx) = find(manual_name) {
+            return (
+                Some(idx),
+                BankColumnHint {
+                    field: field.to_string(),
+                    column: Some(manual_name.clone()),
+                    source: "manual".into(),
+                },
+            );
+        }
+        return (
+            None,
+            BankColumnHint {
+                field: field.to_string(),
+                column: None,
+                source: "manual_missing".into(),
+            },
+        );
+    }
+    for alias in aliases {
+        if let Some(idx) = find(alias) {
+            return (
+                Some(idx),
+                BankColumnHint {
+                    field: field.to_string(),
+                    column: Some((*alias).to_string()),
+                    source: "auto".into(),
+                },
+            );
+        }
+    }
+    (
+        None,
+        BankColumnHint {
+            field: field.to_string(),
+            column: None,
+            source: "missing".into(),
+        },
+    )
+}
+
+/// 八字段解析结果：手工映射优先于别名。
+struct ResolvedBankColumns {
+    date: Option<usize>,
+    summary: Option<usize>,
+    income: Option<usize>,
+    expense: Option<usize>,
+    single_amount: Option<usize>,
+    counterparty_name: Option<usize>,
+    counterparty_account: Option<usize>,
+    balance: Option<usize>,
+    hints: Vec<BankColumnHint>,
+}
+
+fn resolve_bank_columns(
+    headers: &[String],
+    mapping: Option<&BankColumnMapping>,
+) -> ResolvedBankColumns {
+    let m = mapping;
+    let (date, h1) = resolve_bank_column("date", &BANK_ALIASES_DATE, m.and_then(|x| x.date.as_ref()), headers);
+    let (summary, h2) = resolve_bank_column("summary", &BANK_ALIASES_SUMMARY, m.and_then(|x| x.summary.as_ref()), headers);
+    let (income, h3) = resolve_bank_column("income", &BANK_ALIASES_INCOME, m.and_then(|x| x.income.as_ref()), headers);
+    let (expense, h4) = resolve_bank_column("expense", &BANK_ALIASES_EXPENSE, m.and_then(|x| x.expense.as_ref()), headers);
+    let (single_amount, h5) = resolve_bank_column("single_amount", &BANK_ALIASES_SINGLE_AMOUNT, m.and_then(|x| x.single_amount.as_ref()), headers);
+    let (counterparty_name, h6) = resolve_bank_column("counterparty_name", &BANK_ALIASES_COUNTERPARTY_NAME, m.and_then(|x| x.counterparty_name.as_ref()), headers);
+    let (counterparty_account, h7) = resolve_bank_column("counterparty_account", &BANK_ALIASES_COUNTERPARTY_ACCOUNT, m.and_then(|x| x.counterparty_account.as_ref()), headers);
+    let (balance, h8) = resolve_bank_column("balance", &BANK_ALIASES_BALANCE, m.and_then(|x| x.balance.as_ref()), headers);
+    ResolvedBankColumns {
+        date,
+        summary,
+        income,
+        expense,
+        single_amount,
+        counterparty_name,
+        counterparty_account,
+        balance,
+        hints: vec![h1, h2, h3, h4, h5, h6, h7, h8],
+    }
+}
+
+/// 按解析列取值：trim + 空串归 None（与原 get_bank_value 语义一致）
+fn value_at(values: &[String], idx: Option<usize>) -> Option<String> {
+    idx.and_then(|i| values.get(i))
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
 }
 
 pub fn read_bank_transactions_file(path: &str) -> AppResult<Vec<BankTransaction>> {
@@ -255,19 +367,30 @@ pub fn read_bank_transactions_file(path: &str) -> AppResult<Vec<BankTransaction>
 
 /// 解析流水文件（CSV/Excel），同时返回表头供导入预览做字段识别（Task 11）
 pub fn read_bank_transactions_file_content(path: &str) -> AppResult<BankTransactionFileContent> {
+    read_bank_transactions_file_content_with_mapping(path, None)
+}
+
+/// 带手工列映射的解析（第十七阶段）：mapping 优先于别名识别。
+pub fn read_bank_transactions_file_content_with_mapping(
+    path: &str,
+    mapping: Option<&BankColumnMapping>,
+) -> AppResult<BankTransactionFileContent> {
     let ext = Path::new(path)
         .extension()
         .and_then(|value| value.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
     if ext == "csv" {
-        read_bank_transactions_csv(path)
+        read_bank_transactions_csv(path, mapping)
     } else {
-        read_bank_transactions_excel(path)
+        read_bank_transactions_excel(path, mapping)
     }
 }
 
-fn read_bank_transactions_excel(path: &str) -> AppResult<BankTransactionFileContent> {
+fn read_bank_transactions_excel(
+    path: &str,
+    mapping: Option<&BankColumnMapping>,
+) -> AppResult<BankTransactionFileContent> {
     let mut workbook = open_workbook_auto(path)?;
     let sheet_names = workbook.sheet_names().to_vec();
     if sheet_names.is_empty() {
@@ -276,45 +399,54 @@ fn read_bank_transactions_excel(path: &str) -> AppResult<BankTransactionFileCont
 
     let range = workbook.worksheet_range(&sheet_names[0])?;
     let mut rows = range.rows();
-    let (header_map, headers) = if let Some(header_row) = rows.next() {
-        let raw: Vec<String> = header_row.iter().map(|cell| cell.to_string()).collect();
-        (
-            header_map(raw.clone()),
-            raw.into_iter()
-                .map(|h| h.trim().trim_start_matches('\u{feff}').to_string())
-                .collect(),
-        )
+    let headers: Vec<String> = if let Some(header_row) = rows.next() {
+        header_row
+            .iter()
+            .map(|cell| cell.to_string())
+            .map(|h| h.trim().trim_start_matches('\u{feff}').to_string())
+            .collect()
     } else {
         return Ok(BankTransactionFileContent {
             headers: Vec::new(),
             transactions: Vec::new(),
+            column_hints: Vec::new(),
         });
     };
+    let cols = resolve_bank_columns(&headers, mapping);
 
     let mut transactions = Vec::new();
     for row in rows {
         let values: Vec<String> = row.iter().map(cell_to_string).collect();
-        if let Some(transaction) = bank_transaction_from_values(&header_map, &values, path)? {
+        if let Some(transaction) = bank_transaction_from_values(&cols, &values, path)? {
             transactions.push(transaction);
         }
     }
     Ok(BankTransactionFileContent {
         headers,
         transactions,
+        column_hints: cols.hints,
     })
 }
 
-fn read_bank_transactions_csv(path: &str) -> AppResult<BankTransactionFileContent> {
+fn read_bank_transactions_csv(
+    path: &str,
+    mapping: Option<&BankColumnMapping>,
+) -> AppResult<BankTransactionFileContent> {
     let content = fs::read_to_string(path)?;
     let mut lines = content.lines();
     let Some(header_line) = lines.next() else {
         return Ok(BankTransactionFileContent {
             headers: Vec::new(),
             transactions: Vec::new(),
+            column_hints: Vec::new(),
         });
     };
     let raw_headers = split_csv_line(header_line);
-    let headers = header_map(raw_headers.clone());
+    let headers: Vec<String> = raw_headers
+        .into_iter()
+        .map(|h| h.trim().trim_start_matches('\u{feff}').to_string())
+        .collect();
+    let cols = resolve_bank_columns(&headers, mapping);
 
     let mut transactions = Vec::new();
     for line in lines {
@@ -322,79 +454,52 @@ fn read_bank_transactions_csv(path: &str) -> AppResult<BankTransactionFileConten
             continue;
         }
         let values = split_csv_line(line);
-        if let Some(transaction) = bank_transaction_from_values(&headers, &values, path)? {
+        if let Some(transaction) = bank_transaction_from_values(&cols, &values, path)? {
             transactions.push(transaction);
         }
     }
     Ok(BankTransactionFileContent {
-        headers: raw_headers
-            .into_iter()
-            .map(|h| h.trim().trim_start_matches('\u{feff}').to_string())
-            .collect(),
+        headers,
         transactions,
+        column_hints: cols.hints,
     })
 }
 
-fn header_map(headers: Vec<String>) -> HashMap<String, usize> {
-    headers
-        .into_iter()
-        .enumerate()
-        .map(|(idx, header)| {
-            (
-                header.trim().trim_start_matches('\u{feff}').to_string(),
-                idx,
-            )
-        })
-        .collect()
-}
-
 fn bank_transaction_from_values(
-    headers: &HashMap<String, usize>,
+    cols: &ResolvedBankColumns,
     values: &[String],
     path: &str,
 ) -> AppResult<Option<BankTransaction>> {
-    let transaction_date = get_bank_value(
-        headers,
-        values,
-        &["交易日期", "记账日期", "日期", "transaction_date", "date"],
-    )
-    .unwrap_or_default();
-    if transaction_date.trim().is_empty() {
+    let Some(transaction_date_raw) = value_at(values, cols.date) else {
         return Ok(None);
-    }
-    let transaction_date = normalize_bank_date(&transaction_date)?;
+    };
+    let transaction_date = normalize_bank_date(&transaction_date_raw)?;
     let belong_month = transaction_date.chars().take(7).collect::<String>();
-    let summary = get_bank_value(
-        headers,
-        values,
-        &["摘要", "用途", "备注", "summary", "remark"],
-    );
-    let counterparty_name = get_bank_value(
-        headers,
-        values,
-        &["对方户名", "对方名称", "收付款方", "counterparty_name"],
-    );
-    let counterparty_account = get_bank_value(
-        headers,
-        values,
-        &["对方账号", "对方账户", "counterparty_account"],
-    );
-    let income_amount = parse_money(
-        get_bank_value(headers, values, &["收入", "贷方金额", "income", "credit"])
-            .as_deref()
-            .unwrap_or(""),
-    );
-    let expense_amount = parse_money(
-        get_bank_value(
-            headers,
-            values,
-            &["支出", "借方金额", "付款金额", "expense", "debit"],
-        )
-        .as_deref()
-        .unwrap_or(""),
-    );
-    let balance =
-        get_bank_value(headers, values, &["余额", "balance"]).map(|value| parse_money(&value));
+    let summary = value_at(values, cols.summary);
+    let counterparty_name = value_at(values, cols.counterparty_name);
+    let counterparty_account = value_at(values, cols.counterparty_account);
+    let mut income_amount = cols
+        .income
+        .and_then(|i| values.get(i))
+        .map(|v| parse_money(v))
+        .unwrap_or(0.0);
+    let mut expense_amount = cols
+        .expense
+        .and_then(|i| values.get(i))
+        .map(|v| parse_money(v))
+        .unwrap_or(0.0);
+    // 单列金额兜底（第十七阶段）：双列收支均未识别时，单列正=收入 / 负=支出
+    if income_amount == 0.0 && expense_amount == 0.0 {
+        if let Some(v) = value_at(values, cols.single_amount) {
+            let amount = parse_money(&v);
+            if amount > 0.0 {
+                income_amount = amount;
+            } else if amount < 0.0 {
+                expense_amount = -amount;
+            }
+        }
+    }
+    let balance = value_at(values, cols.balance).map(|v| parse_money(&v));
 
     if income_amount == 0.0 && expense_amount == 0.0 {
         return Ok(None);
@@ -428,19 +533,6 @@ fn bank_transaction_from_values(
         created_at: None,
         updated_at: None,
     }))
-}
-
-fn get_bank_value(
-    headers: &HashMap<String, usize>,
-    values: &[String],
-    aliases: &[&str],
-) -> Option<String> {
-    aliases
-        .iter()
-        .find_map(|alias| headers.get(*alias))
-        .and_then(|idx| values.get(*idx))
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
 }
 
 fn normalize_bank_date(value: &str) -> AppResult<String> {
@@ -3783,6 +3875,111 @@ mod tests {
         assert_eq!(records[0].belong_month, "2026-08");
         assert_eq!(records[0].summary.as_deref(), Some("工资,代发"));
         assert_eq!(records[0].expense_amount, 7800.0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    // ===== 银行流水列识别与手工映射（第十七阶段） =====
+
+    fn hint_of<'a>(content: &'a BankTransactionFileContent, field: &str) -> &'a BankColumnHint {
+        content
+            .column_hints
+            .iter()
+            .find(|h| h.field == field)
+            .unwrap_or_else(|| panic!("缺少 {field} 的识别提示"))
+    }
+
+    #[test]
+    fn bank_import_single_amount_column_and_hints() {
+        let path = std::env::temp_dir().join(format!(
+            "salary-bank-single-{}.csv",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(
+            &path,
+            "交易日期,摘要,交易金额,余额\n2026-08-01,销售收款,1000,5000\n2026-08-02,采购付款,-300,4700\n2026-08-03,零金额行,0,4700\n",
+        )
+        .unwrap();
+
+        let content = read_bank_transactions_file_content(&path.to_string_lossy()).unwrap();
+        // 单列金额：正→收入、负→支出、零金额行跳过
+        assert_eq!(content.transactions.len(), 2);
+        assert_eq!(content.transactions[0].income_amount, 1000.0);
+        assert_eq!(content.transactions[1].expense_amount, 300.0);
+        // hints：双列收支 missing，单列 auto
+        let income = hint_of(&content, "income");
+        assert_eq!((income.column.as_deref(), income.source.as_str()), (None, "missing"));
+        let single = hint_of(&content, "single_amount");
+        assert_eq!(
+            (single.column.as_deref(), single.source.as_str()),
+            (Some("交易金额"), "auto")
+        );
+        let date = hint_of(&content, "date");
+        assert_eq!((date.column.as_deref(), date.source.as_str()), (Some("交易日期"), "auto"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn bank_import_expanded_aliases_recognized() {
+        let path = std::env::temp_dir().join(format!(
+            "salary-bank-alias-{}.csv",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(
+            &path,
+            "交易时间,备注,贷方发生额,借方发生额,账户余额\n2026-08-01,利息,12.5,,5000\n2026-08-02,手续费,,8,4992\n",
+        )
+        .unwrap();
+        let content = read_bank_transactions_file_content(&path.to_string_lossy()).unwrap();
+        assert_eq!(content.transactions.len(), 2);
+        assert_eq!(content.transactions[0].income_amount, 12.5);
+        assert_eq!(content.transactions[1].expense_amount, 8.0);
+        for field in ["date", "summary", "income", "expense", "balance"] {
+            let h = hint_of(&content, field);
+            assert_eq!(h.source, "auto", "{field} 应自动识别");
+            assert!(h.column.is_some());
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn bank_import_manual_mapping_rescues_odd_columns() {
+        let path = std::env::temp_dir().join(format!(
+            "salary-bank-manual-{}.csv",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(
+            &path,
+            "A列,B列,C列,D列\n2026-08-01,客户甲,2000,备注X\n2026-08-02,客户乙,-500,备注Y\n",
+        )
+        .unwrap();
+        let p = path.to_string_lossy().to_string();
+
+        // 自动识别：全部关键字段 missing → 0 行
+        let auto = read_bank_transactions_file_content(&p).unwrap();
+        assert!(auto.transactions.is_empty());
+        assert_eq!(hint_of(&auto, "date").source, "missing");
+
+        // 手工映射：date=A列、single_amount=B列…（金额列实为 C列，验证映射错误不会panic）
+        let mapping = BankColumnMapping {
+            date: Some("A列".into()),
+            summary: Some("D列".into()),
+            single_amount: Some("C列".into()),
+            counterparty_name: Some("B列".into()),
+            income: Some("不存在的列".into()), // manual_missing：不炸，仅提示
+            ..Default::default()
+        };
+        let mapped = read_bank_transactions_file_content_with_mapping(&p, Some(&mapping)).unwrap();
+        assert_eq!(mapped.transactions.len(), 2);
+        assert_eq!(mapped.transactions[0].income_amount, 2000.0);
+        assert_eq!(mapped.transactions[1].expense_amount, 500.0);
+        assert_eq!(mapped.transactions[0].counterparty_name.as_deref(), Some("客户甲"));
+        // manual / manual_missing 提示正确
+        let date = hint_of(&mapped, "date");
+        assert_eq!((date.column.as_deref(), date.source.as_str()), (Some("A列"), "manual"));
+        let income = hint_of(&mapped, "income");
+        assert_eq!(income.source, "manual_missing");
+        let single = hint_of(&mapped, "single_amount");
+        assert_eq!((single.column.as_deref(), single.source.as_str()), (Some("C列"), "manual"));
         let _ = std::fs::remove_file(path);
     }
 
