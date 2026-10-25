@@ -464,6 +464,7 @@ pub fn run() {
         commands::cancel_ar_allocation,
         commands::export_ar_aging_report,
         commands::export_output_tax_ledger,
+        commands::export_vat_quarterly_report,
         // ===== Reminders（第十一阶段 提醒触达） =====
         commands::get_due_notifications,
         commands::get_local_notify_settings,

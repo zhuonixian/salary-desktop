@@ -4404,6 +4404,15 @@ export async function exportOutputTaxLedger(
   return invoke<string>('export_output_tax_ledger', { fromMonth, toMonth, path });
 }
 
+/** 增值税季度申报辅助表（第十六阶段，小规模纳税人）：year + quarter（1-4）→ 双 sheet xlsx。 */
+export async function exportVatQuarterlyReport(
+  year: number,
+  quarter: number,
+  path: string,
+): Promise<string> {
+  return invoke<string>('export_vat_quarterly_report', { year, quarter, path });
+}
+
 // ==================== 票据台账（第八阶段 Task 3） ====================
 // invoke 参数 key 用 camelCase（Tauri 2 自动映射 snake_case）。状态命令的按钮可见性
 // 完全由后端返回的 status 决定；void/reverse 原因必填、贴现实收不超票面、背书全额

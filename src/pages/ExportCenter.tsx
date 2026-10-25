@@ -1,8 +1,8 @@
 import { useState } from 'react';
-import { Row, Col, Card, DatePicker, Button, message, Space, Typography } from 'antd';
+import { Row, Col, Card, DatePicker, Button, message, Select, Space, Typography } from 'antd';
 import {
   FileExcelOutlined, BankOutlined, FileTextOutlined, CalendarOutlined, FileDoneOutlined,
-  IdcardOutlined, PayCircleOutlined, SafetyCertificateOutlined,
+  IdcardOutlined, PayCircleOutlined, SafetyCertificateOutlined, AccountBookOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import type { Dayjs } from 'dayjs';
@@ -16,6 +16,7 @@ import {
   exportEitPayerTemplate,
   exportEitSalaryTemplate,
   exportSocialBaseDeclaration,
+  exportVatQuarterlyReport,
 } from '@/api';
 import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
 
@@ -90,6 +91,9 @@ const ExportCenter: React.FC = () => {
   // 第十阶段：税务申报模板三件的独立参数（工资模板按月、社保基数申报按年）。
   const [eitSalaryMonth, setEitSalaryMonth] = useState<Dayjs>(month);
   const [socialYear, setSocialYear] = useState<Dayjs>(dayjs());
+  // 第十六阶段：增值税季度申报辅助表（小规模）参数。
+  const [vatYear, setVatYear] = useState<Dayjs>(dayjs());
+  const [vatQuarter, setVatQuarter] = useState<number>(Math.floor(dayjs().month() / 3) + 1);
 
   const handleExport = async (item: ExportItem) => {
     setExporting(item.key);
@@ -261,11 +265,56 @@ const ExportCenter: React.FC = () => {
             </Space>
           </Card>
         </Col>
+        <Col xs={24} sm={12} lg={6}>
+          <Card className="export-card" style={{ textAlign: 'center', padding: '16px 0' }}>
+            <div className="export-card-icon"><AccountBookOutlined /></div>
+            <div className="export-card-title">增值税季度申报辅助表（小规模）</div>
+            <div className="export-card-desc">
+              按季度汇总销项发票，分征收率分组并附附加税费参考与 2221 勾稽提示；申报以电子税务局当前表式为准。
+            </div>
+            <Space direction="vertical" style={{ width: '100%' }} size={8}>
+              <Space.Compact style={{ width: '100%' }}>
+                <DatePicker
+                  picker="year"
+                  value={vatYear}
+                  onChange={(d) => d && setVatYear(d)}
+                  allowClear={false}
+                  style={{ width: '50%' }}
+                />
+                <Select
+                  value={vatQuarter}
+                  onChange={(v) => setVatQuarter(v)}
+                  style={{ width: '50%' }}
+                  options={[
+                    { value: 1, label: '一季度（1-3月）' },
+                    { value: 2, label: '二季度（4-6月）' },
+                    { value: 3, label: '三季度（7-9月）' },
+                    { value: 4, label: '四季度（10-12月）' },
+                  ]}
+                />
+              </Space.Compact>
+              <Button
+                type="primary"
+                onClick={() =>
+                  void handleTemplateExport(
+                    'vat_quarterly_report',
+                    '增值税季度申报辅助表（小规模）',
+                    `${vatYear.format('YYYY')}年第${vatQuarter}季度_增值税申报辅助表.xlsx`,
+                    (savePath) => exportVatQuarterlyReport(vatYear.year(), vatQuarter, savePath),
+                  )}
+                loading={exporting === 'vat_quarterly_report'}
+                block
+              >
+                导出 Excel
+              </Button>
+            </Space>
+          </Card>
+        </Col>
       </Row>
 
       <div style={{ marginTop: 16 }}>
         <Text type="secondary" style={{ fontSize: 12 }}>
-          申报模板导出后请在自然人电子税务局（扣缴端）或社保申报系统中核对列序后再导入。
+          申报模板导出后请在自然人电子税务局（扣缴端）或社保申报系统中核对列序后再导入；增值税辅助表请按属地申报口径核对费率与优惠政策。
         </Text>
       </div>
     </div>

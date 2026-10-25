@@ -4384,6 +4384,156 @@ mod tests {
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(path2);
     }
+
+    // ===== 增值税季度申报辅助表（第十六阶段） =====
+
+    #[test]
+    fn vat_quarter_range_maps_and_validates() {
+        assert_eq!(
+            vat_quarter_range(2026, 1).unwrap(),
+            ("2026-01".to_string(), "2026-03".to_string())
+        );
+        assert_eq!(
+            vat_quarter_range(2026, 4).unwrap(),
+            ("2026-10".to_string(), "2026-12".to_string())
+        );
+        assert!(vat_quarter_range(2026, 0).is_err());
+        assert!(vat_quarter_range(2026, 5).is_err());
+    }
+
+    #[test]
+    fn vat_classify_rate_boundaries() {
+        // 3% 档（容差 0.4pp）
+        assert_eq!(classify_vat_rate(100.0, 3.0), 0);
+        assert_eq!(classify_vat_rate(100.0, 3.4), 0);
+        assert_eq!(classify_vat_rate(100.0, 2.6), 0);
+        // 1% 档
+        assert_eq!(classify_vat_rate(100.0, 1.0), 1);
+        // 5% 档
+        assert_eq!(classify_vat_rate(100.0, 5.0), 2);
+        // 免税/零税额
+        assert_eq!(classify_vat_rate(100.0, 0.0), 3);
+        // 其他（6% 邻域不落任何档）
+        assert_eq!(classify_vat_rate(100.0, 6.0), 4);
+        assert_eq!(classify_vat_rate(100.0, 2.4), 4);
+        // 无金额有税额 → 其他
+        assert_eq!(classify_vat_rate(0.0, 3.0), 4);
+        // 负数（红字）票与正票同组
+        assert_eq!(classify_vat_rate(-100.0, -3.0), 0);
+    }
+
+    /// 造一张销项/进项发票。direction 传 output/input；status 默认 normal。
+    fn vat_seed_invoice(
+        conn: &rusqlite::Connection,
+        id: i64,
+        number: &str,
+        amount: f64,
+        tax: f64,
+        belong_month: &str,
+        direction: &str,
+        status: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO invoices (id, invoice_number, amount, tax_amount, total_amount,
+                 buyer_name, belong_month, direction, status, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, '客户甲', ?6, ?7, ?8, '2026-01-05', '2026-01-05')",
+            rusqlite::params![id, number, amount, tax, amount + tax, belong_month, direction, status],
+        )
+        .unwrap();
+    }
+
+    fn vat_seed_2221_voucher(conn: &rusqlite::Connection, id: i64, month: &str, credit: f64) {
+        conn.execute(
+            "INSERT INTO vouchers (id, voucher_no, voucher_date, belong_month, source_type,
+                 source_id, total_amount, status, created_at, updated_at)
+             VALUES (?1, ?2, '2026-01-31', ?3, 'sales_invoice', ?1, ?4, 'active',
+                     '2026-01-31', '2026-01-31')",
+            rusqlite::params![id, format!("记-{id}"), month, credit],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO voucher_lines (voucher_id, account_code, credit_amount, line_order)
+             VALUES (?1, '2221', ?2, 1)",
+            rusqlite::params![id, credit],
+        )
+        .unwrap();
+    }
+
+    /// 全量 schema 连接（init_db 建临时文件库；setup_db 最小 schema 缺 vouchers/month_closes 等表）。
+    fn vat_full_db(name: &str) -> rusqlite::Connection {
+        let dir = std::env::temp_dir().join(format!("salary-vat-{name}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::db::init_db(&dir.to_string_lossy()).unwrap()
+    }
+
+    #[test]
+    fn vat_summary_aggregates_groups_and_reconciles() {
+        let conn = vat_full_db("summary");
+        // 3% 两张 + 红字一张冲减；1% 一张；免税一张；void 与进项不参与
+        vat_seed_invoice(&conn, 1, "S001", 1000.0, 30.0, "2026-01", "output", "normal");
+        vat_seed_invoice(&conn, 2, "S002", 2000.0, 60.0, "2026-02", "output", "normal");
+        vat_seed_invoice(&conn, 3, "S003", -500.0, -15.0, "2026-03", "output", "normal");
+        vat_seed_invoice(&conn, 4, "S004", 800.0, 8.0, "2026-03", "output", "normal");
+        vat_seed_invoice(&conn, 5, "S005", 300.0, 0.0, "2026-03", "output", "normal");
+        vat_seed_invoice(&conn, 6, "S006", 9999.0, 300.0, "2026-02", "output", "void");
+        vat_seed_invoice(&conn, 7, "I001", 500.0, 15.0, "2026-02", "input", "normal");
+        // 2221 净贷方与台账税额一致（30+60-15+8+0 = 83）
+        vat_seed_2221_voucher(&conn, 10, "2026-01", 30.0);
+        vat_seed_2221_voucher(&conn, 11, "2026-02", 53.0);
+        // 1 月已月结、2/3 月未月结
+        conn.execute(
+            "INSERT INTO month_closes (month, status, created_at, updated_at)
+             VALUES ('2026-01', 'closed', '2026-02-01', '2026-02-01')",
+            [],
+        )
+        .unwrap();
+
+        let (rows, s) = build_vat_quarter_summary(&conn, "2026-01", "2026-03").unwrap();
+        assert_eq!(rows.len(), 5, "void 与进项排除");
+        assert_eq!(s.total_amount, 1000.0 + 2000.0 - 500.0 + 800.0 + 300.0);
+        assert!((s.total_tax - 83.0).abs() < 1e-9);
+        // 分组：3%（2500, 75）/ 1%（800, 8）/ 免税（300, 0）
+        let g = |name: &str| s.rate_groups.iter().find(|(n, _, _)| n == name).unwrap().clone();
+        let (n3, a3, t3) = g("3%");
+        assert_eq!(n3, "3%");
+        assert!((a3 - 2500.0).abs() < 1e-9 && (t3 - 75.0).abs() < 1e-9);
+        let (_, a1, t1) = g("1%");
+        assert!((a1 - 800.0).abs() < 1e-9 && (t1 - 8.0).abs() < 1e-9);
+        let (_, a0, t0) = g("免税/零税额");
+        assert!((a0 - 300.0).abs() < 1e-9 && t0.abs() < 1e-9);
+        assert!(!s.rate_groups.iter().any(|(n, _, _)| n == "其他"));
+        // 勾稽一致 + 未月结月份
+        assert!((s.gl_2221_net_credit - 83.0).abs() < 1e-9);
+        assert_eq!(s.open_months, vec!["2026-02".to_string(), "2026-03".to_string()]);
+
+        // 反月结后 1 月回到未月结
+        conn.execute(
+            "UPDATE month_closes SET status = 'reopened'",
+            [],
+        )
+        .unwrap();
+        let (_, s2) = build_vat_quarter_summary(&conn, "2026-01", "2026-03").unwrap();
+        assert_eq!(
+            s2.open_months,
+            vec!["2026-01".to_string(), "2026-02".to_string(), "2026-03".to_string()]
+        );
+    }
+
+    #[test]
+    fn vat_export_creates_file_and_empty_quarter_errors() {
+        let conn = vat_full_db("export");
+        vat_seed_invoice(&conn, 1, "S001", 1000.0, 30.0, "2026-10", "output", "normal");
+
+        // 空季度报错
+        let err = export_vat_quarterly_report(&conn, 2026, 1, "/tmp/never.xlsx");
+        assert!(err.is_err());
+
+        let path = std::env::temp_dir()
+            .join(format!("salary-vat-quarterly-{}.xlsx", uuid::Uuid::new_v4()));
+        export_vat_quarterly_report(&conn, 2026, 4, &path.to_string_lossy()).unwrap();
+        assert!(path.exists());
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 // ==================== AR Receivable（第十二阶段 收入侧闭环导出） ====================
@@ -4631,6 +4781,338 @@ pub fn export_output_tax_ledger(
         sheet.set_column_width(c, 13)?;
     }
     sheet.set_column_width(11, 26)?;
+    workbook.save(path)?;
+    Ok(())
+}
+
+// ==================== 增值税季度申报辅助表（第十六阶段，小规模纳税人） ====================
+
+/// 征收率分组（固定顺序）：3% / 1% / 5% / 免税零税额 / 其他。
+pub const VAT_RATE_GROUPS: [&str; 5] = ["3%", "1%", "5%", "免税/零税额", "其他"];
+
+/// 季度 → (起始月, 结束月)：2026/Q1 → ("2026-01", "2026-03")。quarter ∈ 1-4。
+pub fn vat_quarter_range(year: i64, quarter: u32) -> AppResult<(String, String)> {
+    if !(1..=4).contains(&quarter) {
+        return Err(AppError::InvalidParam(format!("季度应为 1-4：{quarter}")));
+    }
+    let start = quarter * 3 - 2;
+    let end = quarter * 3;
+    Ok((format!("{year:04}-{start:02}"), format!("{year:04}-{end:02}")))
+}
+
+/// 单张发票的征收率分组下标（VAT_RATE_GROUPS）：
+/// 税额≈0 → 免税；无金额有税额 → 其他；否则 rate=税额/金额 按容差 0.4pp 归并最近档。
+/// 负数（红字）票与对应蓝票按同一 rate 归组，冲减在组合计中体现。
+pub fn classify_vat_rate(amount: f64, tax: f64) -> usize {
+    if tax.abs() < 0.005 {
+        return 3;
+    }
+    if amount.abs() < 0.005 {
+        return 4;
+    }
+    let rate = tax / amount * 100.0;
+    const STDS: [f64; 3] = [3.0, 1.0, 5.0];
+    for (idx, std) in STDS.iter().enumerate() {
+        // 0.4pp 容差 + 浮点余量（2.6/100*100 之类会落在边界上）
+        if (rate - std).abs() <= 0.4 + 1e-9 {
+            return idx;
+        }
+    }
+    4
+}
+
+#[derive(Debug)]
+struct VatInvoiceRow {
+    belong_month: String,
+    invoice_code: Option<String>,
+    invoice_number: Option<String>,
+    issue_date: Option<String>,
+    buyer_name: Option<String>,
+    buyer_tax_id: Option<String>,
+    amount: f64,
+    tax_amount: f64,
+    total_amount: f64,
+    settled: f64,
+}
+
+#[derive(Debug, Default)]
+pub struct VatQuarterSummary {
+    /// (组名, 不含税销售额, 税额)：仅保留非零组，按 VAT_RATE_GROUPS 固定顺序
+    pub rate_groups: Vec<(String, f64, f64)>,
+    pub total_amount: f64,
+    pub total_tax: f64,
+    /// 勾稽：2221 当季有效凭证净贷方（credit − debit）
+    pub gl_2221_net_credit: f64,
+    /// 未正式月结的季度内月份
+    pub open_months: Vec<String>,
+}
+
+/// 聚合季度销项数据（纯查询层，导出与测试共用）。
+pub fn build_vat_quarter_summary(
+    conn: &rusqlite::Connection,
+    from_month: &str,
+    to_month: &str,
+) -> AppResult<(Vec<VatInvoiceRow>, VatQuarterSummary)> {
+    use rusqlite::params;
+
+    let mut stmt = conn.prepare(
+        "SELECT IFNULL(i.belong_month, '-'), i.invoice_code, i.invoice_number, i.issue_date, \
+                i.buyer_name, i.buyer_tax_id, i.amount, i.tax_amount, i.total_amount, \
+                (SELECT COALESCE(SUM(a.allocated_amount), 0) FROM ar_receipt_allocations a \
+                 WHERE a.invoice_id = i.id AND a.status = 'active')
+         FROM invoices i
+         WHERE i.status != 'void' AND IFNULL(i.direction, 'input') = 'output'
+           AND i.belong_month BETWEEN ?1 AND ?2
+         ORDER BY i.belong_month, i.issue_date, i.id",
+    )?;
+    let rows = stmt
+        .query_map(params![from_month, to_month], |row| {
+            Ok(VatInvoiceRow {
+                belong_month: row.get(0)?,
+                invoice_code: row.get(1)?,
+                invoice_number: row.get(2)?,
+                issue_date: row.get(3)?,
+                buyer_name: row.get(4)?,
+                buyer_tax_id: row.get(5)?,
+                amount: row.get(6)?,
+                tax_amount: row.get(7)?,
+                total_amount: row.get(8)?,
+                settled: row.get(9)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut group_amount = [0f64; 5];
+    let mut group_tax = [0f64; 5];
+    for r in &rows {
+        let idx = classify_vat_rate(r.amount, r.tax_amount);
+        group_amount[idx] += r.amount;
+        group_tax[idx] += r.tax_amount;
+    }
+    let mut summary = VatQuarterSummary::default();
+    for (idx, name) in VAT_RATE_GROUPS.iter().enumerate() {
+        if group_amount[idx].abs() > 0.005 || group_tax[idx].abs() > 0.005 {
+            summary
+                .rate_groups
+                .push((name.to_string(), group_amount[idx], group_tax[idx]));
+        }
+        summary.total_amount += group_amount[idx];
+        summary.total_tax += group_tax[idx];
+    }
+
+    // 勾稽：2221 应交税费—应交增值税（销项税额）当季有效凭证净贷方
+    summary.gl_2221_net_credit = conn.query_row(
+        "SELECT COALESCE(SUM(vl.credit_amount - vl.debit_amount), 0)
+         FROM voucher_lines vl JOIN vouchers v ON vl.voucher_id = v.id
+         WHERE v.status = 'active' AND vl.account_code = '2221'
+           AND v.belong_month BETWEEN ?1 AND ?2",
+        params![from_month, to_month],
+        |row| row.get(0),
+    )?;
+
+    // 未月结月份：季度内不在 month_closes(status='closed') 的月份（反月结后为 'reopened' 视同未结）
+    let closed: Vec<String> = {
+        let mut stmt = conn.prepare(
+            "SELECT month FROM month_closes
+             WHERE status = 'closed' AND month BETWEEN ?1 AND ?2",
+        )?;
+        let it = stmt
+            .query_map(params![from_month, to_month], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        it
+    };
+    let fy = &from_month[0..5];
+    let start_m: u32 = from_month[5..7].parse().unwrap_or(1);
+    let end_m: u32 = to_month[5..7].parse().unwrap_or(3);
+    for m in start_m..=end_m {
+        let mm = format!("{fy}{m:02}");
+        if !closed.contains(&mm) {
+            summary.open_months.push(mm);
+        }
+    }
+
+    Ok((rows, summary))
+}
+
+/// 增值税季度申报辅助表导出（spec 3.1）：Sheet1 汇总 + Sheet2 销项明细。
+pub fn export_vat_quarterly_report(
+    conn: &rusqlite::Connection,
+    year: i64,
+    quarter: u32,
+    path: &str,
+) -> AppResult<()> {
+    let (from, to) = vat_quarter_range(year, quarter)?;
+    let (rows, s) = build_vat_quarter_summary(conn, &from, &to)?;
+    if rows.is_empty() {
+        return Err(AppError::InvalidParam(format!(
+            "{from} 至 {to} 无销项发票数据，无法导出增值税申报辅助表"
+        )));
+    }
+
+    let company = crate::db::get_setting(conn, "company_name")?
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "（未配置，请在初始化向导/企业信息中补填）".to_string());
+    let taxpayer = crate::db::get_setting(conn, "taxpayer_id")?
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "（未配置）".to_string());
+
+    let mut workbook = Workbook::new();
+    let title = Format::new().set_bold().set_font_size(14);
+    let header = Format::new()
+        .set_bold()
+        .set_border(rust_xlsxwriter::FormatBorder::Thin);
+    let money = Format::new()
+        .set_border(rust_xlsxwriter::FormatBorder::Thin)
+        .set_num_format("#,##0.00");
+    let cell = Format::new().set_border(rust_xlsxwriter::FormatBorder::Thin);
+    let subtotal = Format::new()
+        .set_bold()
+        .set_border(rust_xlsxwriter::FormatBorder::Thin)
+        .set_num_format("#,##0.00");
+    let note = Format::new().set_font_color(rust_xlsxwriter::Color::RGB(153)); // 灰色提示
+
+    // ---------- Sheet1 申报辅助表 ----------
+    let sheet = workbook.add_worksheet();
+    sheet.set_name("申报辅助表")?;
+    let period = format!(
+        "{year}-{:02}-01 至 {year}-{:02}-31",
+        quarter * 3 - 2,
+        quarter * 3
+    );
+    sheet.merge_range(0, 0, 0, 3, "增值税季度申报辅助表（小规模纳税人适用）", &title)?;
+    sheet.write_string_with_format(1, 0, "纳税人名称", &header)?;
+    sheet.merge_range(1, 1, 1, 2, &company, &cell)?;
+    sheet.write_string_with_format(1, 3, &format!("识别号：{taxpayer}"), &cell)?;
+    sheet.write_string_with_format(2, 0, "税款所属期", &header)?;
+    sheet.merge_range(2, 1, 2, 3, &period, &cell)?;
+    sheet.merge_range(
+        3,
+        0,
+        3,
+        3,
+        "本表为辅助预填表：销售额与税额取自销项发票台账（排除作废票，红字冲减计入）；申报以电子税务局当前申报表为准。",
+        &note,
+    )?;
+
+    let mut r = 5u32;
+    sheet.write_string_with_format(r, 0, "项目（按征收率）", &header)?;
+    sheet.write_string_with_format(r, 1, "不含税销售额", &header)?;
+    sheet.write_string_with_format(r, 2, "税额", &header)?;
+    sheet.write_string_with_format(r, 3, "备注", &header)?;
+    r += 1;
+    for (name, amount, tax) in &s.rate_groups {
+        sheet.write_string_with_format(r, 0, name, &cell)?;
+        sheet.write_number_with_format(r, 1, *amount, &money)?;
+        sheet.write_number_with_format(r, 2, *tax, &money)?;
+        r += 1;
+    }
+    sheet.write_string_with_format(r, 0, "合计", &subtotal)?;
+    sheet.write_number_with_format(r, 1, s.total_amount, &subtotal)?;
+    sheet.write_number_with_format(r, 2, s.total_tax, &subtotal)?;
+    r += 2;
+
+    sheet.write_string_with_format(r, 0, "本期应纳税额（税额合计，小规模无进项抵扣）", &header)?;
+    sheet.write_number_with_format(r, 1, s.total_tax, &subtotal)?;
+    r += 2;
+
+    sheet.write_string_with_format(r, 0, "附加税费参考（法定口径）", &header)?;
+    sheet.write_string_with_format(r, 1, "计税依据", &header)?;
+    sheet.write_string_with_format(r, 2, "费率", &header)?;
+    sheet.write_string_with_format(r, 3, "应纳参考", &header)?;
+    r += 1;
+    for (levy, rate) in [("城市维护建设税", 0.07f64), ("教育费附加", 0.03), ("地方教育附加", 0.02)] {
+        sheet.write_string_with_format(r, 0, levy, &cell)?;
+        sheet.write_number_with_format(r, 1, s.total_tax, &money)?;
+        sheet.write_string_with_format(r, 2, format!("{:.0}%", rate * 100.0), &cell)?;
+        sheet.write_number_with_format(r, 3, s.total_tax * rate, &money)?;
+        r += 1;
+    }
+    sheet.merge_range(
+        r,
+        0,
+        r,
+        3,
+        "附加费率按法定口径列示；属地差异及“六税两费”减免等优惠政策，请按当地申报口径核对。",
+        &note,
+    )?;
+    r += 2;
+
+    let diff = s.total_tax - s.gl_2221_net_credit;
+    if diff.abs() > 0.01 {
+        sheet.merge_range(
+            r,
+            0,
+            r,
+            3,
+            &format!(
+                "勾稽提示：销项税额合计 {:.2} 与应交税费2221当季净贷方 {:.2} 差异 {:.2}，请核对红字冲减或手工凭证",
+                s.total_tax, s.gl_2221_net_credit, diff
+            ),
+            &note,
+        )?;
+    } else {
+        sheet.merge_range(
+            r,
+            0,
+            r,
+            3,
+            &format!("勾稽核对：应交税费2221当季净贷方 {:.2}，与销项税额合计一致", s.gl_2221_net_credit),
+            &note,
+        )?;
+    }
+    r += 1;
+    if s.open_months.is_empty() {
+        sheet.merge_range(r, 0, r, 3, "季度内月份均已正式月结", &note)?;
+    } else {
+        sheet.merge_range(
+            r,
+            0,
+            r,
+            3,
+            &format!("提示：{} 尚未正式月结，数据可能仍有变动", s.open_months.join("、")),
+            &note,
+        )?;
+    }
+
+    // ---------- Sheet2 销项明细 ----------
+    let detail = workbook.add_worksheet();
+    detail.set_name("销项明细")?;
+    let headers = [
+        "归属月",
+        "发票代码",
+        "发票号码",
+        "开票日期",
+        "购买方",
+        "购买方税号",
+        "不含税金额",
+        "税额",
+        "价税合计",
+        "已核销",
+        "未核销",
+    ];
+    for (c, h) in headers.iter().enumerate() {
+        detail.write_string_with_format(0, c as u16, *h, &header)?;
+    }
+    for (i, row) in rows.iter().enumerate() {
+        let r = (i + 1) as u32;
+        detail.write_string_with_format(r, 0, &row.belong_month, &cell)?;
+        detail.write_string_with_format(r, 1, row.invoice_code.as_deref().unwrap_or("-"), &cell)?;
+        detail.write_string_with_format(r, 2, row.invoice_number.as_deref().unwrap_or("-"), &cell)?;
+        detail.write_string_with_format(r, 3, row.issue_date.as_deref().unwrap_or("-"), &cell)?;
+        detail.write_string_with_format(r, 4, row.buyer_name.as_deref().unwrap_or("-"), &cell)?;
+        detail.write_string_with_format(r, 5, row.buyer_tax_id.as_deref().unwrap_or("-"), &cell)?;
+        detail.write_number_with_format(r, 6, row.amount, &money)?;
+        detail.write_number_with_format(r, 7, row.tax_amount, &money)?;
+        detail.write_number_with_format(r, 8, row.total_amount, &money)?;
+        detail.write_number_with_format(r, 9, row.settled, &money)?;
+        detail.write_number_with_format(r, 10, (row.total_amount - row.settled).max(0.0), &money)?;
+    }
+    let last = rows.len() as u32 + 1;
+    detail.write_string_with_format(last, 0, "合计", &subtotal)?;
+    detail.write_number_with_format(last, 6, s.total_amount, &subtotal)?;
+    detail.write_number_with_format(last, 7, s.total_tax, &subtotal)?;
+    detail.write_number_with_format(last, 8, s.total_amount + s.total_tax, &subtotal)?;
+
     workbook.save(path)?;
     Ok(())
 }

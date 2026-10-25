@@ -4287,6 +4287,26 @@ pub fn export_output_tax_ledger(
     Ok(path)
 }
 
+/// 增值税季度申报辅助表（第十六阶段，小规模纳税人）：year + quarter → 双 sheet xlsx。
+#[tauri::command]
+pub fn export_vat_quarterly_report(
+    year: i64,
+    quarter: u32,
+    path: String,
+    state: tauri::State<'_, Mutex<Connection>>,
+) -> Result<String, AppError> {
+    let conn = state.lock().map_err(|e| AppError::General(e.to_string()))?;
+    excel::export_vat_quarterly_report(&conn, year, quarter, &path)?;
+    db::log_operation(
+        &conn,
+        "export_vat_quarterly_report",
+        &format!("导出{year}年第{quarter}季度增值税申报辅助表到{path}"),
+        "system",
+        None,
+    )?;
+    Ok(path)
+}
+
 // ==================== Reminders（第十一阶段 提醒触达） ====================
 
 #[tauri::command]
