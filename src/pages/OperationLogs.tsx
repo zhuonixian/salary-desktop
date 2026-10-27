@@ -142,6 +142,55 @@ const operationTypeLabels: Record<string, string> = {
   // 第九阶段工资条邮件（notification.rs 落 operation_logs：发起批量/重发；preview 只读不落日志）
   payslip_email_batch_send: '发起工资条邮件批量发送',
   payslip_email_resend: '重发工资条邮件',
+  // 安全事件（security_commands.rs：解锁/锁屏/敏感数据/改密/找回/换绑，操作人固定 security）
+  unlock_success: '密码解锁成功',
+  unlock_failed: '密码解锁失败',
+  lock: '手动锁屏',
+  reveal_sensitive: '敏感数据解锁',
+  reveal_sensitive_failed: '敏感数据解锁失败',
+  change_password: '修改启动密码',
+  change_password_failed: '修改启动密码失败',
+  reset_by_recovery: '恢复码重置密码',
+  reset_by_recovery_failed: '恢复码重置密码失败',
+  reset_by_question: '安全问题重置密码',
+  reset_by_question_failed: '安全问题重置密码失败',
+  security_recovery_code_rotated: '换绑恢复码',
+  security_recovery_code_rotated_failed: '换绑恢复码失败',
+  security_question_updated: '修改安全问题',
+  security_question_updated_failed: '修改安全问题失败',
+  // 自动备份与数据安全（data_safety.rs / commands.rs）
+  auto_backup_created: '自动备份',
+  auto_backup_pruned: '自动备份滚动清理',
+  update_auto_backup_settings: '更新自动备份设置',
+  // 上手引导与企业信息（onboarding.rs / commands.rs）
+  seed_demo_data: '载入示例账套',
+  clear_demo_data: '清除示例账套',
+  save_company_info: '保存企业信息',
+  // 征期日历与本地通知（commands.rs）
+  save_tax_calendar_settings: '更新征期提醒设置',
+  complete_tax_filing: '标记征期申报完成',
+  undo_tax_filing: '撤销征期完成标记',
+  save_local_notify_settings: '更新本地通知设置',
+  // 固定资产（assets.rs：登记/折旧/处置/台账导出）
+  save_fixed_asset: '登记固定资产',
+  run_asset_depreciation: '计提折旧',
+  dispose_fixed_asset: '固定资产处置',
+  export_fixed_asset_ledger: '导出固定资产台账',
+  // 手工凭证（commands.rs：新增/作废）
+  create_manual_voucher: '新增手工凭证',
+  void_manual_voucher: '作废手工凭证',
+  // 应收核销与销项/账龄导出（ar.rs / commands.rs）
+  create_ar_allocation: '应收核销',
+  cancel_ar_allocation: '取消应收核销',
+  export_ar_aging_report: '导出应收账龄表',
+  export_output_tax_ledger: '导出销项台账',
+  // OCR 批次确认（ocr.rs）
+  ocr_confirm: '确认 OCR 识别批次',
+  // 申报模板与增值税申报辅助（commands.rs，第十/十六阶段）
+  export_eit_payer_template: '导出人员信息采集模板',
+  export_eit_salary_template: '导出工资薪金申报模板',
+  export_social_base_declaration: '导出社保基数申报表',
+  export_vat_quarterly_report: '导出增值税申报辅助表',
 };
 
 const getOperationLabel = (value?: string) =>

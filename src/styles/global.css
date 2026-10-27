@@ -102,6 +102,11 @@ html, body, #root {
   margin-left: 220px;
   width: calc(100% - 220px);
   min-width: 0;
+  /* 视口高的 flex 列：Header 固定高度，Content 收敛为唯一滚动容器。
+     #root 为 overflow:hidden，若不约束高度，超高内容会被整体裁掉且无处可滚。 */
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
   transition: margin-left 0.2s, width 0.2s;
 }
 
@@ -117,8 +122,6 @@ html, body, #root {
   align-items: center;
   justify-content: space-between;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
-  position: sticky;
-  top: 0;
   z-index: 9;
   height: 64px;
   min-width: 0;
@@ -138,7 +141,10 @@ html, body, #root {
 
 .app-main {
   margin: clamp(12px, 2vw, 24px);
-  min-height: calc(100vh - 64px - clamp(24px, 4vw, 48px));
+  /* 父级 flex 列约束下作为唯一滚动容器；antd .ant-layout-content 的
+     flex:auto + min-height:0 保证可收缩，这里补 overflow 即可滚动 */
+  flex: 1;
+  min-height: 0;
   overflow: auto;
   min-width: 0;
 }
