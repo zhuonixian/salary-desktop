@@ -21,7 +21,7 @@ import {
   message,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { DeleteOutlined, EditOutlined, PlusOutlined, QuestionCircleOutlined, ReloadOutlined } from '@ant-design/icons';
+import { DeleteOutlined, EditOutlined, PlusOutlined, PrinterOutlined, QuestionCircleOutlined, ReloadOutlined } from '@ant-design/icons';
 import dayjs, { type Dayjs } from 'dayjs';
 import {
   createManualVoucher,
@@ -40,6 +40,7 @@ import type {
 import { MANUAL_VOUCHER_KIND_OPTIONS, VOUCHER_SOURCE_LABEL } from '@/types';
 import { SensitiveText } from '@/components/SensitiveText';
 import { SensitiveStatistic } from '@/components/SensitiveStatistic';
+import VoucherPrintModal from '@/components/VoucherPrintModal';
 import PageTour from '@/components/PageTour';
 import { tourTarget } from '@/components/tourTarget';
 import { useBusinessMonth } from '@/contexts/BusinessMonthContext';
@@ -95,6 +96,10 @@ const Vouchers: React.FC = () => {
   const [vouchers, setVouchers] = useState<Voucher[]>([]);
   const [loading, setLoading] = useState(false);
   const [voidingId, setVoidingId] = useState<number | null>(null);
+
+  // 凭证打印预览 Modal（中式记账凭证版式）
+  const [printOpen, setPrintOpen] = useState(false);
+  const [printVouchers, setPrintVouchers] = useState<Voucher[]>([]);
 
   // 手工凭证 Modal
   const [manualOpen, setManualOpen] = useState(false);
@@ -249,6 +254,12 @@ const Vouchers: React.FC = () => {
     }
   };
 
+  /** 打开凭证打印预览（支持传入多张连续打印，每张独立分页） */
+  const openPrintModal = (items: Voucher[]) => {
+    setPrintVouchers(items);
+    setPrintOpen(true);
+  };
+
   const handleVoid = async (record: Voucher) => {
     setVoidingId(record.id);
     try {
@@ -305,25 +316,35 @@ const Vouchers: React.FC = () => {
     {
       title: '操作',
       key: 'op',
-      width: 90,
+      width: 150,
       fixed: 'right' as const,
-      render: (_, record: Voucher) =>
-        record.source_type === 'manual_voucher' && record.status === 'active' ? (
-          <Popconfirm
-            title="确认作废该凭证？"
-            description="作废后留痕不可恢复；归属月份须处于开放状态"
-            okText="作废"
-            cancelText="取消"
-            okButtonProps={{ danger: true }}
-            onConfirm={() => void handleVoid(record)}
+      render: (_, record: Voucher) => (
+        <Space size={0}>
+          {/* 打印：打开中式凭证打印预览（金额门禁在 Modal 内控制） */}
+          <Button
+            size="small"
+            type="link"
+            icon={<PrinterOutlined />}
+            onClick={() => openPrintModal([record])}
           >
-            <Button size="small" type="link" danger loading={voidingId === record.id}>
-              作废
-            </Button>
-          </Popconfirm>
-        ) : (
-          <span style={{ color: '#8c8c8c' }}>—</span>
-        ),
+            打印
+          </Button>
+          {record.source_type === 'manual_voucher' && record.status === 'active' ? (
+            <Popconfirm
+              title="确认作废该凭证？"
+              description="作废后留痕不可恢复；归属月份须处于开放状态"
+              okText="作废"
+              cancelText="取消"
+              okButtonProps={{ danger: true }}
+              onConfirm={() => void handleVoid(record)}
+            >
+              <Button size="small" type="link" danger loading={voidingId === record.id}>
+                作废
+              </Button>
+            </Popconfirm>
+          ) : null}
+        </Space>
+      ),
     },
   ];
 
@@ -560,7 +581,7 @@ const Vouchers: React.FC = () => {
             columns={columns}
             dataSource={vouchers}
             pagination={{ pageSize: 10 }}
-            scroll={{ x: 990 }}
+            scroll={{ x: 1050 }}
             expandable={{
               expandedRowRender: (record: Voucher) => (
                 <Table<VoucherLine>
@@ -654,6 +675,13 @@ const Vouchers: React.FC = () => {
           )}
         </div>
       </Modal>
+
+      {/* 凭证打印预览 Modal：多张凭证连续打印时每张独立分页 */}
+      <VoucherPrintModal
+        open={printOpen}
+        vouchers={printVouchers}
+        onClose={() => setPrintOpen(false)}
+      />
     </div>
   );
 };

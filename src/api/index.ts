@@ -1076,6 +1076,48 @@ const mockFixedAssetLedger: FixedAssetLedgerRow[] = [
   },
 ];
 
+// ==================== 记账凭证预览数据（凭证打印演示） ====================
+// 两张 active 演示凭证（多行分录、借贷平衡），归属当前月，浏览器预览与 E2E 均可直接看到；
+// 字段结构严格对齐前端 Voucher/VoucherLine 类型（src/types/index.ts），凭证字号形如 记-YYYYMM-001。
+const mockVoucherMonth = mockMonthDate(0, 1).slice(0, 7);
+const mockVoucherYm = mockVoucherMonth.replace('-', '');
+
+const mockVouchers: Voucher[] = [
+  {
+    id: 9001,
+    voucher_no: `记-${mockVoucherYm}-001`,
+    voucher_date: mockMonthDate(0, 5),
+    belong_month: mockVoucherMonth,
+    source_type: 'salary_accrual',
+    source_id: 9001,
+    total_amount: 84220,
+    status: 'active',
+    remark: '月末工资计提（演示数据）',
+    lines: [
+      { id: 90011, account_code: '6601.01', debit_amount: 65800, credit_amount: 0, summary: '计提本月工资费用', line_order: 1 },
+      { id: 90012, account_code: '6602.01', debit_amount: 18420, credit_amount: 0, summary: '计提本月社保公积金（单位部分）', line_order: 2 },
+      { id: 90013, account_code: '2211.01', debit_amount: 0, credit_amount: 65800, summary: '应付职工薪酬—工资', line_order: 3 },
+      { id: 90014, account_code: '2211.02', debit_amount: 0, credit_amount: 18420, summary: '应付职工薪酬—社保公积金', line_order: 4 },
+    ],
+  },
+  {
+    id: 9002,
+    voucher_no: `记-${mockVoucherYm}-002`,
+    voucher_date: mockMonthDate(0, 8),
+    belong_month: mockVoucherMonth,
+    source_type: 'manual_voucher',
+    source_id: 9002,
+    total_amount: 4055.14,
+    status: 'active',
+    remark: '购办公用品银行转账付款（演示数据）',
+    lines: [
+      { id: 90021, account_code: '6602.02', debit_amount: 3588.67, credit_amount: 0, summary: '购办公用品', line_order: 1 },
+      { id: 90022, account_code: '2221.01', debit_amount: 466.47, credit_amount: 0, summary: '办公用品进项税额', line_order: 2 },
+      { id: 90023, account_code: '1002.01', debit_amount: 0, credit_amount: 4055.14, summary: '银行转账支付办公用品款', line_order: 3 },
+    ],
+  },
+];
+
 const mockNextInstrumentId = (): number =>
   mockInstruments.reduce((max, i) => Math.max(max, i.id), 0) + 1;
 
@@ -2338,8 +2380,16 @@ const mockTauriResponse = (command: string, args?: Record<string, unknown>): unk
       };
     case 'export_month_close_package':
       return { success: true, output_dir: String(args?.dir ?? ''), files: [] };
-    case 'get_vouchers':
-      return [];
+    case 'get_vouchers': {
+      // 预览模式演示凭证：按页面查询条件（月份/来源/状态）过滤，口径与后端一致
+      const query = (args?.query ?? {}) as VoucherQuery;
+      return mockVouchers.filter(
+        (v) =>
+          (!query.month || v.belong_month === query.month) &&
+          (!query.source_type || v.source_type === query.source_type) &&
+          (!query.status || v.status === query.status),
+      );
+    }
     case 'preview_bank_transaction_import':
       return {
         fund_account_id: Number((args?.fundAccountId as number | undefined) ?? 0),

@@ -9,7 +9,8 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "tauri": "tauri",
-    "start:dev": "bash scripts/start-dev.sh"
+    "start:dev": "bash scripts/start-dev.sh",
+    "e2e:web": "node scripts/web_e2e.mjs"
   },
   "dependencies": {
     "@ant-design/icons": "^6.2.2",

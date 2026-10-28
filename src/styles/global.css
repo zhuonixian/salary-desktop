@@ -349,3 +349,145 @@ html, body, #root {
     page-break-after: auto;
   }
 }
+
+/* ==================== 记账凭证打印（中式记账凭证版式） ====================
+   与上方工资条打印同一模式：屏显为纸张卡片预览，打印时仅凭证打印区可见、
+   每张凭证独立分页。选择器与工资条（payslip-*）完全不重叠，互不影响。 */
+
+/* 屏显预览：弹窗内滚动 + 纸张卡片 */
+.voucher-print-area {
+  max-height: 60vh;
+  overflow-y: auto;
+  background: #f5f5f5;
+  padding: 12px;
+}
+
+.voucher-print-sheet {
+  background: #fff;
+  border: 1px solid #333;
+  padding: 16px 20px 12px;
+  margin-bottom: 16px;
+}
+
+.voucher-print-title {
+  display: block;
+  text-align: center;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 8px;
+}
+
+/* 已作废凭证标注（红字，随凭证一起打印以防误用） */
+.voucher-print-void {
+  color: #cf1322;
+  font-size: 13px;
+  font-weight: 400;
+  letter-spacing: 0;
+  margin-left: 4px;
+}
+
+.voucher-print-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin: 8px 0;
+  font-size: 13px;
+}
+
+.voucher-print-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.voucher-print-table th,
+.voucher-print-table td {
+  border: 1px solid #333;
+  padding: 4px 8px;
+}
+
+.voucher-print-table th {
+  background: #fafafa;
+  font-weight: 600;
+}
+
+/* 金额列右对齐 + 等宽数字 */
+.voucher-print-table .voucher-print-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.voucher-print-summary {
+  width: 34%;
+}
+
+.voucher-print-account {
+  width: 30%;
+}
+
+/* 补位空行高度 */
+.voucher-print-pad-row td {
+  height: 26px;
+}
+
+.voucher-print-total-row td {
+  font-weight: 700;
+}
+
+/* 借贷平衡标注（合计行内，仅借贷相等时出现） */
+.voucher-print-balanced {
+  color: #389e0d;
+  font-size: 12px;
+  font-weight: 400;
+  margin-left: 4px;
+}
+
+/* 借贷不平衡警示 */
+.voucher-print-unbalanced {
+  color: #cf1322;
+  font-size: 12px;
+  font-weight: 400;
+  margin-left: 4px;
+}
+
+/* 附件张数与制单署名区 */
+.voucher-print-foot {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 10px;
+  font-size: 13px;
+}
+
+/* 打印时仅显示凭证打印区，每张凭证分页（同工资条打印模式） */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  .voucher-print-area,
+  .voucher-print-area * {
+    visibility: visible;
+  }
+  .voucher-print-area {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    max-height: none;
+    overflow: visible;
+    background: #fff;
+    padding: 0;
+  }
+  .voucher-print-sheet {
+    page-break-after: always;
+    margin-bottom: 0;
+  }
+  /* 最后一张凭证不强制分页，避免末尾多出空白页 */
+  .voucher-print-sheet:last-child {
+    page-break-after: auto;
+  }
+  /* 打印时去掉表头底色，黑白输出更清晰 */
+  .voucher-print-table th {
+    background: #fff;
+  }
+}

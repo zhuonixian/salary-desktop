@@ -66,6 +66,7 @@ npm run lint                             # ESLint
 - [第十七阶段银行流水导入增强](.claude/memory/stage17-bank-import-mapping.md) — 列识别诊断（BankColumnHint 四态）+ 手工映射全链路（preview/import 同一映射）+ 单列金额兜底 + 别名扩充（贷方发生额/交易时间等）；旧签名 None 委托零破坏；spec 见 `docs/superpowers/specs/2026-10-25-stage17-bank-import-mapping-design.md`、progress 见 `docs/superpowers/plans/2026-10-25-stage17-progress.md`
 - [第十八阶段现金流量表本年累计修复](.claude/memory/stage18-cashflow-ytd.md) — build_cash_flow_statement 七行 comparative 填 YTD（range 同上年同期口径）+ net_increase_ytd + 导出净额口径修正 + 前端列名统一"本年累计"；spec 见 `docs/superpowers/specs/2026-10-25-stage18-cashflow-ytd-design.md`、progress 见 `docs/superpowers/plans/2026-10-25-stage18-progress.md`
 - [第十九阶段组件抽取重构](.claude/memory/stage19-component-extraction.md) — 五大页面纯搬家减脂（1118-1685 行 → 582-1052 行）：对账工作台/余额调节表、资金单据抽屉/表单、票据抽屉/登记、历史归集向导、工资条邮件向导/个税年度汇总，12 组件 + 4 shared；spec 见 `docs/superpowers/specs/2026-10-25-stage19-component-extraction-design.md`、progress 见 `docs/superpowers/plans/2026-10-25-stage19-progress.md`
+- [第二十阶段凭证打印与 Web E2E 基建](.claude/memory/stage20-voucher-print-web-e2e.md) — 行级中式凭证打印（VoucherPrintModal：打印门禁/补空行/借贷平衡/每张分页）+ 首个 Web E2E 运行器（scripts/web_e2e.mjs：vite + 无头 Chrome CDP 三场景，npm run e2e:web；spawn 须净化 DISPLAY/DBUS 环境变量）；spec 见 `docs/superpowers/specs/2026-10-25-stage20-voucher-print-web-e2e-design.md`、progress 见 `docs/superpowers/plans/2026-10-25-stage20-progress.md`
 - [v0.10.0 发版验收清单](docs/superpowers/plans/2026-10-13-v0.10-release-acceptance.md) — 阶段 7-11 Windows/macOS 手工验收汇编（含 stage12/13 两节），打 tag 前按清单内 A/B/C 分级执行；发版准备两项（版本 bump、全绿验证）已于 e98ef95 完成
 
 ## 第三阶段开发
